@@ -1,4 +1,6 @@
+.git/
 __pycache__/
 *.py[cod]
-.DS_Store
 results/
+.DS_Store
+

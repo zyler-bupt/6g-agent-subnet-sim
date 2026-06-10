@@ -1,0 +1,132 @@
+services:
+  controller:
+    build: .
+    command: ["python", "-m", "services.controller_service"]
+    ports:
+      - "18000:8000"
+    environment:
+      CONTROLLER_ID: subnet-controller
+      GATEWAY_URLS: '{"gw-ue":"http://gw-ue:8000","gw-mec":"http://gw-mec:8000","gw-cloud":"http://gw-cloud:8000"}'
+    depends_on:
+      - gw-ue
+      - gw-mec
+      - gw-cloud
+
+  gw-ue:
+    build: .
+    command: ["python", "-m", "services.gateway_service"]
+    ports:
+      - "18001:8000"
+    environment:
+      GATEWAY_ID: gw-ue
+      NODE: ue-drone-node
+      GATEWAY_URLS: '{"gw-ue":"http://gw-ue:8000","gw-mec":"http://gw-mec:8000","gw-cloud":"http://gw-cloud:8000"}'
+      LOCAL_AGENTS: '{"agent-drone-capture":"http://agent-drone-capture:8000","agent-terminal-feedback":"http://agent-terminal-feedback:8000","pagent-ue-link":"http://pagent-ue-link:8000"}'
+    depends_on:
+      - agent-drone-capture
+      - agent-terminal-feedback
+      - pagent-ue-link
+
+  gw-mec:
+    build: .
+    command: ["python", "-m", "services.gateway_service"]
+    ports:
+      - "18002:8000"
+    environment:
+      GATEWAY_ID: gw-mec
+      NODE: mec-edge-node
+      GATEWAY_URLS: '{"gw-ue":"http://gw-ue:8000","gw-mec":"http://gw-mec:8000","gw-cloud":"http://gw-cloud:8000"}'
+      LOCAL_AGENTS: '{"agent-edge-recognition":"http://agent-edge-recognition:8000","nagent-mec-cloud-path":"http://nagent-mec-cloud-path:8000"}'
+    depends_on:
+      - agent-edge-recognition
+      - nagent-mec-cloud-path
+
+  gw-cloud:
+    build: .
+    command: ["python", "-m", "services.gateway_service"]
+    ports:
+      - "18003:8000"
+    environment:
+      GATEWAY_ID: gw-cloud
+      NODE: cloud-node
+      GATEWAY_URLS: '{"gw-ue":"http://gw-ue:8000","gw-mec":"http://gw-mec:8000","gw-cloud":"http://gw-cloud:8000"}'
+      LOCAL_AGENTS: '{"agent-cloud-planning":"http://agent-cloud-planning:8000"}'
+    depends_on:
+      - agent-cloud-planning
+
+  agent-drone-capture:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: agent-drone-capture
+      AGENT_NAME: 无人机视频采集Agent
+      AGENT_ROLE: business
+      LAYER_TYPE: application
+      NODE: ue-drone-node
+      GATEWAY_ID: gw-ue
+      CAPABILITIES: video_capture,scene_upload
+
+  agent-edge-recognition:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: agent-edge-recognition
+      AGENT_NAME: 边缘人员识别Agent
+      AGENT_ROLE: business
+      LAYER_TYPE: application
+      NODE: mec-edge-node
+      GATEWAY_ID: gw-mec
+      CAPABILITIES: person_detection,hazard_recognition
+
+  agent-cloud-planning:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: agent-cloud-planning
+      AGENT_NAME: 云端路径规划Agent
+      AGENT_ROLE: business
+      LAYER_TYPE: application
+      NODE: cloud-node
+      GATEWAY_ID: gw-cloud
+      CAPABILITIES: route_planning,global_decision
+
+  agent-terminal-feedback:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: agent-terminal-feedback
+      AGENT_NAME: 终端反馈Agent
+      AGENT_ROLE: business
+      LAYER_TYPE: application
+      NODE: ue-drone-node
+      GATEWAY_ID: gw-ue
+      CAPABILITIES: decision_feedback,field_guidance
+
+  pagent-ue-link:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: pagent-ue-link
+      AGENT_NAME: 无人机接入链路pAgent
+      AGENT_ROLE: support
+      LAYER_TYPE: physical
+      NODE: ue-drone-node
+      GATEWAY_ID: gw-ue
+      CAPABILITIES: wireless_link_monitor,channel_availability_monitor
+      STATE_ITEMS: link_quality,channel_available,signal_score
+      LINK_ID: wireless-link-drone-gnb
+
+  nagent-mec-cloud-path:
+    build: .
+    command: ["python", "-m", "services.agent_service"]
+    environment:
+      AGENT_ID: nagent-mec-cloud-path
+      AGENT_NAME: MEC-Cloud路径nAgent
+      AGENT_ROLE: support
+      LAYER_TYPE: network
+      NODE: mec-edge-node
+      GATEWAY_ID: gw-mec
+      CAPABILITIES: path_state_monitor,bandwidth_monitor,congestion_monitor
+      STATE_ITEMS: path_state,bandwidth_mbps,congestion_level
+      PATH_ID: path-ue-mec-cloud
+
