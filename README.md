@@ -83,6 +83,7 @@ python3 scripts/run_experiment.py --scenario all
 - `main.py`：一键运行入口。
 - `services/`：Docker HTTP 版 Controller、Gateway 和 Agent 服务。
 - `semantic_controller/`：SANet Semantic Task Plan 第一阶段实现，独立于原任务通信子网仿真。
+  - `recognizer.py` 与 `planner.py` 已抽象为可替换实现，后续可接入 Qwen 目标认知和受限 OpenManus 任务拆分。
 - `semantic_demo.py`：语义控制器端到端 demo。
 - `tests/`：标准库 `unittest` 测试。
 - `scripts/`：Docker 实验运行和结果导出脚本。

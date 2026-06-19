@@ -183,7 +183,34 @@ class SemanticControllerTests(unittest.TestCase):
         self.assertIsNone(result.plan)
         self.assertEqual(result.evaluation.status, GoalStatus.NEED_CLARIFICATION)
 
+    def test_controller_accepts_injected_goal_recognizer_and_planner(self) -> None:
+        class FixedRecognizer:
+            def recognize(self, context: SemanticContext) -> GoalSpec:
+                return GoalSpec(
+                    goal_id=GoalID.SAVE_NETWORK_BANDWIDTH,
+                    goal_description="降低当前会议带宽占用",
+                    confidence=0.99,
+                    required_information=["future_app_rate", "future_network_bandwidth"],
+                )
+
+        class RecordingPlanner:
+            def __init__(self) -> None:
+                self.seen_goal_id: GoalID | None = None
+
+            def build_plan(self, goal: GoalSpec, *, plan_id: str | None = None) -> PlanSpec:
+                self.seen_goal_id = goal.goal_id
+                return build_plan(goal, plan_id=plan_id)
+
+        planner = RecordingPlanner()
+        controller = SemanticController(
+            goal_recognizer=FixedRecognizer(),
+            task_planner=planner,
+        )
+        result = controller.handle_user_input("网络比较紧张，希望节省带宽")
+        self.assertEqual(result.goal.goal_id, GoalID.SAVE_NETWORK_BANDWIDTH)
+        self.assertEqual(planner.seen_goal_id, GoalID.SAVE_NETWORK_BANDWIDTH)
+        self.assertIsNotNone(result.plan)
+
 
 if __name__ == "__main__":
     unittest.main()
-

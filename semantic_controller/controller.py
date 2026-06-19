@@ -4,9 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from semantic_controller.context import build_semantic_context
 from semantic_controller.evaluator import evaluate_feasibility, evaluate_goal, select_video_policy
+from semantic_controller.interfaces import GoalRecognizer, TaskPlanner
 from semantic_controller.predictors import ApplicationPredictor, NetworkPredictor
-from semantic_controller.recognizer import recognize_goal
-from semantic_controller.planner import build_plan
+from semantic_controller.recognizer import RuleBasedGoalRecognizer
+from semantic_controller.planner import ConstrainedRulePlanner
 from semantic_controller.schemas import (
     ApplicationState,
     GoalEvaluation,
@@ -24,9 +25,13 @@ class SemanticController:
         self,
         application_predictor: ApplicationPredictor | None = None,
         network_predictor: NetworkPredictor | None = None,
+        goal_recognizer: GoalRecognizer | None = None,
+        task_planner: TaskPlanner | None = None,
     ) -> None:
         self.application_predictor = application_predictor or ApplicationPredictor()
         self.network_predictor = network_predictor or NetworkPredictor()
+        self.goal_recognizer = goal_recognizer or RuleBasedGoalRecognizer()
+        self.task_planner = task_planner or ConstrainedRulePlanner()
 
     def handle_user_input(
         self,
@@ -50,7 +55,7 @@ class SemanticController:
         )
         trigger = detect_semantic_trigger(raw_user_input, context.application)
         if not trigger.triggered:
-            goal = recognize_goal(context)
+            goal = self.goal_recognizer.recognize(context)
             evaluation = GoalEvaluation(
                 goal_id=GoalID.UNKNOWN,
                 status=GoalStatus.NEED_CLARIFICATION,
@@ -66,8 +71,8 @@ class SemanticController:
                 evaluation=evaluation,
             )
 
-        goal = recognize_goal(context)
-        plan = build_plan(goal, plan_id=f"plan-{context.event_id}")
+        goal = self.goal_recognizer.recognize(context)
+        plan = self.task_planner.build_plan(goal, plan_id=f"plan-{context.event_id}")
         if goal.need_clarification:
             evaluation = GoalEvaluation(
                 goal_id=goal.goal_id,
@@ -137,4 +142,3 @@ def _default_network_history(context: NetworkState | object) -> list[float]:
         max(0.1, latest * 0.97),
         latest,
     ]
-
