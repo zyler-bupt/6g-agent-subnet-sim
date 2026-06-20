@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.vscode/
+
+# Python cache / virtual env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Training / experiment outputs
+runs/
+logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Local data artifacts
+data/train_band_*/

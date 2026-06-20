@@ -16,10 +16,32 @@ SANet 语义控制器第一阶段 demo：
 python3 semantic_demo.py
 ```
 
+语义控制器 HTTP 服务：
+
+```bash
+python3 -m services.semantic_controller_service
+```
+
+默认使用本地 Hashing Embedding、规则识别和规则规划。连接 Qwen 兼容服务时配置：
+
+```bash
+export EMBEDDING_BASE_URL=http://localhost:8001/v1
+export EMBEDDING_MODEL=Qwen3-Embedding-0.6B
+export QWEN_BASE_URL=http://localhost:8002/v1
+export QWEN_MODEL=Qwen2.5-7B-Instruct
+export PLANNER_MODE=openmanus
+```
+
 语义控制器单元测试：
 
 ```bash
 python3 -m unittest discover -v
+```
+
+语义控制器冒烟评测：
+
+```bash
+python3 -m evaluation.evaluate_semantic
 ```
 
 Docker 多节点 HTTP 实验：
@@ -35,6 +57,8 @@ python3 scripts/export_results.py
 ## 当前已实现
 
 - SANet 语义控制器第一阶段：用户输入触发、上下文构建、GoalSpec、PlanSpec、aAgent/nAgent mock 预测、跨层安全余量评价、视频策略建议和目标评价。
+- 阶段四双 Agent 语义链路：上下文 Embedding、目标原型 Top-3 检索、Qwen 兼容 GoalSpec 输出、受限规划适配器、严格 DAG 校验、规则回退和 HTTP API。
+- SANet 官方源码快照及双 Agent 基线：保留 aAgent 应用需求和 nAgent 网络带宽任务，暂不接入 pAgent/CSI。
 - 正常建网：输入灾害现场协同任务意图，确认业务 Agent，绑定 pAgent/nAgent，生成任务通信图并下发网关规则。
 - 白名单隔离：合法业务流可转发，未授权业务流会被节点网关拦截。
 - 承载冲突调整：nAgent 上报路径拥塞后，子网控制器生成 `rule_delta` 并局部更新相关网关。
@@ -83,7 +107,12 @@ python3 scripts/run_experiment.py --scenario all
 - `main.py`：一键运行入口。
 - `services/`：Docker HTTP 版 Controller、Gateway 和 Agent 服务。
 - `semantic_controller/`：SANet Semantic Task Plan 第一阶段实现，独立于原任务通信子网仿真。
-  - `recognizer.py` 与 `planner.py` 已抽象为可替换实现，后续可接入 Qwen 目标认知和受限 OpenManus 任务拆分。
+  - `embedding.py`：语义编码、目标原型库和 Top-K 检索。
+  - `qwen.py`：OpenAI 兼容 Qwen 客户端、GoalSpec 校验和回退。
+  - `planner.py`：规则规划与受限 OpenManus 风格规划适配器。
+- `services/semantic_controller_service.py`：语义控制器 HTTP API。
+- `third_party/SANet/`：SANet 作者仓库源码快照，不在其中进行本项目修改。
+- `sanet_dual/`：排除物理层后的 aAgent/nAgent 联合训练与推理入口。
 - `semantic_demo.py`：语义控制器端到端 demo。
 - `tests/`：标准库 `unittest` 测试。
 - `scripts/`：Docker 实验运行和结果导出脚本。
