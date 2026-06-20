@@ -181,6 +181,8 @@ class SemanticControllerTests(unittest.TestCase):
         result = controller.handle_user_input("我昨天看了一篇关于视频清晰度的论文")
         self.assertFalse(result.trigger.triggered)
         self.assertIsNone(result.plan)
+        self.assertIsNone(result.semantic_embedding)
+        self.assertEqual(result.goal_candidates, [])
         self.assertEqual(result.evaluation.status, GoalStatus.NEED_CLARIFICATION)
 
     def test_controller_accepts_injected_goal_recognizer_and_planner(self) -> None:

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
+from semantic_controller.embedding import GoalPrototypeRetriever
 from semantic_controller.ontology import GOAL_KEYWORDS
-from semantic_controller.schemas import GoalID, GoalSpec, SemanticContext
+from semantic_controller.schemas import (
+    GoalCandidate,
+    GoalID,
+    GoalSpec,
+    SemanticContext,
+    SemanticEmbedding,
+)
 
 
 class RuleBasedGoalRecognizer:
@@ -33,6 +42,22 @@ class RuleBasedGoalRecognizer:
             required_information=["future_app_rate", "future_network_bandwidth"],
             need_clarification=False,
         )
+
+
+@dataclass
+class RetrievalAugmentedRuleRecognizer:
+    retriever: GoalPrototypeRetriever = field(default_factory=GoalPrototypeRetriever)
+    rules: RuleBasedGoalRecognizer = field(default_factory=RuleBasedGoalRecognizer)
+
+    def recognize(self, context: SemanticContext) -> GoalSpec:
+        return self.rules.recognize(context)
+
+    def recognize_with_evidence(
+        self,
+        context: SemanticContext,
+    ) -> tuple[GoalSpec, SemanticEmbedding, list[GoalCandidate]]:
+        embedding, candidates = self.retriever.retrieve(context)
+        return self.rules.recognize(context), embedding, candidates
 
 
 def recognize_goal(context: SemanticContext) -> GoalSpec:
