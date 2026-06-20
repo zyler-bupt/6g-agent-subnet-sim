@@ -97,6 +97,13 @@ python3 scripts/run_experiment.py --scenario all
 
 当前 Docker 版属于 `docker-http-simulation`：它包含真实容器进程、HTTP 通信、序列化、端口和网关转发，但仍不是真实 5G/6G 硬件实验。链路质量、拥塞、带宽下降和丢包由网关应用层模型模拟。
 
+SANet官方示例预测结果可与Last-value基线对比：
+
+```bash
+python3 scripts/evaluate_sanet_predictions.py \
+  --prediction-dir results/sanet_official_gpu_10e/predictions
+```
+
 ## 模块结构
 
 - `models.py`：核心数据模型。
