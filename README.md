@@ -104,6 +104,14 @@ python3 scripts/evaluate_sanet_predictions.py \
   --prediction-dir results/sanet_official_gpu_10e/predictions
 ```
 
+生成代表性预测窗口和全量预测散点图：
+
+```bash
+python3 scripts/plot_sanet_predictions.py \
+  --prediction-dir results/sanet_official_gpu_10e/predictions \
+  --output-dir results/sanet_official_gpu_10e/plots
+```
+
 ## 模块结构
 
 - `models.py`：核心数据模型。
