@@ -1,2 +1,11 @@
 numpy>=1.23
+
+# Optional plotting for experiments.run. The experiment still writes CSV if
+# matplotlib is unavailable.
 matplotlib>=3.8
+
+# Semantic controller API and schemas.
+pydantic>=2.0
+
+# Optional SANet baselines.
+torch>=2.0

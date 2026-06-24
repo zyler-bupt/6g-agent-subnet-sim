@@ -4,6 +4,14 @@
 
 ## 运行方式
 
+asyncio / 离散事件主线原型：
+
+```bash
+python3 -m sim.run_topology
+python3 -m sim.run_rescue_task
+python3 -m experiments.run --scenario rescue
+```
+
 轻量机制回归测试：
 
 ```bash
@@ -56,10 +64,15 @@ python3 scripts/export_results.py
 
 ## 当前已实现
 
+- P0-P4 主线仿真原型：基于 asyncio/离散事件的 Controller、Gateway、aAgent/tAgent/nAgent、任务通信子网、mock 指标、跨层预测、风险计算和最小调整实验。
+- 应急救援示范场景：无人机/摄像头采集 -> 边缘识别 -> 云端决策调度 -> 现场反馈，可输出云/边/端拓扑、`G_m` 成员、跨层支撑边和端到端会话列表。
+- 可插拔指标接口：`MetricProvider` 固定接口，当前使用 `MockMetricProvider`，`RealMetricProvider` 作为 P5 真实测量/ns-3/Mininet 适配占位。
+- 三层 Agent 闭环：aAgent 预测业务需求并调整非关键质量，tAgent 预测端到端时延/丢包并调传输参数，nAgent 预测承载/拥塞并给出承载建议。
+- 物理层暂不实装：保留 `PhyAgentStub`、`AgentLayer.PHYSICAL` 和风险项 `lambda_h`，默认 `lambda_h=0`，不参与 P0-P4 主路径映射与调整。
 - SANet 语义控制器第一阶段：用户输入触发、上下文构建、GoalSpec、PlanSpec、aAgent/nAgent mock 预测、跨层安全余量评价、视频策略建议和目标评价。
 - 阶段四双 Agent 语义链路：上下文 Embedding、目标原型 Top-3 检索、Qwen 兼容 GoalSpec 输出、受限规划适配器、严格 DAG 校验、规则回退和 HTTP API。
 - SANet 官方源码快照及双 Agent 基线：保留 aAgent 应用需求和 nAgent 网络带宽任务，暂不接入 pAgent/CSI。
-- 正常建网：输入灾害现场协同任务意图，确认业务 Agent，绑定 pAgent/nAgent，生成任务通信图并下发网关规则。
+- 旧同步原型正常建网：输入灾害现场协同任务意图，确认业务 Agent，生成任务通信图并下发网关规则。
 - 白名单隔离：合法业务流可转发，未授权业务流会被节点网关拦截。
 - 承载冲突调整：nAgent 上报路径拥塞后，子网控制器生成 `rule_delta` 并局部更新相关网关。
 - Docker 多节点实验：Controller、UE/MEC/Cloud 网关、业务 Agent、pAgent、nAgent 以独立容器服务运行，通过 HTTP 完成接入确认、规则下发、业务转发、状态反馈和增量更新。
@@ -67,7 +80,18 @@ python3 scripts/export_results.py
 
 ## 主要指标
 
-运行脚本后会输出：
+asyncio 主线实验会输出：
+
+- 组网成功率/组网时延
+- 端到端会话数量
+- 涉及网关数量
+- 风险调整前后数值
+- QoS 满足情况
+- 变更 Agent/关系/网关数量
+- 控制更新次数
+- 业务中断时长
+
+旧脚本还会输出：
 
 - 建网耗时
 - 下发规则数量
@@ -114,6 +138,13 @@ python3 scripts/plot_sanet_predictions.py \
 
 ## 模块结构
 
+- `src/core/`：主线仿真的任务、Agent、消息、Gateway、TaskSubnet、Session 和实验指标模型。
+- `src/sim/`：asyncio 消息总线、仿真时钟、应急救援拓扑、场景与运行入口。
+- `src/metrics/`：指标提供器接口、mock 指标源和真实指标适配占位。
+- `src/agents/`：aAgent、tAgent、nAgent 和 pAgent stub 的感知-预测-动作闭环。
+- `src/controller/`：任务子网构建、跨层风险计算和弹性最小调整。
+- `sim/`：命令包装入口，使 `python3 -m sim.run_topology` 可直接运行。
+- `experiments/`：批量实验、指标导出和可选绘图。
 - `models.py`：核心数据模型。
 - `agents.py`：业务 Agent、pAgent、nAgent 仿真对象。
 - `gateway.py`：节点网关、白名单校验和规则加载。
