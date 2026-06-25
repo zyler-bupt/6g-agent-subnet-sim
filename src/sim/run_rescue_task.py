@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import asyncio
 
+from src import report
 from src.controller.networking import AgentController
-from src.core.models import to_jsonable
+from src.core.models import AgentLayer
 from src.metrics.mock import MockMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
+
+_LAYER_LABEL = {
+    AgentLayer.APPLICATION: "应用层 aAgent",
+    AgentLayer.TRANSPORT: "传输层 tAgent",
+    AgentLayer.NETWORK: "网络层 nAgent",
+    AgentLayer.PHYSICAL: "物理层 pAgent",
+}
+
+_EDGE_LABEL = {
+    "biz": "业务协作",
+    "uses_trans": "占用传输",
+    "uses_net": "占用网络",
+    "supports_delivery": "承载交付",
+}
 
 
 async def run() -> None:
@@ -15,26 +30,67 @@ async def run() -> None:
     controller = AgentController(build_rescue_topology(provider))
     subnet, metrics = await controller.build_task_subnet(task)
     predictions = await controller.run_agent_loop(subnet, timestamp=1.0)
-    print("task:", task.task_id)
-    print("state:", subnet.state.value)
-    print("G_m members:")
-    print("  app:", sorted(subnet.app_agents))
-    print("  trans:", sorted(subnet.trans_agents))
-    print("  net:", sorted(subnet.net_agents))
-    print("  phy_stub:", sorted(subnet.phy_agents))
-    print("G_m edges:")
-    for edge in sorted(subnet.edges):
-        print(f"  {edge[0]} -[{edge[2]}]-> {edge[1]}")
-    print("sessions:")
-    for session in subnet.sessions:
-        print(
-            f"  {session.session_id}: {session.source}->{session.target} "
-            f"t={session.t_agent_id} n={session.n_agent_id} "
-            f"gw={session.source_gateway}->{session.target_gateway}"
+
+    lines: list[str] = []
+    lines.append(report.banner("应急救援任务 · 跨层组网过程"))
+
+    lines.append(report.section("任务输入（上层下发）"))
+    lines.append(
+        report.kv_block(
+            [
+                ("任务编号", task.task_id),
+                ("目标", task.goal),
+                ("业务 Agent", "  ".join(task.app_agents)),
+                ("业务协作关系", f"{len(task.biz_edges)} 条"),
+            ]
         )
-    print("gateway ack:", [to_jsonable(ack) for ack in subnet.gateway_acks])
-    print("predictions:", [to_jsonable(item) for item in predictions])
-    print("metrics:", to_jsonable(metrics))
+    )
+
+    lines.append(report.section("组网结果 G_m（Controller 映射 + 网关确认）"))
+    lines.append(
+        report.kv_block(
+            [
+                ("状态", f"{subnet.state.value}  " + ("✓ 组网完成" if metrics.networking_success else "✗ 失败")),
+                ("建网耗时", f"{metrics.networking_latency_ms:.2f} ms"),
+                ("应用层成员", "  ".join(sorted(subnet.app_agents))),
+                ("传输层支撑", "  ".join(sorted(subnet.trans_agents))),
+                ("网络层支撑", "  ".join(sorted(subnet.net_agents))),
+                ("物理层(占位)", "  ".join(sorted(subnet.phy_agents)) or "（暂不实装）"),
+            ]
+        )
+    )
+
+    lines.append(report.section("端到端会话（每条业务边映射一条会话）"))
+    session_rows = [
+        [
+            f"会话{i}",
+            f"{s.source} → {s.target}",
+            s.t_agent_id,
+            s.n_agent_id,
+            f"{s.source_gateway} → {s.target_gateway}",
+        ]
+        for i, s in enumerate(subnet.sessions, start=1)
+    ]
+    lines.append(report.table(["#", "业务流", "传输Agent", "网络Agent", "跨网关路径"], session_rows))
+
+    lines.append(report.section("跨层边 E_m"))
+    edge_rows = [
+        [src, _EDGE_LABEL.get(kind, kind), dst] for src, dst, kind in sorted(subnet.edges, key=lambda e: (e[2], e[0]))
+    ]
+    lines.append(report.table(["源", "关系", "目标"], edge_rows))
+
+    lines.append(report.section("各层 Agent 短时预测（horizon=3）"))
+    pred_rows = [
+        [_LAYER_LABEL.get(p.layer, p.layer), p.agent_id, p.metric, "→".join(f"{v:.2f}" for v in p.values)]
+        for p in sorted(predictions, key=lambda x: (x.layer.value, x.agent_id))
+    ]
+    lines.append(report.table(["层", "Agent", "预测指标", "未来 H 步"], pred_rows))
+
+    lines.append(report.section("网关确认"))
+    ack_rows = [[a.gateway_id, "接受 ✓" if a.accepted else "拒绝 ✗", a.reason] for a in subnet.gateway_acks]
+    lines.append(report.table(["网关", "结果", "原因"], ack_rows))
+
+    print("\n".join(lines))
 
 
 def main() -> None:
@@ -43,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

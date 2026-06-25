@@ -4,6 +4,7 @@ import asyncio
 from time import perf_counter
 
 from src.agents.base import BaseAgent
+from src.controller.cost import CostModel
 from src.controller.elastic import AdjustmentResult, ElasticAdjuster
 from src.controller.risk import RiskCalculator
 from src.core.gateway import Gateway
@@ -25,10 +26,12 @@ class AgentController:
         gateways: dict[str, Gateway],
         risk_calculator: RiskCalculator | None = None,
         adjuster: ElasticAdjuster | None = None,
+        cost_model: CostModel | None = None,
     ) -> None:
         self.gateways = gateways
+        self.cost_model = cost_model or CostModel()
         self.risk_calculator = risk_calculator or RiskCalculator()
-        self.adjuster = adjuster or ElasticAdjuster()
+        self.adjuster = adjuster or ElasticAdjuster(self.cost_model)
         self.tasks: dict[str, TaskSubnet] = {}
 
     async def build_task_subnet(self, task: TaskSpec) -> tuple[TaskSubnet, ExperimentMetrics]:
@@ -102,6 +105,51 @@ class AgentController:
             )
             subnet.sessions = list(result.changed_sessions)
         return risk_before, risk_after, result
+
+    async def rebuild_task_subnet(
+        self,
+        subnet: TaskSubnet,
+        timestamp: float,
+    ) -> tuple[TaskSubnet, float, AdjustmentResult]:
+        """Full-rebuild baseline: tear down the whole subnet and rebuild it.
+
+        Unlike the minimal adjustment, this really re-confirms every member,
+        re-installs every gateway and re-establishes every session. The returned
+        cost reflects that full work (computed with the same shared cost model),
+        so it is a fair, executed baseline rather than a hand-picked number.
+        """
+        task = subnet.task
+
+        # 1. Real teardown of the entire existing subnet on every involved gateway.
+        for gateway_id in subnet.involved_gateways:
+            gateway = self.gateways[gateway_id]
+            gateway.update_count += 1
+            for session in subnet.sessions:
+                gateway.installed_sessions.pop(session.session_id, None)
+
+        # 2. Real rebuild from scratch (confirm members, select support, install).
+        new_subnet, _ = await self.build_task_subnet(task)
+
+        # 3. Re-evaluate risk on the freshly built subnet.
+        predictions = await self.run_agent_loop(new_subnet, timestamp)
+        risk_after = self.risk_calculator.risk(task, predictions)
+
+        operations = {
+            "member_confirm": len(new_subnet.app_agents),
+            "gateway_install": len(new_subnet.involved_gateways),
+            "session_setup": len(new_subnet.sessions),
+        }
+        result = AdjustmentResult(
+            strategy="full_rebuild",
+            actions=tuple(new_subnet.actions),
+            changed_sessions=tuple(new_subnet.sessions),
+            changed_agents=len(new_subnet.app_agents | new_subnet.trans_agents | new_subnet.net_agents),
+            changed_edges=len(new_subnet.edges),
+            changed_gateways=len(new_subnet.involved_gateways),
+            service_interruption_ms=self.cost_model.interruption_ms(operations),
+            operations=operations,
+        )
+        return new_subnet, risk_after, result
 
     async def _confirm_app_members(self, task: TaskSpec) -> dict[str, AgentCard]:
         cards: dict[str, AgentCard] = {}
