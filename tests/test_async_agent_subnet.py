@@ -84,6 +84,51 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_tier2_replaces_failed_support_with_local_standby(self) -> None:
+        async def run() -> None:
+            provider = MockMetricProvider()
+            task = rescue_task()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(task)
+            # gw-mec has a standby network-bearer Agent -> local tier-2 replacement.
+            controller.gateways["gw-mec"].fail_agent("nagent-gw-mec")
+            _, _, adjustment = await controller.evaluate_and_adjust(subnet, 4.0, {"nagent-gw-mec"})
+            self.assertEqual(adjustment.strategy, "support_agent_replace")
+            self.assertEqual(adjustment.changed_agents, 1)
+            self.assertIn("nagent-gw-mec-standby", subnet.net_agents)
+            self.assertNotIn("nagent-gw-mec", subnet.net_agents)
+
+        asyncio.run(run())
+
+    def test_tier3_reroutes_when_no_local_standby(self) -> None:
+        async def run() -> None:
+            provider = MockMetricProvider()
+            task = rescue_task()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(task)
+            # gw-ue has no standby -> must reroute the flow's network support cross-subnet.
+            controller.gateways["gw-ue"].fail_agent("nagent-gw-ue")
+            _, _, adjustment = await controller.evaluate_and_adjust(subnet, 4.0, {"nagent-gw-ue"})
+            self.assertEqual(adjustment.strategy, "communication_reroute")
+            self.assertEqual(adjustment.operations.get("reroute"), 1)
+            self.assertNotIn("nagent-gw-ue", subnet.net_agents)
+
+        asyncio.run(run())
+
+    def test_failure_auto_detection_triggers_without_risk(self) -> None:
+        async def run() -> None:
+            provider = MockMetricProvider()
+            task = rescue_task()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(task)
+            controller.gateways["gw-mec"].fail_agent("nagent-gw-mec")
+            # No failed_agents passed and no risk event: controller must auto-detect F_m.
+            before, _, adjustment = await controller.evaluate_and_adjust(subnet, 4.0)
+            self.assertLessEqual(before, task.qos.risk_threshold)
+            self.assertEqual(adjustment.strategy, "support_agent_replace")
+
+        asyncio.run(run())
+
     def test_forecast_rejects_empty_history(self) -> None:
         with self.assertRaises(ValueError):
             exponential_forecast([], 3)

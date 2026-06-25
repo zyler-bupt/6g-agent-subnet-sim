@@ -132,6 +132,30 @@ def build_rescue_topology(metric_provider: MetricProvider) -> dict[str, Gateway]
             )
         )
 
+    # Standby network-bearer Agents at the edge and cloud subnets. They stay idle
+    # until a primary support Agent fails, enabling a *local* tier-2 replacement.
+    # gw-ue deliberately has no standby, so a failure there forces a tier-3
+    # cross-subnet reroute instead.
+    for gateway, subnet, node in [
+        (mec, "edge-subnet", "mec-edge-node"),
+        (cloud, "cloud-subnet", "cloud-control-node"),
+    ]:
+        gateway.register(
+            NetAgent(
+                _card(
+                    f"nagent-{gateway.gateway_id}-standby",
+                    f"{gateway.gateway_id}备用网络承载Agent",
+                    AgentLayer.NETWORK,
+                    AgentRole.SUPPORT,
+                    gateway.gateway_id,
+                    subnet,
+                    node,
+                    ("network_bearer", "bandwidth_monitor", "congestion_monitor"),
+                ),
+                metric_provider,
+            )
+        )
+
     ue.register(
         PhyAgentStub(
             _card(

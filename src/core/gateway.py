@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from src.agents.base import BaseAgent
 from src.core.models import AgentCard, GatewayAck, SessionSpec, TaskSpec
@@ -15,9 +15,18 @@ class Gateway:
     agents: dict[str, BaseAgent] = field(default_factory=dict)
     installed_sessions: dict[str, SessionSpec] = field(default_factory=dict)
     update_count: int = 0
+    online: bool = True
 
     def register(self, agent: BaseAgent) -> None:
         self.agents[agent.agent_id] = agent
+
+    def fail_agent(self, agent_id: str) -> bool:
+        """Simulate a local Agent going offline (F_m event). Returns success."""
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            return False
+        agent.card = replace(agent.card, status="offline")
+        return True
 
     async def confirm_member(self, agent_id: str) -> AgentCard | None:
         await asyncio.sleep(0)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from time import perf_counter
 
 from src.agents.base import BaseAgent
@@ -18,6 +19,13 @@ from src.core.models import (
     TaskState,
     TaskSubnet,
 )
+
+# Capability required from a support Agent of each layer, used when replacing a
+# failed support Agent with a standby of the same capability.
+_SUPPORT_CAPABILITY = {
+    "trans": "transport_session",
+    "net": "network_bearer",
+}
 
 
 class AgentController:
@@ -73,38 +81,183 @@ class AgentController:
         subnet.actions = actions
         return predictions
 
-    async def evaluate_and_adjust(self, subnet: TaskSubnet, timestamp: float) -> tuple[float, float, AdjustmentResult]:
+    async def evaluate_and_adjust(
+        self,
+        subnet: TaskSubnet,
+        timestamp: float,
+        failed_agents: set[str] | None = None,
+    ) -> tuple[float, float, AdjustmentResult]:
+        """Run-time evaluation and minimal, ordered elastic adjustment.
+
+        Trigger conditions (per the design): risk over threshold, or a support
+        Agent/gateway failure (F_m=1). Adjustment follows the ordered tiers:
+          tier-1  local parameter tuning,
+          tier-2  supplement/replace a failed support Agent with a local standby,
+          tier-3  reroute the communication relation across subnets.
+        Only the affected range is touched; unaffected parts stay intact.
+        """
+        task = subnet.task
+        failed = set(failed_agents) if failed_agents is not None else self._failed_support_ids(subnet)
+
         predictions = await self.run_agent_loop(subnet, timestamp)
-        risk_before = self.risk_calculator.risk(subnet.task, predictions)
+        risk_before = self.risk_calculator.risk(task, predictions)
         local_predictions = await self.run_agent_loop(subnet, timestamp + 0.1)
-        risk_after = self.risk_calculator.risk(subnet.task, local_predictions)
-        if risk_before <= subnet.task.qos.risk_threshold:
-            result = AdjustmentResult(
-                strategy="no_adjustment",
-                actions=tuple(subnet.actions),
-                changed_sessions=(),
-                changed_agents=0,
-                changed_edges=0,
-                changed_gateways=0,
-                service_interruption_ms=0.0,
-            )
+        risk_after_local = self.risk_calculator.risk(task, local_predictions)
+
+        triggered = risk_before > task.qos.risk_threshold or bool(failed)
+        if not triggered:
+            return risk_before, risk_after_local, self._no_adjustment(subnet)
+
+        # A dead support Agent cannot be healed by local tuning: go to tier-2/3.
+        if failed:
+            result, risk_after = await self._heal_failed_support(subnet, failed, timestamp)
             return risk_before, risk_after, result
 
-        result = self.adjuster.choose_minimal_adjustment(subnet, risk_before, risk_after)
+        # Risk-only event: tier-1 local tuning, else session retune (tier-2 fallback).
+        result = self.adjuster.choose_minimal_adjustment(subnet, risk_before, risk_after_local)
         if result.changed_sessions:
-            affected_gateways = {
-                gateway_id
-                for session in result.changed_sessions
-                for gateway_id in (session.source_gateway, session.target_gateway)
-            }
-            await asyncio.gather(
-                *[
-                    self.gateways[gateway_id].apply_update(subnet.task.task_id, list(result.changed_sessions))
-                    for gateway_id in affected_gateways
-                ]
-            )
+            await self._apply_sessions(task.task_id, result.changed_sessions)
             subnet.sessions = list(result.changed_sessions)
-        return risk_before, risk_after, result
+        return risk_before, risk_after_local, result
+
+    @staticmethod
+    def _no_adjustment(subnet: TaskSubnet) -> AdjustmentResult:
+        return AdjustmentResult(
+            strategy="no_adjustment",
+            actions=tuple(subnet.actions),
+            changed_sessions=(),
+            changed_agents=0,
+            changed_edges=0,
+            changed_gateways=0,
+            service_interruption_ms=0.0,
+            operations={},
+        )
+
+    def _failed_support_ids(self, subnet: TaskSubnet) -> set[str]:
+        failed: set[str] = set()
+        for agent_id in subnet.trans_agents | subnet.net_agents:
+            agent = self._agent_by_id(agent_id)
+            if agent is None or not agent.card.online:
+                failed.add(agent_id)
+        return failed
+
+    async def _heal_failed_support(
+        self,
+        subnet: TaskSubnet,
+        failed: set[str],
+        timestamp: float,
+    ) -> tuple[AdjustmentResult, float]:
+        task = subnet.task
+        used_ids = (subnet.trans_agents | subnet.net_agents) - failed
+        new_sessions: list[SessionSpec] = []
+        affected_gateways: set[str] = set()
+        local_replacements = 0
+        cross_subnet_reroutes = 0
+        unresolved: list[str] = []
+
+        for session in subnet.sessions:
+            updated = session
+            touched = False
+            for layer, current_id in (("trans", session.t_agent_id), ("net", session.n_agent_id)):
+                if current_id not in failed:
+                    continue
+                card, is_local = await self._resolve_support(
+                    _SUPPORT_CAPABILITY[layer], used_ids, home_gateway=session.source_gateway
+                )
+                if card is None:
+                    unresolved.append(current_id)
+                    continue
+                used_ids.add(card.agent_id)
+                if layer == "trans":
+                    updated = replace(updated, t_agent_id=card.agent_id)
+                else:
+                    updated = replace(updated, n_agent_id=card.agent_id)
+                touched = True
+                if is_local:
+                    local_replacements += 1
+                else:
+                    cross_subnet_reroutes += 1
+                    affected_gateways.add(card.gateway_id)  # support now lives in another subnet
+            if touched:
+                updated = replace(updated, status="rehomed")
+                affected_gateways.add(updated.source_gateway)
+                affected_gateways.add(updated.target_gateway)
+            new_sessions.append(updated)
+
+        # Commit the healed subnet and push updates only to the affected gateways.
+        subnet.sessions = new_sessions
+        subnet.trans_agents = {s.t_agent_id for s in new_sessions}
+        subnet.net_agents = {s.n_agent_id for s in new_sessions}
+        subnet.edges = self._build_edges(task, new_sessions)
+        subnet.involved_gateways |= affected_gateways
+        subnet.state = TaskState.NETWORKED if not unresolved else TaskState.DEGRADED
+        await self._apply_sessions(task.task_id, tuple(s for s in new_sessions if s.status == "rehomed"))
+
+        predictions = await self.run_agent_loop(subnet, timestamp + 0.2)
+        risk_after = self.risk_calculator.risk(task, predictions)
+
+        replaced = local_replacements + cross_subnet_reroutes
+        changed_sessions = tuple(s for s in new_sessions if s.status == "rehomed")
+        operations = {
+            "agent_replace": replaced,
+            "session_setup": len(changed_sessions),
+            "gateway_install": len(affected_gateways),
+            "reroute": cross_subnet_reroutes,
+        }
+        strategy = "communication_reroute" if cross_subnet_reroutes else "support_agent_replace"
+        result = AdjustmentResult(
+            strategy=strategy,
+            actions=tuple(subnet.actions),
+            changed_sessions=changed_sessions,
+            changed_agents=replaced,
+            changed_edges=len(changed_sessions),
+            changed_gateways=len(affected_gateways),
+            service_interruption_ms=self.cost_model.interruption_ms(operations),
+            operations=operations,
+        )
+        return result, risk_after
+
+    async def _resolve_support(
+        self,
+        capability: str,
+        used_ids: set[str],
+        home_gateway: str,
+    ) -> tuple[AgentCard | None, bool]:
+        """Find an online standby support Agent.
+
+        Prefers a standby in the home subnet (tier-2 local replacement); falls
+        back to another subnet (tier-3 cross-subnet reroute). Returns the card
+        and a flag that is True when the replacement stays local.
+        """
+        home = self.gateways.get(home_gateway)
+        if home is not None and home.online:
+            for card in await home.confirm_support(capability):
+                if card.agent_id not in used_ids:
+                    return card, True
+        for gateway_id, gateway in self.gateways.items():
+            if gateway_id == home_gateway or not gateway.online:
+                continue
+            for card in await gateway.confirm_support(capability):
+                if card.agent_id not in used_ids:
+                    return card, False
+        return None, False
+
+    async def _apply_sessions(self, task_id: str, sessions: tuple[SessionSpec, ...]) -> None:
+        if not sessions:
+            return
+        affected_gateways = {
+            gateway_id for session in sessions for gateway_id in (session.source_gateway, session.target_gateway)
+        }
+        await asyncio.gather(
+            *[self.gateways[gateway_id].apply_update(task_id, list(sessions)) for gateway_id in affected_gateways]
+        )
+
+    def _agent_by_id(self, agent_id: str) -> BaseAgent | None:
+        for gateway in self.gateways.values():
+            agent = gateway.agents.get(agent_id)
+            if agent is not None:
+                return agent
+        return None
 
     async def rebuild_task_subnet(
         self,

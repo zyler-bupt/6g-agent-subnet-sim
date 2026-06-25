@@ -66,8 +66,12 @@ python3 scripts/export_results.py
 
 - P0-P4 主线仿真原型：基于 asyncio/离散事件的 Controller、Gateway、aAgent/tAgent/nAgent、任务通信子网、mock 指标、跨层预测、风险计算和最小调整实验。
 - 应急救援示范场景：无人机/摄像头采集 -> 边缘识别 -> 云端决策调度 -> 现场反馈，可输出云/边/端拓扑、`G_m` 成员、跨层支撑边和端到端会话列表。
-- 可插拔指标接口：`MetricProvider` 固定接口，当前使用 `MockMetricProvider`，`RealMetricProvider` 作为 P5 真实测量/ns-3/Mininet 适配占位。
+- 可插拔指标接口：`MetricProvider` 固定接口，当前使用 `MockMetricProvider`，`RealMetricProvider` 作为 P5 真实测量/ns-3/Mininet 适配占位。当前所有链路指标为合成 mock，非真实测量。
 - 三层 Agent 闭环：aAgent 预测业务需求并调整非关键质量，tAgent 预测端到端时延/丢包并调传输参数，nAgent 预测承载/拥塞并给出承载建议。
+- 触发条件：风险超阈值（预测）或支撑 Agent/网关失效（`F_m=1`，`Gateway.fail_agent`）均可触发运行期调整。
+- 三级最小弹性调整（按序就近处理）：tier1 局部调参 -> tier2 用本地备用替换失效支撑 Agent -> tier3 无本地备用时跨子网改接通信关系；仅触碰受影响范围。
+- 真实全量重建基线：`AgentController.rebuild_task_subnet` 真正拆除并重建整张子网，对比数值均为实测，非硬编码；与最小调整共用一套透明 `CostModel`（`src/controller/cost.py`）。
+- 可读实验报告：`src/report.py` 输出 CJK 对齐的分节表格与结论，`python3 -m experiments.run` 直接给出三类事件下『最小调整 vs 全量重建』的对比与中断降幅。
 - 物理层暂不实装：保留 `PhyAgentStub`、`AgentLayer.PHYSICAL` 和风险项 `lambda_h`，默认 `lambda_h=0`，不参与 P0-P4 主路径映射与调整。
 - SANet 语义控制器第一阶段：用户输入触发、上下文构建、GoalSpec、PlanSpec、aAgent/nAgent mock 预测、跨层安全余量评价、视频策略建议和目标评价。
 - 阶段四双 Agent 语义链路：上下文 Embedding、目标原型 Top-3 检索、Qwen 兼容 GoalSpec 输出、受限规划适配器、严格 DAG 校验、规则回退和 HTTP API。
