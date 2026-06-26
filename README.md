@@ -12,6 +12,17 @@ python3 -m sim.run_rescue_task
 python3 -m experiments.run --scenario rescue
 ```
 
+组网过程可视化界面（Flask + SVG 分步动画）：
+
+```bash
+pip install -r viz/requirements.txt
+python3 -m viz.server          # 打开 http://127.0.0.1:5000
+```
+
+浏览器中可切换 tier1/tier2/tier3 三个场景，逐步观看「拓扑 → 组网(E^biz→G_m) → 注入事件 →
+风险上升 → 三级最小调整 → 对比全量重建」的完整过程；失效节点(红)/本步变更(橙)/已建活跃(绿)
+高亮，侧栏显示风险条、策略与「最小调整 vs 全量重建」对比卡。数值与 `experiments.run` 实测一致。
+
 轻量机制回归测试：
 
 ```bash
