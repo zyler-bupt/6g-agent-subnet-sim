@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--target-ip", default="10.10.3.2")
     parser.add_argument("--iperf-port", type=int, default=5201)
     parser.add_argument("--ping-count", type=int, default=5)
+    parser.add_argument("--ping-interval-s", type=float, default=0.2)
     parser.add_argument("--iperf-seconds", type=int, default=1)
     parser.add_argument("--app-rate-mbps", type=float, default=16.0)
     parser.add_argument("--task-id", default="task-rescue-001")
@@ -32,6 +33,7 @@ def main() -> None:
         target_ip=args.target_ip,
         iperf_port=args.iperf_port,
         ping_count=args.ping_count,
+        ping_interval_s=args.ping_interval_s,
         iperf_seconds=args.iperf_seconds,
         sudo=args.sudo,
     )

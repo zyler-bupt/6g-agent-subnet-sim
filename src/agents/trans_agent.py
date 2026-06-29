@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from src.agents.base import BaseAgent, exponential_forecast
+from src.agents.base import BaseAgent
+from src.agents.forecast import exponential_forecast
 from src.core.models import AgentAction, AgentLayer, AgentPrediction, TaskSpec
 from src.metrics.provider import MetricSnapshot
 
@@ -35,7 +36,7 @@ class TransAgent(BaseAgent):
             ),
         ]
 
-    def select_action(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
+    def decide(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
         latency = max(item.values[-1] for item in predictions if item.metric == "trans_latency_ms")
         loss = max(item.values[-1] for item in predictions if item.metric == "trans_loss_rate")
         if latency > task.qos.max_latency_ms or loss > task.qos.max_loss_rate:
@@ -52,3 +53,15 @@ class TransAgent(BaseAgent):
             action_type="maintain_session",
         )
 
+    def _execute_real_action(self, task: TaskSpec, action: AgentAction) -> None:
+        if action.action_type != "tune_transport_parameters":
+            return
+        self.action_executor.tune_transport(
+            send_rate_multiplier=float(action.params.get("send_rate_multiplier", 1.0)),
+            tcp_nodelay=bool(action.params.get("tcp_nodelay", True)),
+            tcp_congestion=str(action.params.get("tcp_congestion", "cubic")),
+        )
+
+    def feedback(self, task: TaskSpec, action: AgentAction) -> None:
+        self.history.setdefault("trans_action_count", []).append(1.0 if action.expected_effect else 0.0)
+        del self.history["trans_action_count"][:-self.history_window]

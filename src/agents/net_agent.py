@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from src.agents.base import BaseAgent, exponential_forecast
+from src.agents.base import BaseAgent
+from src.agents.forecast import exponential_forecast
 from src.core.models import AgentAction, AgentLayer, AgentPrediction, TaskSpec
 from src.metrics.provider import MetricSnapshot
 
@@ -37,7 +38,7 @@ class NetAgent(BaseAgent):
             ),
         ]
 
-    def select_action(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
+    def decide(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
         bandwidth = min(item.values[-1] for item in predictions if item.metric == "net_bandwidth_mbps")
         utilization = max(item.values[-1] for item in predictions if item.metric == "net_utilization")
         if bandwidth < task.qos.min_bandwidth_mbps or utilization > 0.82:
@@ -54,3 +55,11 @@ class NetAgent(BaseAgent):
             action_type="keep_bearer",
         )
 
+    def _execute_real_action(self, task: TaskSpec, action: AgentAction) -> None:
+        if action.action_type != "raise_monitoring_and_bearer_advice":
+            return
+        self.action_executor.prioritize_task_flow(task.task_id, self.agent_id, dict(action.params))
+
+    def feedback(self, task: TaskSpec, action: AgentAction) -> None:
+        self.history.setdefault("net_action_count", []).append(1.0 if action.expected_effect else 0.0)
+        del self.history["net_action_count"][:-self.history_window]

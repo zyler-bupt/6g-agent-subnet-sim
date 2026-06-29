@@ -14,6 +14,7 @@ class NetnsTarget:
     target_ip: str
     iperf_port: int = 5201
     ping_count: int = 5
+    ping_interval_s: float = 0.2
     iperf_seconds: int = 1
     command_timeout_s: float = 8.0
     sudo: bool = False
@@ -30,7 +31,7 @@ class NetnsMetricProvider:
 
     def snapshot(self, task_id: str, agent_id: str, timestamp: float) -> MetricSnapshot:
         target = self.targets.get(agent_id, self.default_target)
-        cache_key = f"{task_id}:{agent_id}:{target.namespace}:{target.target_ip}"
+        cache_key = f"{task_id}:{target.namespace}:{target.target_ip}:{target.iperf_port}"
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached is not None and now - cached[0] <= self.cache_ttl_s:
@@ -61,6 +62,8 @@ class NetnsMetricProvider:
                 "ping",
                 "-c",
                 str(target.ping_count),
+                "-i",
+                f"{target.ping_interval_s:g}",
                 "-W",
                 "2",
                 target.target_ip,

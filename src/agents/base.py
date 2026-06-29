@@ -1,24 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from src.core.models import AgentAction, AgentCard, AgentPrediction, AgentState, TaskSpec
 from src.metrics.provider import MetricProvider, MetricSnapshot
-
-
-def exponential_forecast(history: list[float], horizon: int, alpha: float = 0.55) -> tuple[float, ...]:
-    if horizon <= 0:
-        raise ValueError("horizon must be positive")
-    if not history:
-        raise ValueError("history must not be empty")
-    estimate = history[0]
-    for value in history[1:]:
-        estimate = alpha * value + (1.0 - alpha) * estimate
-    if len(history) > 1:
-        trend = (history[-1] - history[max(0, len(history) - 4)]) / min(3, len(history) - 1)
-    else:
-        trend = 0.0
-    return tuple(max(0.0, estimate + trend * (idx + 1)) for idx in range(horizon))
+from src.agents.forecast import exponential_forecast
 
 
 @dataclass
@@ -26,6 +13,8 @@ class BaseAgent:
     card: AgentCard
     metric_provider: MetricProvider
     horizon: int = 3
+    history_window: int = 10
+    action_executor: Any | None = None
     history: dict[str, list[float]] = field(default_factory=dict)
 
     @property
@@ -42,25 +31,42 @@ class BaseAgent:
         raise NotImplementedError
 
     def select_action(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
+        return self.decide(task, predictions)
+
+    def decide(self, task: TaskSpec, predictions: list[AgentPrediction]) -> AgentAction:
         raise NotImplementedError
 
     def apply(self, task: TaskSpec, action: AgentAction) -> AgentAction:
-        self.metric_provider.apply_effect(task.task_id, action.expected_effect)
+        return self.execute(task, action)
+
+    def execute(self, task: TaskSpec, action: AgentAction) -> AgentAction:
+        if self.action_executor is not None:
+            self._execute_real_action(task, action)
+        else:
+            self.metric_provider.apply_effect(task.task_id, action.expected_effect)
+        self.feedback(task, action)
         return action
+
+    def feedback(self, task: TaskSpec, action: AgentAction) -> None:
+        pass
 
     def run_step(self, task: TaskSpec, timestamp: float) -> tuple[list[AgentPrediction], AgentAction]:
         self.sense(task, timestamp)
         predictions = self.predict(task)
-        action = self.select_action(task, predictions)
-        return predictions, self.apply(task, action)
+        action = self.decide(task, predictions)
+        return predictions, self.execute(task, action)
 
     def _state_from_snapshot(self, snapshot: MetricSnapshot) -> dict[str, float | int | str | bool]:
         raise NotImplementedError
+
+    def _execute_real_action(self, task: TaskSpec, action: AgentAction) -> None:
+        # Subclasses own their action functions. This fallback keeps no-op
+        # actions harmless in real mode.
+        return None
 
     def _record(self, values: dict[str, float | int | str | bool]) -> None:
         for key, value in values.items():
             if isinstance(value, (int, float)):
                 items = self.history.setdefault(key, [])
                 items.append(float(value))
-                del items[:-12]
-
+                del items[:-self.history_window]
