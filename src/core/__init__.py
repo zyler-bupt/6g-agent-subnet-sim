@@ -7,7 +7,10 @@ from src.core.models import (
     AgentState,
     BusinessEdge,
     ExperimentMetrics,
+    FlowMatch,
     GatewayAck,
+    GatewayRouteAction,
+    GatewayRouteEntry,
     Message,
     MessageKind,
     QoSRequirements,
@@ -27,7 +30,10 @@ __all__ = [
     "AgentState",
     "BusinessEdge",
     "ExperimentMetrics",
+    "FlowMatch",
     "GatewayAck",
+    "GatewayRouteAction",
+    "GatewayRouteEntry",
     "Message",
     "MessageKind",
     "QoSRequirements",
@@ -37,4 +43,3 @@ __all__ = [
     "TaskSubnet",
     "to_jsonable",
 ]
-

@@ -5,6 +5,19 @@ from src.core.gateway import Gateway
 from src.core.models import AgentCard, AgentLayer, AgentRole, AgentState
 from src.metrics.provider import MetricProvider
 
+_NODE_IP = {
+    "ue-drone-node": "10.10.1.2",
+    "mec-edge-node": "10.10.2.2",
+    "cloud-control-node": "10.10.3.2",
+}
+
+_AGENT_PORT = {
+    "agent-drone-capture": 9101,
+    "agent-edge-recognition": 9201,
+    "agent-cloud-planning": 9301,
+    "agent-terminal-feedback": 9102,
+}
+
 
 def _card(
     agent_id: str,
@@ -27,13 +40,30 @@ def _card(
         endpoint=f"sim://{gateway_id}/{agent_id}",
         capabilities=capabilities,
         state=AgentState({}),
+        ip=_NODE_IP.get(node, ""),
+        port=_AGENT_PORT.get(agent_id),
     )
 
 
 def build_rescue_topology(metric_provider: MetricProvider) -> dict[str, Gateway]:
-    ue = Gateway(gateway_id="gw-ue", subnet_id="terminal-subnet", node="ue-drone-node")
-    mec = Gateway(gateway_id="gw-mec", subnet_id="edge-subnet", node="mec-edge-node")
-    cloud = Gateway(gateway_id="gw-cloud", subnet_id="cloud-subnet", node="cloud-control-node")
+    ue = Gateway(
+        gateway_id="gw-ue",
+        subnet_id="terminal-subnet",
+        node="ue-drone-node",
+        gateway_ip=_NODE_IP["ue-drone-node"],
+    )
+    mec = Gateway(
+        gateway_id="gw-mec",
+        subnet_id="edge-subnet",
+        node="mec-edge-node",
+        gateway_ip=_NODE_IP["mec-edge-node"],
+    )
+    cloud = Gateway(
+        gateway_id="gw-cloud",
+        subnet_id="cloud-subnet",
+        node="cloud-control-node",
+        gateway_ip=_NODE_IP["cloud-control-node"],
+    )
 
     ue.register(
         AppAgent(
@@ -172,4 +202,3 @@ def build_rescue_topology(metric_provider: MetricProvider) -> dict[str, Gateway]
         )
     )
     return {gateway.gateway_id: gateway for gateway in (ue, mec, cloud)}
-

@@ -71,6 +71,7 @@ async def run(args: argparse.Namespace) -> dict:
         "task_id": task.task_id,
         "target_profile": args.target_profile,
         "measurement_targets": _describe_provider_targets(provider),
+        "gateway_route_tables": _gateway_route_tables(controller),
         "build_metrics": to_jsonable(build_metrics),
         "history_steps": args.history_steps,
         "horizon": args.horizon,
@@ -312,6 +313,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "history_steps": result["history_steps"],
         "horizon": result["horizon"],
         "measurement_targets": result["measurement_targets"],
+        "gateway_route_tables": result["gateway_route_tables"],
         "baseline": _compact_loop_result(result["baseline"]),
     }
     if result.get("event") is not None:
@@ -339,6 +341,22 @@ def _latest_sense_by_agent(sense_log: list[dict[str, Any]]) -> dict[str, dict[st
             "values": item["values"],
         }
     return latest
+
+
+def _gateway_route_tables(controller: AgentController) -> dict[str, list[dict[str, Any]]]:
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for gateway_id, gateway in sorted(controller.gateways.items()):
+        entries = []
+        for entry in gateway.installed_route_table():
+            item = to_jsonable(entry)
+            if entry.action.mode == "forward_to_gateway":
+                item["isolation"] = "remote_agent_ip_hidden"
+            elif entry.action.mode == "local_delivery":
+                item["isolation"] = "local_agent_ip_visible"
+            entries.append(item)
+        if entries:
+            tables[gateway_id] = entries
+    return tables
 
 
 def _apply_netem(args: argparse.Namespace) -> None:

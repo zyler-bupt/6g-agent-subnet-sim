@@ -13,7 +13,10 @@ from src.core.models import (
     AgentCard,
     AgentLayer,
     ExperimentMetrics,
+    FlowMatch,
     GatewayAck,
+    GatewayRouteAction,
+    GatewayRouteEntry,
     SessionSpec,
     TaskSpec,
     TaskState,
@@ -56,7 +59,13 @@ class AgentController:
         subnet.involved_gateways = {
             gateway for session in sessions for gateway in (session.source_gateway, session.target_gateway)
         }
-        subnet.gateway_acks = await self._install_on_gateways(task, subnet.involved_gateways, sessions)
+        subnet.gateway_routes = self._build_gateway_route_tables(task, sessions, app_cards)
+        subnet.gateway_acks = await self._install_on_gateways(
+            task,
+            subnet.involved_gateways,
+            sessions,
+            subnet.gateway_routes,
+        )
         subnet.state = TaskState.NETWORKED if all(ack.accepted for ack in subnet.gateway_acks) else TaskState.FAILED
         self.tasks[task.task_id] = subnet
 
@@ -116,7 +125,7 @@ class AgentController:
         # Risk-only event: tier-1 local tuning, else session retune (tier-2 fallback).
         result = self.adjuster.choose_minimal_adjustment(subnet, risk_before, risk_after_local)
         if result.changed_sessions:
-            await self._apply_sessions(task.task_id, result.changed_sessions)
+            await self._apply_sessions(subnet, result.changed_sessions)
             subnet.sessions = list(result.changed_sessions)
         return risk_before, risk_after_local, result
 
@@ -191,7 +200,9 @@ class AgentController:
         subnet.edges = self._build_edges(task, new_sessions)
         subnet.involved_gateways |= affected_gateways
         subnet.state = TaskState.NETWORKED if not unresolved else TaskState.DEGRADED
-        await self._apply_sessions(task.task_id, tuple(s for s in new_sessions if s.status == "rehomed"))
+        app_cards = self._current_app_cards(task)
+        subnet.gateway_routes = self._build_gateway_route_tables(task, new_sessions, app_cards)
+        await self._apply_sessions(subnet, tuple(s for s in new_sessions if s.status == "rehomed"))
 
         predictions = await self.run_agent_loop(subnet, timestamp + 0.2)
         risk_after = self.risk_calculator.risk(task, predictions)
@@ -242,14 +253,25 @@ class AgentController:
                     return card, False
         return None, False
 
-    async def _apply_sessions(self, task_id: str, sessions: tuple[SessionSpec, ...]) -> None:
+    async def _apply_sessions(self, subnet: TaskSubnet, sessions: tuple[SessionSpec, ...]) -> None:
         if not sessions:
             return
+        task_id = subnet.task.task_id
         affected_gateways = {
             gateway_id for session in sessions for gateway_id in (session.source_gateway, session.target_gateway)
         }
+        changed_session_ids = {session.session_id for session in sessions}
+        changed_routes = [
+            entry
+            for gateway_id in affected_gateways
+            for entry in subnet.gateway_routes.get(gateway_id, [])
+            if entry.session_id in changed_session_ids
+        ]
         await asyncio.gather(
-            *[self.gateways[gateway_id].apply_update(task_id, list(sessions)) for gateway_id in affected_gateways]
+            *[
+                self.gateways[gateway_id].apply_update(task_id, list(sessions), changed_routes)
+                for gateway_id in affected_gateways
+            ]
         )
 
     def _agent_by_id(self, agent_id: str) -> BaseAgent | None:
@@ -279,6 +301,9 @@ class AgentController:
             gateway.update_count += 1
             for session in subnet.sessions:
                 gateway.installed_sessions.pop(session.session_id, None)
+                for key, entry in list(gateway.route_table.items()):
+                    if entry.session_id == session.session_id:
+                        gateway.route_table.pop(key)
 
         # 2. Real rebuild from scratch (confirm members, select support, install).
         new_subnet, _ = await self.build_task_subnet(task)
@@ -369,12 +394,104 @@ class AgentController:
         task: TaskSpec,
         gateway_ids: set[str],
         sessions: list[SessionSpec],
+        route_tables: dict[str, list[GatewayRouteEntry]],
     ) -> list[GatewayAck]:
         return list(
             await asyncio.gather(
-                *[self.gateways[gateway_id].install_subnet(task, sessions) for gateway_id in sorted(gateway_ids)]
+                *[
+                    self.gateways[gateway_id].install_subnet(
+                        task,
+                        sessions,
+                        route_tables.get(gateway_id, []),
+                    )
+                    for gateway_id in sorted(gateway_ids)
+                ]
             )
         )
+
+    def _build_gateway_route_tables(
+        self,
+        task: TaskSpec,
+        sessions: list[SessionSpec],
+        app_cards: dict[str, AgentCard],
+    ) -> dict[str, list[GatewayRouteEntry]]:
+        tables: dict[str, list[GatewayRouteEntry]] = {}
+        edges = {
+            (edge.source, edge.target): edge
+            for edge in task.biz_edges
+        }
+        for session in sessions:
+            edge = edges[(session.source, session.target)]
+            for gateway_id in (session.source_gateway, session.target_gateway):
+                entry = self._route_entry_for_gateway(
+                    task,
+                    session,
+                    edge.flow_type,
+                    edge.priority,
+                    app_cards,
+                    gateway_id,
+                )
+                tables.setdefault(gateway_id, []).append(entry)
+        return tables
+
+    def _route_entry_for_gateway(
+        self,
+        task: TaskSpec,
+        session: SessionSpec,
+        flow_type: str,
+        priority: int,
+        app_cards: dict[str, AgentCard],
+        gateway_id: str,
+    ) -> GatewayRouteEntry:
+        target = app_cards[session.target]
+        match = FlowMatch(
+            src_agent=session.source,
+            dst_agent=session.target,
+            flow_type=flow_type,
+            dst_port=target.port,
+        )
+        if gateway_id == session.target_gateway:
+            action = GatewayRouteAction(
+                mode="local_delivery",
+                allow=True,
+                local_agent=target.agent_id,
+                local_agent_ip=target.ip,
+                local_agent_port=target.port,
+                dscp=_priority_to_dscp(priority),
+                priority=priority,
+            )
+        else:
+            next_hop = self.gateways[session.target_gateway]
+            action = GatewayRouteAction(
+                mode="forward_to_gateway",
+                allow=True,
+                next_hop_gateway=next_hop.gateway_id,
+                next_hop_gateway_ip=next_hop.gateway_ip,
+                dscp=_priority_to_dscp(priority),
+                priority=priority,
+            )
+        return GatewayRouteEntry(
+            task_id=task.task_id,
+            session_id=session.session_id,
+            gateway_id=gateway_id,
+            flow_id=f"{session.source}->{session.target}",
+            match=match,
+            action=action,
+            t_agent_id=session.t_agent_id,
+            n_agent_id=session.n_agent_id,
+            latency_budget_ms=session.latency_budget_ms,
+            min_bandwidth_mbps=session.data_rate_mbps,
+            status=session.status,
+        )
+
+    def _current_app_cards(self, task: TaskSpec) -> dict[str, AgentCard]:
+        cards = {}
+        for agent_id in task.app_agents:
+            agent = self._agent_by_id(agent_id)
+            if agent is None:
+                raise ValueError(f"application agent unavailable: {agent_id}")
+            cards[agent_id] = agent.card
+        return cards
 
     async def _find_agent(self, agent_id: str) -> AgentCard | None:
         for gateway in self.gateways.values():
@@ -404,3 +521,10 @@ class AgentController:
                     agents.append(agent)
         return agents
 
+
+def _priority_to_dscp(priority: int) -> int:
+    if priority >= 3:
+        return 0xB8
+    if priority == 2:
+        return 0x68
+    return 0x00

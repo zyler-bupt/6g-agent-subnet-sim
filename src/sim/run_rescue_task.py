@@ -73,6 +73,28 @@ async def run() -> None:
     ]
     lines.append(report.table(["#", "业务流", "传输Agent", "网络Agent", "跨网关路径"], session_rows))
 
+    lines.append(report.section("Controller 下发的网关任务级路由表（隔离转发）"))
+    route_rows = []
+    for gateway_id in sorted(subnet.involved_gateways):
+        gateway = controller.gateways[gateway_id]
+        for entry in gateway.installed_route_table():
+            route_rows.append(
+                [
+                    gateway_id,
+                    entry.session_id.rsplit("-", 1)[-1],
+                    f"{entry.match.src_agent} → {entry.match.dst_agent}",
+                    entry.action.mode,
+                    _route_action_target(entry),
+                    f"{entry.t_agent_id} / {entry.n_agent_id}",
+                ]
+            )
+    lines.append(
+        report.table(
+            ["网关", "会话", "业务流", "动作", "下一跳/本地投递", "支撑Agent"],
+            route_rows,
+        )
+    )
+
     lines.append(report.section("跨层边 E_m"))
     edge_rows = [
         [src, _EDGE_LABEL.get(kind, kind), dst] for src, dst, kind in sorted(subnet.edges, key=lambda e: (e[2], e[0]))
@@ -91,6 +113,15 @@ async def run() -> None:
     lines.append(report.table(["网关", "结果", "原因"], ack_rows))
 
     print("\n".join(lines))
+
+
+def _route_action_target(entry) -> str:
+    action = entry.action
+    if action.mode == "local_delivery":
+        return f"{action.local_agent} @ {action.local_agent_ip}:{action.local_agent_port}"
+    if action.mode == "forward_to_gateway":
+        return f"{action.next_hop_gateway} @ {action.next_hop_gateway_ip}"
+    return "deny"
 
 
 def main() -> None:

@@ -82,6 +82,8 @@ class AgentCard:
     capabilities: tuple[str, ...]
     status: str = "online"
     state: AgentState = field(default_factory=AgentState)
+    ip: str = ""
+    port: int | None = None
 
     @property
     def online(self) -> bool:
@@ -122,6 +124,44 @@ class SessionSpec:
 
 
 @dataclass(frozen=True)
+class FlowMatch:
+    src_agent: str
+    dst_agent: str
+    flow_type: str
+    protocol: str = "tcp"
+    dst_port: int | None = None
+
+
+@dataclass(frozen=True)
+class GatewayRouteAction:
+    mode: str  # local_delivery | forward_to_gateway | deny
+    allow: bool
+    next_hop_gateway: str | None = None
+    next_hop_gateway_ip: str | None = None
+    local_agent: str | None = None
+    local_agent_ip: str | None = None
+    local_agent_port: int | None = None
+    dscp: int = 0
+    priority: int = 1
+
+
+@dataclass(frozen=True)
+class GatewayRouteEntry:
+    task_id: str
+    session_id: str
+    gateway_id: str
+    flow_id: str
+    match: FlowMatch
+    action: GatewayRouteAction
+    t_agent_id: str
+    n_agent_id: str
+    p_agent_id: str | None = None
+    latency_budget_ms: float = 0.0
+    min_bandwidth_mbps: float = 0.0
+    status: str = "installed"
+
+
+@dataclass(frozen=True)
 class GatewayAck:
     gateway_id: str
     task_id: str
@@ -148,6 +188,7 @@ class TaskSubnet:
     edges: set[tuple[str, str, str]] = field(default_factory=set)
     sessions: list[SessionSpec] = field(default_factory=list)
     involved_gateways: set[str] = field(default_factory=set)
+    gateway_routes: dict[str, list[GatewayRouteEntry]] = field(default_factory=dict)
     state: TaskState = TaskState.CREATED
     gateway_acks: list[GatewayAck] = field(default_factory=list)
     predictions: dict[str, AgentPrediction] = field(default_factory=dict)
@@ -185,4 +226,3 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     return value
-

@@ -47,6 +47,46 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_gateway_route_table_hides_remote_agent_ip(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+            session_id = "task-rescue-001-sess-1"
+
+            ue_routes = {
+                entry.session_id: entry
+                for entry in controller.gateways["gw-ue"].installed_route_table()
+            }
+            mec_routes = {
+                entry.session_id: entry
+                for entry in controller.gateways["gw-mec"].installed_route_table()
+            }
+
+            self.assertEqual(len(controller.gateways["gw-ue"].installed_route_table()), 2)
+            self.assertEqual(len(controller.gateways["gw-mec"].installed_route_table()), 2)
+            self.assertIn(session_id, ue_routes)
+            self.assertIn(session_id, mec_routes)
+            self.assertTrue(
+                any(entry.session_id == session_id for entry in subnet.gateway_routes["gw-ue"])
+            )
+
+            forward = ue_routes[session_id]
+            self.assertEqual(forward.action.mode, "forward_to_gateway")
+            self.assertEqual(forward.action.next_hop_gateway, "gw-mec")
+            self.assertEqual(forward.action.next_hop_gateway_ip, "10.10.2.2")
+            self.assertIsNone(forward.action.local_agent)
+            self.assertIsNone(forward.action.local_agent_ip)
+
+            local = mec_routes[session_id]
+            self.assertEqual(local.action.mode, "local_delivery")
+            self.assertEqual(local.action.local_agent, "agent-edge-recognition")
+            self.assertEqual(local.action.local_agent_ip, "10.10.2.2")
+            self.assertEqual(local.action.local_agent_port, 9201)
+            self.assertIsNone(local.action.next_hop_gateway_ip)
+
+        asyncio.run(run())
+
     def test_agent_loop_produces_three_layer_predictions(self) -> None:
         async def run() -> None:
             provider = SyntheticMetricProvider()
@@ -136,4 +176,3 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
