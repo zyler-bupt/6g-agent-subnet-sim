@@ -8,7 +8,7 @@ from src.agents.phy_agent import PhyAgentStub
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator, RiskWeights
 from src.core.models import AgentLayer
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.bus import AsyncMessageBus
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
@@ -26,8 +26,8 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_mock_metrics_range(self) -> None:
-        provider = MockMetricProvider()
+    def test_synthetic_metrics_range(self) -> None:
+        provider = SyntheticMetricProvider()
         snapshot = provider.snapshot("task", "agent", 1.0)
         self.assertGreater(snapshot.available_bandwidth_mbps, 0)
         self.assertGreaterEqual(snapshot.loss_rate, 0)
@@ -35,7 +35,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_rescue_subnet_maps_business_edges_to_trans_and_net(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             controller = AgentController(build_rescue_topology(provider))
             subnet, metrics = await controller.build_task_subnet(rescue_task())
             self.assertTrue(metrics.networking_success)
@@ -49,7 +49,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_agent_loop_produces_three_layer_predictions(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             controller = AgentController(build_rescue_topology(provider))
             subnet, _ = await controller.build_task_subnet(rescue_task())
             predictions = await controller.run_agent_loop(subnet, 2.0)
@@ -62,7 +62,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
         asyncio.run(run())
 
     def test_physical_stub_is_noop_and_lambda_h_defaults_zero(self) -> None:
-        provider = MockMetricProvider()
+        provider = SyntheticMetricProvider()
         gateway = build_rescue_topology(provider)["gw-ue"]
         stub = gateway.agents["pagent-stub-ue"]
         self.assertIsInstance(stub, PhyAgentStub)
@@ -72,7 +72,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_risk_and_minimal_adjustment(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             task = rescue_task()
             controller = AgentController(build_rescue_topology(provider))
             subnet, _ = await controller.build_task_subnet(task)
@@ -86,7 +86,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_tier2_replaces_failed_support_with_local_standby(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             task = rescue_task()
             controller = AgentController(build_rescue_topology(provider))
             subnet, _ = await controller.build_task_subnet(task)
@@ -102,7 +102,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_tier3_reroutes_when_no_local_standby(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             task = rescue_task()
             controller = AgentController(build_rescue_topology(provider))
             subnet, _ = await controller.build_task_subnet(task)
@@ -117,7 +117,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
     def test_failure_auto_detection_triggers_without_risk(self) -> None:
         async def run() -> None:
-            provider = MockMetricProvider()
+            provider = SyntheticMetricProvider()
             task = rescue_task()
             controller = AgentController(build_rescue_topology(provider))
             subnet, _ = await controller.build_task_subnet(task)

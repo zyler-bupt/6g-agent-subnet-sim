@@ -7,11 +7,12 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from src.agents.controls import FlowgenControl
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator
-from src.core.models import AgentPrediction, AgentAction, TaskSubnet, to_jsonable
+from src.core.models import AgentAction, AgentPrediction, TaskSubnet, to_jsonable
 from src.metrics.netns import NetnsMetricProvider, NetnsTarget
 from src.metrics.provider import MetricProvider
 from src.metrics.trace import TraceMetricProvider
@@ -25,6 +26,8 @@ class RealLoopResult:
     risk: float
     predictions: list[AgentPrediction]
     actions: list[AgentAction]
+    sense_log: list[dict[str, Any]]
+    histories: dict[str, dict[str, list[float]]]
 
 
 async def run(args: argparse.Namespace) -> dict:
@@ -66,6 +69,8 @@ async def run(args: argparse.Namespace) -> dict:
 
     return {
         "task_id": task.task_id,
+        "target_profile": args.target_profile,
+        "measurement_targets": _describe_provider_targets(provider),
         "build_metrics": to_jsonable(build_metrics),
         "history_steps": args.history_steps,
         "horizon": args.horizon,
@@ -78,19 +83,15 @@ async def run(args: argparse.Namespace) -> dict:
 
 
 def _build_provider(args: argparse.Namespace) -> MetricProvider:
-    target = NetnsTarget(
+    default_target = _netns_target(
+        args,
         namespace=args.namespace,
         target_ip=args.target_ip,
-        iperf_port=args.iperf_port,
-        ping_count=args.ping_count,
-        ping_interval_s=args.ping_interval_s,
-        iperf_seconds=args.iperf_seconds,
-        command_timeout_s=args.command_timeout_s,
-        sudo=args.sudo,
+        label="default measurement link",
     )
     provider: MetricProvider = NetnsMetricProvider(
-        targets={},
-        default_target=target,
+        targets=_build_target_profile(args, default_target),
+        default_target=default_target,
         app_rate_mbps=args.initial_target_mbps,
         cache_ttl_s=max(0.1, args.sample_interval_s * 0.8),
     )
@@ -102,6 +103,75 @@ def _build_provider(args: argparse.Namespace) -> MetricProvider:
             sample_interval_s=args.sample_interval_s,
         )
     return provider
+
+
+def _netns_target(
+    args: argparse.Namespace,
+    *,
+    namespace: str,
+    target_ip: str,
+    label: str,
+) -> NetnsTarget:
+    return NetnsTarget(
+        iperf_port=args.iperf_port,
+        namespace=namespace,
+        target_ip=target_ip,
+        ping_count=args.ping_count,
+        ping_interval_s=args.ping_interval_s,
+        iperf_seconds=args.iperf_seconds,
+        command_timeout_s=args.command_timeout_s,
+        sudo=args.sudo,
+        label=label,
+    )
+
+
+def _build_target_profile(
+    args: argparse.Namespace,
+    default_target: NetnsTarget,
+) -> dict[str, NetnsTarget]:
+    if args.target_profile == "cloud":
+        return {}
+
+    term_to_edge = _netns_target(
+        args,
+        namespace=args.term_namespace,
+        target_ip=args.edge_ip,
+        label="terminal -> edge video stream",
+    )
+    edge_to_cloud = _netns_target(
+        args,
+        namespace=args.edge_namespace,
+        target_ip=args.cloud_ip,
+        label="edge -> cloud recognition result",
+    )
+    cloud_to_term = _netns_target(
+        args,
+        namespace=args.cloud_namespace,
+        target_ip=args.term_ip,
+        label="cloud -> terminal dispatch feedback",
+    )
+    end_to_end = _netns_target(
+        args,
+        namespace=args.term_namespace,
+        target_ip=args.cloud_ip,
+        label="terminal -> cloud end-to-end fallback",
+    )
+
+    return {
+        "agent-drone-capture": term_to_edge,
+        "agent-edge-recognition": edge_to_cloud,
+        "agent-cloud-planning": cloud_to_term,
+        "agent-terminal-feedback": end_to_end,
+        "tagent-gw-ue": term_to_edge,
+        "nagent-gw-ue": term_to_edge,
+        "tagent-gw-mec": edge_to_cloud,
+        "nagent-gw-mec": edge_to_cloud,
+        "nagent-gw-mec-standby": edge_to_cloud,
+        "tagent-gw-cloud": cloud_to_term,
+        "nagent-gw-cloud": cloud_to_term,
+        "nagent-gw-cloud-standby": cloud_to_term,
+        "pagent-stub-ue": term_to_edge,
+    }
 
 
 def _configure_real_agents(
@@ -126,11 +196,23 @@ async def _sample_predict_and_act(
     interval_s: float,
     start_timestamp: float,
 ) -> RealLoopResult:
-    agents = controller._agents_for_subnet(subnet)
+    agents = _ordered_agents(controller, subnet)
+    sense_log: list[dict[str, Any]] = []
     for step in range(history_steps):
         timestamp = start_timestamp + step * interval_s
         for agent in agents:
-            agent.sense(subnet.task, timestamp)
+            state = agent.sense(subnet.task, timestamp)
+            sense_log.append(
+                {
+                    "step": step,
+                    "timestamp": timestamp,
+                    "agent_id": agent.agent_id,
+                    "agent_name": agent.card.name,
+                    "layer": agent.card.layer.value,
+                    "measurement_target": _describe_agent_target(agent),
+                    "values": dict(state.values),
+                }
+            )
         if interval_s > 0:
             await asyncio.sleep(interval_s)
 
@@ -144,16 +226,119 @@ async def _sample_predict_and_act(
     subnet.predictions = {f"{item.agent_id}:{item.metric}": item for item in predictions}
     subnet.actions = actions
     risk = RiskCalculator().risk(subnet.task, predictions)
-    return RealLoopResult(name=name, risk=risk, predictions=predictions, actions=actions)
+    return RealLoopResult(
+        name=name,
+        risk=risk,
+        predictions=predictions,
+        actions=actions,
+        sense_log=sense_log,
+        histories=_agent_histories(agents),
+    )
 
 
 def _result_to_jsonable(result: RealLoopResult) -> dict:
     return {
         "name": result.name,
         "risk": result.risk,
+        "sense_log": result.sense_log,
+        "histories": result.histories,
         "predictions": [to_jsonable(item) for item in result.predictions],
         "actions": [to_jsonable(item) for item in result.actions],
+        "demo_summary": _demo_summary(result),
     }
+
+
+def _ordered_agents(controller: AgentController, subnet: TaskSubnet) -> list:
+    return sorted(
+        controller._agents_for_subnet(subnet),
+        key=lambda agent: (agent.card.layer.value, agent.agent_id),
+    )
+
+
+def _agent_histories(agents: list) -> dict[str, dict[str, list[float]]]:
+    return {
+        agent.agent_id: {
+            metric: [round(value, 6) for value in values]
+            for metric, values in sorted(agent.history.items())
+        }
+        for agent in agents
+    }
+
+
+def _describe_agent_target(agent) -> dict[str, Any]:
+    describe = getattr(agent.metric_provider, "describe_target", None)
+    if describe is None:
+        return {}
+    return describe(agent.agent_id)
+
+
+def _describe_provider_targets(provider: MetricProvider) -> dict[str, Any]:
+    describe = getattr(provider, "describe_targets", None)
+    if describe is None:
+        return {}
+    return describe()
+
+
+def _demo_summary(result: RealLoopResult) -> dict[str, Any]:
+    sensed_agents = sorted({item["agent_id"] for item in result.sense_log})
+    links = sorted(
+        {
+            item.get("measurement_target", {}).get("label", "")
+            for item in result.sense_log
+            if item.get("measurement_target", {}).get("label")
+        }
+    )
+    return {
+        "sensed_agent_count": len(sensed_agents),
+        "sensed_agents": sensed_agents,
+        "measurement_links": links,
+        "prediction_count": len(result.predictions),
+        "action_count": len(result.actions),
+        "actions": [
+            {
+                "agent_id": action.agent_id,
+                "layer": action.layer.value,
+                "action_type": action.action_type,
+            }
+            for action in result.actions
+        ],
+    }
+
+
+def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "task_id": result["task_id"],
+        "target_profile": result["target_profile"],
+        "history_steps": result["history_steps"],
+        "horizon": result["horizon"],
+        "measurement_targets": result["measurement_targets"],
+        "baseline": _compact_loop_result(result["baseline"]),
+    }
+    if result.get("event") is not None:
+        payload["event"] = _compact_loop_result(result["event"])
+    return payload
+
+
+def _compact_loop_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "risk": result["risk"],
+        "demo_summary": result["demo_summary"],
+        "latest_sense": _latest_sense_by_agent(result["sense_log"]),
+        "histories": result["histories"],
+        "predictions": result["predictions"],
+        "actions": result["actions"],
+    }
+
+
+def _latest_sense_by_agent(sense_log: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for item in sense_log:
+        latest[item["agent_id"]] = {
+            "layer": item["layer"],
+            "measurement_target": item["measurement_target"],
+            "values": item["values"],
+        }
+    return latest
 
 
 def _apply_netem(args: argparse.Namespace) -> None:
@@ -192,8 +377,20 @@ def _run_tc(args: argparse.Namespace, operation: str, *qdisc_args: str, check: b
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the real netns Agent loop.")
+    parser.add_argument(
+        "--target-profile",
+        choices=("rescue", "cloud"),
+        default="rescue",
+        help="rescue maps Agents to term->edge, edge->cloud and cloud->term links; cloud keeps the old single-link probe.",
+    )
     parser.add_argument("--namespace", default="h-term")
     parser.add_argument("--target-ip", default="10.10.3.2")
+    parser.add_argument("--term-namespace", default="h-term")
+    parser.add_argument("--edge-namespace", default="h-edge")
+    parser.add_argument("--cloud-namespace", default="h-cloud")
+    parser.add_argument("--term-ip", default="10.10.1.2")
+    parser.add_argument("--edge-ip", default="10.10.2.2")
+    parser.add_argument("--cloud-ip", default="10.10.3.2")
     parser.add_argument("--iperf-port", type=int, default=5201)
     parser.add_argument("--ping-count", type=int, default=5)
     parser.add_argument("--ping-interval-s", type=float, default=0.2)
@@ -213,9 +410,12 @@ def main() -> None:
     parser.add_argument("--netem-delay-ms", type=float)
     parser.add_argument("--netem-loss-percent", type=float)
     parser.add_argument("--clear-netem", action="store_true", default=True)
+    parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
 
     result = asyncio.run(run(args))
+    if args.summary_only:
+        result = _summary_payload(to_jsonable(result))
     print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2, sort_keys=True))
 
 

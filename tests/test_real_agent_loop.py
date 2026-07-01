@@ -8,7 +8,7 @@ from pathlib import Path
 from src.agents.app_agent import AppAgent
 from src.agents.controls import FlowgenControl
 from src.core.models import AgentAction, AgentCard, AgentLayer, AgentRole, AgentState
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.scenarios import rescue_task
 
 
@@ -29,14 +29,14 @@ def _card() -> AgentCard:
 
 class RealAgentLoopTests(unittest.TestCase):
     def test_history_keeps_latest_ten_values(self) -> None:
-        agent = AppAgent(_card(), MockMetricProvider(), history_window=10)
+        agent = AppAgent(_card(), SyntheticMetricProvider(), history_window=10)
         task = rescue_task()
         for step in range(12):
             agent.sense(task, float(step))
         self.assertEqual(len(agent.history["data_rate_mbps"]), 10)
 
     def test_horizon_five_prediction(self) -> None:
-        agent = AppAgent(_card(), MockMetricProvider(), horizon=5, history_window=10)
+        agent = AppAgent(_card(), SyntheticMetricProvider(), horizon=5, history_window=10)
         task = rescue_task()
         for step in range(10):
             agent.sense(task, float(step))
@@ -48,7 +48,7 @@ class RealAgentLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             control = Path(tmp) / "flowgen.json"
             executor = FlowgenControl(control_file=control, initial_target_mbps=10.0)
-            agent = AppAgent(_card(), MockMetricProvider(), action_executor=executor)
+            agent = AppAgent(_card(), SyntheticMetricProvider(), action_executor=executor)
             agent.execute(
                 rescue_task(),
                 AgentAction(
@@ -87,7 +87,7 @@ class RealAgentLoopTests(unittest.TestCase):
                     "role": AgentRole.SUPPORT,
                 }
             )
-            TransAgent(trans_card, MockMetricProvider(), action_executor=executor).execute(
+            TransAgent(trans_card, SyntheticMetricProvider(), action_executor=executor).execute(
                 task,
                 AgentAction(
                     agent_id="tagent-test",
@@ -96,7 +96,7 @@ class RealAgentLoopTests(unittest.TestCase):
                     params={"send_rate_multiplier": 0.8, "tcp_nodelay": True},
                 ),
             )
-            NetAgent(net_card, MockMetricProvider(), action_executor=executor).execute(
+            NetAgent(net_card, SyntheticMetricProvider(), action_executor=executor).execute(
                 task,
                 AgentAction(
                     agent_id="nagent-test",

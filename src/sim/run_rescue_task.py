@@ -5,7 +5,7 @@ import asyncio
 from src import report
 from src.controller.networking import AgentController
 from src.core.models import AgentLayer
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
 
@@ -25,7 +25,7 @@ _EDGE_LABEL = {
 
 
 async def run() -> None:
-    provider = MockMetricProvider()
+    provider = SyntheticMetricProvider()
     task = rescue_task()
     controller = AgentController(build_rescue_topology(provider))
     subnet, metrics = await controller.build_task_subnet(task)

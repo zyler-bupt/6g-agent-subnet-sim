@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.topology import build_rescue_topology
 
 
 def main() -> None:
-    provider = MockMetricProvider()
+    provider = SyntheticMetricProvider()
     gateways = build_rescue_topology(provider)
     print("6G Agent rescue topology")
     for gateway in gateways.values():

@@ -8,7 +8,14 @@ from src.metrics.provider import MetricSnapshot
 
 
 @dataclass
-class MockMetricProvider:
+class SyntheticMetricProvider:
+    """Deterministic offline metric source for tests and non-root demos.
+
+    Real Linux measurements should use NetnsMetricProvider. This provider stays
+    only for controller regressions, visualization traces and full-rebuild
+    baseline demos that must run without root/network namespaces.
+    """
+
     seed: int = 7
     base_bandwidth_mbps: float = 32.0
     base_latency_ms: float = 42.0
@@ -71,4 +78,3 @@ class MockMetricProvider:
     def inject_event(self, task_id: str, event_type: str, severity: float = 1.0) -> None:
         current = self._events.setdefault(task_id, {})
         current[event_type] = max(current.get(event_type, 0.0), severity)
-

@@ -106,8 +106,11 @@ smoke_check() {
   echo "Running smoke checks..."
   ip netns exec "$NS_TERM" ping -c 1 -W 2 "$EDGE_IP" >/dev/null
   ip netns exec "$NS_TERM" ping -c 1 -W 2 "$CLOUD_IP" >/dev/null
+  ip netns exec "$NS_CLOUD" ping -c 1 -W 2 "$TERM_IP" >/dev/null
+  ip netns exec "$NS_TERM" iperf3 -c "$EDGE_IP" -p "$IPERF_PORT" -t 1 >/dev/null
   ip netns exec "$NS_TERM" iperf3 -c "$CLOUD_IP" -p "$IPERF_PORT" -t 1 >/dev/null
-  echo "Smoke checks passed: ping and iperf3 term->cloud are working."
+  ip netns exec "$NS_CLOUD" iperf3 -c "$TERM_IP" -p "$IPERF_PORT" -t 1 >/dev/null
+  echo "Smoke checks passed: ping and iperf3 work across term/edge/cloud."
 }
 
 require_root
@@ -137,6 +140,7 @@ configure_router_link rt-edge0 "$EDGE_GW"
 configure_router_link rt-cloud0 "$CLOUD_GW"
 ip netns exec "$NS_ROUTER" sysctl -qw net.ipv4.ip_forward=1
 
+start_iperf_server "$NS_TERM"
 start_iperf_server "$NS_EDGE"
 start_iperf_server "$NS_CLOUD"
 smoke_check
@@ -154,6 +158,8 @@ Namespaces:
 Useful commands:
   ip netns exec $NS_TERM ping -c 5 $CLOUD_IP
   ip netns exec $NS_TERM iperf3 -c $CLOUD_IP -t 3 -J
+  ip netns exec $NS_TERM iperf3 -c $EDGE_IP -t 3 -J
+  ip netns exec $NS_CLOUD iperf3 -c $TERM_IP -t 3 -J
   ip netns exec $NS_ROUTER tc qdisc replace dev rt-cloud0 root netem delay 80ms loss 5%
   ip netns exec $NS_ROUTER tc qdisc del dev rt-cloud0 root
 EOF

@@ -7,7 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from src.metrics.mock import MockMetricProvider
+from experiments.real_run import _build_target_profile
+from src.metrics.synthetic import SyntheticMetricProvider
+from src.metrics.netns import NetnsMetricProvider, NetnsTarget
 from src.metrics.parsers import parse_iperf3_json, parse_ping, parse_ss_ti
 from src.metrics.trace import TraceMetricProvider
 
@@ -68,7 +70,7 @@ class RealMetricsStage3Tests(unittest.TestCase):
             np.save(path, np.array([1.0, 2.0, 3.0], dtype=np.float32))
             provider = TraceMetricProvider(
                 path,
-                base_provider=MockMetricProvider(),
+                base_provider=SyntheticMetricProvider(),
                 target_mean_mbps=12.0,
                 sample_interval_s=1.0,
             )
@@ -76,6 +78,41 @@ class RealMetricsStage3Tests(unittest.TestCase):
             third = provider.snapshot("task", "agent", 2.0)
             self.assertAlmostEqual(first.app_rate_mbps, 6.0)
             self.assertAlmostEqual(third.app_rate_mbps, 18.0)
+
+    def test_netns_provider_describes_per_agent_targets(self) -> None:
+        default = NetnsTarget("h-term", "10.10.3.2", label="default")
+        edge = NetnsTarget("h-term", "10.10.2.2", label="terminal -> edge")
+        provider = NetnsMetricProvider(
+            targets={"nagent-gw-ue": edge},
+            default_target=default,
+        )
+
+        self.assertEqual(provider.describe_target("nagent-gw-ue")["target_ip"], "10.10.2.2")
+        self.assertEqual(provider.describe_target("unknown-agent")["target_ip"], "10.10.3.2")
+
+    def test_real_run_rescue_profile_maps_agents_to_multiple_links(self) -> None:
+        class Args:
+            target_profile = "rescue"
+            term_namespace = "h-term"
+            edge_namespace = "h-edge"
+            cloud_namespace = "h-cloud"
+            term_ip = "10.10.1.2"
+            edge_ip = "10.10.2.2"
+            cloud_ip = "10.10.3.2"
+            iperf_port = 5201
+            ping_count = 5
+            ping_interval_s = 0.2
+            iperf_seconds = 1
+            command_timeout_s = 8.0
+            sudo = False
+
+        targets = _build_target_profile(Args(), NetnsTarget("h-term", "10.10.3.2"))
+        self.assertEqual(targets["nagent-gw-ue"].namespace, "h-term")
+        self.assertEqual(targets["nagent-gw-ue"].target_ip, "10.10.2.2")
+        self.assertEqual(targets["nagent-gw-mec"].namespace, "h-edge")
+        self.assertEqual(targets["nagent-gw-mec"].target_ip, "10.10.3.2")
+        self.assertEqual(targets["nagent-gw-cloud"].namespace, "h-cloud")
+        self.assertEqual(targets["nagent-gw-cloud"].target_ip, "10.10.1.2")
 
 
 if __name__ == "__main__":

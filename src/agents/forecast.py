@@ -5,7 +5,7 @@ def exponential_forecast(history: list[float], horizon: int, alpha: float = 0.55
     """Forecast the next horizon values from a recent history window.
 
     The current real-testbed experiments use the latest 10 samples and request a
-    5-step horizon. The function stays generic so the mock simulations can keep
+    5-step horizon. The function stays generic so the offline simulations can keep
     their existing shorter windows.
     """
     if horizon <= 0:

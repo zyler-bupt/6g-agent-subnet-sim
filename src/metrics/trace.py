@@ -34,5 +34,25 @@ class TraceMetricProvider:
     def inject_event(self, task_id: str, event_type: str, severity: float = 1.0) -> None:
         self.base_provider.inject_event(task_id, event_type, severity)
 
+    def describe_target(self, agent_id: str) -> dict:
+        describe = getattr(self.base_provider, "describe_target", None)
+        if describe is None:
+            return {}
+        target = dict(describe(agent_id))
+        target["trace_path"] = str(self.trace_path)
+        return target
+
+    def describe_targets(self) -> dict:
+        describe = getattr(self.base_provider, "describe_targets", None)
+        if describe is None:
+            return {}
+        targets = {
+            agent_id: dict(target)
+            for agent_id, target in describe().items()
+        }
+        for target in targets.values():
+            target["trace_path"] = str(self.trace_path)
+        return targets
+
     def _index(self, timestamp: float) -> int:
         return int(max(0.0, timestamp) / self.sample_interval_s) % len(self._rates)

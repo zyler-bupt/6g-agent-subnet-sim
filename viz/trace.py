@@ -18,7 +18,7 @@ from dataclasses import replace
 from src.controller.networking import AgentController
 from src.core.gateway import Gateway
 from src.core.models import SessionSpec, TaskSubnet
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
 
@@ -230,7 +230,7 @@ def _kind_ids(nodes: list[dict], *kinds: str) -> list[str]:
 
 async def _predict_snapshot() -> tuple[list, float]:
     """Pre-event predictions/risk on a throwaway world (display only)."""
-    provider = MockMetricProvider()
+    provider = SyntheticMetricProvider()
     task = rescue_task()
     controller = AgentController(build_rescue_topology(provider))
     subnet, _ = await controller.build_task_subnet(task)
@@ -243,7 +243,7 @@ async def _build(scenario_key: str) -> dict:
     threshold = rescue_task().qos.risk_threshold
 
     # ---- World A: minimal adjustment -------------------------------------
-    provider = MockMetricProvider()
+    provider = SyntheticMetricProvider()
     task = rescue_task()
     controller = AgentController(build_rescue_topology(provider))
     nodes, _ = _build_static_graph(controller.gateways)
@@ -432,7 +432,7 @@ async def _build(scenario_key: str) -> dict:
     )
 
     # ---- World B: full-rebuild baseline ----------------------------------
-    provider_b = MockMetricProvider()
+    provider_b = SyntheticMetricProvider()
     task_b = rescue_task()
     controller_b = AgentController(build_rescue_topology(provider_b))
     subnet_b, build_b = await controller_b.build_task_subnet(task_b)

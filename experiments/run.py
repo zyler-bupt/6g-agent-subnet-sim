@@ -14,7 +14,7 @@ except ModuleNotFoundError:  # plotting is optional for minimal simulation runs
 from src import report
 from src.controller.networking import AgentController
 from src.core.models import ExperimentMetrics, TaskSpec, TaskSubnet, to_jsonable
-from src.metrics.mock import MockMetricProvider
+from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
 
@@ -51,9 +51,9 @@ class Outcome:
     full_ops: dict
 
 
-async def _fresh_world() -> tuple[MockMetricProvider, TaskSpec, AgentController, TaskSubnet, ExperimentMetrics]:
+async def _fresh_world() -> tuple[SyntheticMetricProvider, TaskSpec, AgentController, TaskSubnet, ExperimentMetrics]:
     """Build an independent, deterministically seeded copy of the scenario."""
-    provider = MockMetricProvider()
+    provider = SyntheticMetricProvider()
     task = rescue_task()
     controller = AgentController(build_rescue_topology(provider))
     subnet, build_metrics = await controller.build_task_subnet(task)

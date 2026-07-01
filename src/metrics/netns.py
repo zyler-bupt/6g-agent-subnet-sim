@@ -18,6 +18,7 @@ class NetnsTarget:
     iperf_seconds: int = 1
     command_timeout_s: float = 8.0
     sudo: bool = False
+    label: str = ""
 
 
 @dataclass
@@ -30,7 +31,7 @@ class NetnsMetricProvider:
     _effects: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def snapshot(self, task_id: str, agent_id: str, timestamp: float) -> MetricSnapshot:
-        target = self.targets.get(agent_id, self.default_target)
+        target = self.target_for(agent_id)
         cache_key = f"{task_id}:{target.namespace}:{target.target_ip}:{target.iperf_port}"
         cached = self._cache.get(cache_key)
         now = time.monotonic()
@@ -52,8 +53,20 @@ class NetnsMetricProvider:
 
     def inject_event(self, task_id: str, event_type: str, severity: float = 1.0) -> None:
         # Real event injection is handled by tc/netem scripts. This method exists
-        # to keep the MetricProvider interface compatible with mock mode.
+        # to keep the MetricProvider interface compatible with offline synthetic mode.
         self._cache.clear()
+
+    def target_for(self, agent_id: str) -> NetnsTarget:
+        return self.targets.get(agent_id, self.default_target)
+
+    def describe_target(self, agent_id: str) -> dict[str, int | float | str | bool]:
+        return _target_to_dict(self.target_for(agent_id))
+
+    def describe_targets(self) -> dict[str, dict[str, int | float | str | bool]]:
+        return {
+            agent_id: _target_to_dict(target)
+            for agent_id, target in sorted(self.targets.items())
+        }
 
     def _measure(self, task_id: str, timestamp: float, target: NetnsTarget) -> MetricSnapshot:
         ping = parse_ping(
@@ -141,3 +154,16 @@ class NetnsMetricProvider:
                 + f"\nexit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
             )
         return completed.stdout
+
+
+def _target_to_dict(target: NetnsTarget) -> dict[str, int | float | str | bool]:
+    return {
+        "label": target.label,
+        "namespace": target.namespace,
+        "target_ip": target.target_ip,
+        "iperf_port": target.iperf_port,
+        "ping_count": target.ping_count,
+        "ping_interval_s": target.ping_interval_s,
+        "iperf_seconds": target.iperf_seconds,
+        "sudo": target.sudo,
+    }
