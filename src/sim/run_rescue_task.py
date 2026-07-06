@@ -73,6 +73,29 @@ async def run() -> None:
     ]
     lines.append(report.table(["#", "业务流", "传输Agent", "网络Agent", "跨网关路径"], session_rows))
 
+    lines.append(report.section("会话/路径支撑绑定（tAgent 管会话，nAgent 管路径）"))
+    support_rows = []
+    for session in subnet.sessions:
+        session_support = subnet.session_supports[session.session_id]
+        path_support = subnet.path_supports[session_support.path_support_id]
+        support_rows.append(
+            [
+                session.session_id.rsplit("-", 1)[-1],
+                session_support.support_id,
+                session_support.t_agent_id,
+                path_support.support_id,
+                path_support.n_agent_id,
+                " → ".join(path_support.gateway_path),
+                _format_links(path_support.monitored_links),
+            ]
+        )
+    lines.append(
+        report.table(
+            ["会话", "会话支撑ID", "tAgent", "路径支撑ID", "nAgent", "网关路径", "监测链路"],
+            support_rows,
+        )
+    )
+
     lines.append(report.section("Controller 下发的网关任务级路由表（隔离转发）"))
     route_rows = []
     for gateway_id in sorted(subnet.involved_gateways):
@@ -87,11 +110,12 @@ async def run() -> None:
                     entry.action.mode,
                     _route_action_target(entry),
                     f"{entry.t_agent_id} / {entry.n_agent_id}",
+                    entry.path_support_id,
                 ]
             )
     lines.append(
         report.table(
-            ["网关", "会话", "跳", "业务流", "动作", "下一跳/本地投递", "支撑Agent"],
+            ["网关", "会话", "跳", "业务流", "动作", "下一跳/本地投递", "支撑Agent", "路径支撑"],
             route_rows,
         )
     )
@@ -123,6 +147,12 @@ def _route_action_target(entry) -> str:
     if action.mode == "forward_to_gateway":
         return f"{action.next_hop_gateway} @ {action.next_hop_gateway_ip}"
     return "deny"
+
+
+def _format_links(links: tuple[tuple[str, str], ...]) -> str:
+    if not links:
+        return "本地"
+    return "  ".join(f"{source}->{target}" for source, target in links)
 
 
 def main() -> None:

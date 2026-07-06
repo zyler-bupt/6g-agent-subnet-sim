@@ -126,6 +126,26 @@ class SessionSpec:
 
 
 @dataclass(frozen=True)
+class PathSupportSpec:
+    support_id: str
+    path_id: str
+    gateway_path: tuple[str, ...]
+    n_agent_id: str
+    monitored_links: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    support_scope: str = "path"
+
+
+@dataclass(frozen=True)
+class SessionSupportSpec:
+    support_id: str
+    session_id: str
+    t_agent_id: str
+    path_support_id: str
+    path_id: str
+    gateway_path: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FlowMatch:
     src_agent: str
     dst_agent: str
@@ -158,6 +178,8 @@ class GatewayRouteEntry:
     t_agent_id: str
     n_agent_id: str
     p_agent_id: str | None = None
+    session_support_id: str = ""
+    path_support_id: str = ""
     path_id: str = ""
     gateway_path: tuple[str, ...] = field(default_factory=tuple)
     hop_index: int = 0
@@ -194,6 +216,8 @@ class TaskSubnet:
     sessions: list[SessionSpec] = field(default_factory=list)
     involved_gateways: set[str] = field(default_factory=set)
     gateway_routes: dict[str, list[GatewayRouteEntry]] = field(default_factory=dict)
+    path_supports: dict[str, PathSupportSpec] = field(default_factory=dict)
+    session_supports: dict[str, SessionSupportSpec] = field(default_factory=dict)
     state: TaskState = TaskState.CREATED
     gateway_acks: list[GatewayAck] = field(default_factory=list)
     predictions: dict[str, AgentPrediction] = field(default_factory=dict)

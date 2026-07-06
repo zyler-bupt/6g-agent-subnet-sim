@@ -44,7 +44,35 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertEqual(len(subnet.trans_agents), 3)
             self.assertEqual(len(subnet.net_agents), 3)
             self.assertEqual(subnet.phy_agents, set())
+            self.assertEqual(len(subnet.session_supports), 3)
+            self.assertEqual(len(subnet.path_supports), 3)
             self.assertTrue(all(ack.accepted for ack in subnet.gateway_acks))
+
+        asyncio.run(run())
+
+    def test_support_bindings_match_route_table(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+            session_id = "task-rescue-001-sess-1"
+
+            session = next(item for item in subnet.sessions if item.session_id == session_id)
+            session_support = subnet.session_supports[session_id]
+            path_support = subnet.path_supports[session_support.path_support_id]
+            route = next(
+                entry
+                for entry in controller.gateways["gw-ue"].installed_route_table()
+                if entry.session_id == session_id
+            )
+
+            self.assertEqual(session_support.t_agent_id, session.t_agent_id)
+            self.assertEqual(session_support.path_id, session.path_id)
+            self.assertEqual(path_support.n_agent_id, session.n_agent_id)
+            self.assertEqual(path_support.gateway_path, session.gateway_path)
+            self.assertEqual(path_support.monitored_links, (("gw-ue", "gw-mec"),))
+            self.assertEqual(route.session_support_id, session_support.support_id)
+            self.assertEqual(route.path_support_id, path_support.support_id)
 
         asyncio.run(run())
 
@@ -144,6 +172,11 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertEqual(mec_route.action.local_agent, "agent-edge-recognition")
             self.assertEqual(mec_route.action.local_agent_ip, "10.10.2.2")
             self.assertEqual(mec_route.hop_index, 2)
+            session_support = subnet.session_supports[session_id]
+            path_support = subnet.path_supports[session_support.path_support_id]
+            self.assertEqual(path_support.gateway_path, ("gw-ue", "gw-relay", "gw-mec"))
+            self.assertEqual(path_support.monitored_links, (("gw-ue", "gw-relay"), ("gw-relay", "gw-mec")))
+            self.assertEqual(relay_route.path_support_id, path_support.support_id)
 
         asyncio.run(run())
 

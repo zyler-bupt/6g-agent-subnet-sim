@@ -17,7 +17,9 @@ from src.core.models import (
     GatewayAck,
     GatewayRouteAction,
     GatewayRouteEntry,
+    PathSupportSpec,
     SessionSpec,
+    SessionSupportSpec,
     TaskSpec,
     TaskState,
     TaskSubnet,
@@ -59,6 +61,7 @@ class AgentController:
         subnet.edges = self._build_edges(task, sessions)
         subnet.sessions = sessions
         subnet.involved_gateways = _involved_gateways(sessions)
+        subnet.path_supports, subnet.session_supports = self._build_support_bindings(sessions)
         subnet.gateway_routes = self._build_gateway_route_tables(task, sessions, app_cards)
         subnet.gateway_acks = await self._install_on_gateways(
             task,
@@ -200,6 +203,7 @@ class AgentController:
         subnet.edges = self._build_edges(task, new_sessions)
         subnet.involved_gateways |= affected_gateways | _involved_gateways(new_sessions)
         subnet.state = TaskState.NETWORKED if not unresolved else TaskState.DEGRADED
+        subnet.path_supports, subnet.session_supports = self._build_support_bindings(new_sessions)
         app_cards = self._current_app_cards(task)
         subnet.gateway_routes = self._build_gateway_route_tables(task, new_sessions, app_cards)
         await self._apply_sessions(subnet, tuple(s for s in new_sessions if s.status == "rehomed"))
@@ -392,6 +396,33 @@ class AgentController:
             edges.add((session.n_agent_id, session.target, "supports_delivery"))
         return edges
 
+    def _build_support_bindings(
+        self,
+        sessions: list[SessionSpec],
+    ) -> tuple[dict[str, PathSupportSpec], dict[str, SessionSupportSpec]]:
+        path_supports: dict[str, PathSupportSpec] = {}
+        session_supports: dict[str, SessionSupportSpec] = {}
+        for session in sessions:
+            gateway_path = _session_gateways(session)
+            path_support_id = _path_support_id(session)
+            session_support_id = _session_support_id(session)
+            path_supports[path_support_id] = PathSupportSpec(
+                support_id=path_support_id,
+                path_id=session.path_id,
+                gateway_path=gateway_path,
+                n_agent_id=session.n_agent_id,
+                monitored_links=_path_links(gateway_path),
+            )
+            session_supports[session.session_id] = SessionSupportSpec(
+                support_id=session_support_id,
+                session_id=session.session_id,
+                t_agent_id=session.t_agent_id,
+                path_support_id=path_support_id,
+                path_id=session.path_id,
+                gateway_path=gateway_path,
+            )
+        return path_supports, session_supports
+
     async def _install_on_gateways(
         self,
         task: TaskSpec,
@@ -490,6 +521,8 @@ class AgentController:
             action=action,
             t_agent_id=session.t_agent_id,
             n_agent_id=session.n_agent_id,
+            session_support_id=_session_support_id(session),
+            path_support_id=_path_support_id(session),
             path_id=session.path_id,
             gateway_path=session.gateway_path,
             hop_index=hop_index,
@@ -561,6 +594,18 @@ def _priority_to_dscp(priority: int) -> int:
 
 def _session_gateways(session: SessionSpec) -> tuple[str, ...]:
     return session.gateway_path or (session.source_gateway, session.target_gateway)
+
+
+def _path_links(gateway_path: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(zip(gateway_path, gateway_path[1:]))
+
+
+def _session_support_id(session: SessionSpec) -> str:
+    return f"{session.session_id}:session-support"
+
+
+def _path_support_id(session: SessionSpec) -> str:
+    return f"{session.session_id}:path-support"
 
 
 def _involved_gateways(sessions: list[SessionSpec]) -> set[str]:

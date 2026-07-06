@@ -72,6 +72,7 @@ async def run(args: argparse.Namespace) -> dict:
         "target_profile": args.target_profile,
         "measurement_targets": _describe_provider_targets(provider),
         "gateway_route_tables": _gateway_route_tables(controller),
+        "support_bindings": _support_bindings(subnet),
         "build_metrics": to_jsonable(build_metrics),
         "history_steps": args.history_steps,
         "horizon": args.horizon,
@@ -314,6 +315,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "horizon": result["horizon"],
         "measurement_targets": result["measurement_targets"],
         "gateway_route_tables": result["gateway_route_tables"],
+        "support_bindings": result["support_bindings"],
         "baseline": _compact_loop_result(result["baseline"]),
     }
     if result.get("event") is not None:
@@ -357,6 +359,13 @@ def _gateway_route_tables(controller: AgentController) -> dict[str, list[dict[st
         if entries:
             tables[gateway_id] = entries
     return tables
+
+
+def _support_bindings(subnet: TaskSubnet) -> dict[str, Any]:
+    return {
+        "session_supports": to_jsonable(subnet.session_supports),
+        "path_supports": to_jsonable(subnet.path_supports),
+    }
 
 
 def _apply_netem(args: argparse.Namespace) -> None:
