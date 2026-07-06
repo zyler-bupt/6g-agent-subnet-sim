@@ -73,6 +73,8 @@ async def run(args: argparse.Namespace) -> dict:
         "measurement_targets": _describe_provider_targets(provider),
         "gateway_route_tables": _gateway_route_tables(controller),
         "support_bindings": _support_bindings(subnet),
+        "agent_confirm_acks": to_jsonable(subnet.agent_acks),
+        "gateway_install_acks": to_jsonable(subnet.gateway_acks),
         "build_metrics": to_jsonable(build_metrics),
         "history_steps": args.history_steps,
         "horizon": args.horizon,
@@ -316,6 +318,8 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "measurement_targets": result["measurement_targets"],
         "gateway_route_tables": result["gateway_route_tables"],
         "support_bindings": result["support_bindings"],
+        "agent_confirm_acks": result["agent_confirm_acks"],
+        "gateway_install_acks": result["gateway_install_acks"],
         "baseline": _compact_loop_result(result["baseline"]),
     }
     if result.get("event") is not None:

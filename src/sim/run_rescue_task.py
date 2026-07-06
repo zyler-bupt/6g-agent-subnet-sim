@@ -60,6 +60,21 @@ async def run() -> None:
         )
     )
 
+    lines.append(report.section("AgentCard 确认 ACK（网关先确认本地 Agent 可用）"))
+    agent_ack_rows = [
+        [
+            ack.gateway_id,
+            ack.agent_id,
+            ack.layer.value if ack.layer else "",
+            ack.purpose,
+            f"{ack.ip}:{ack.port}" if ack.port is not None else ack.ip,
+            "接受 ✓" if ack.accepted else "拒绝 ✗",
+            ack.reason,
+        ]
+        for ack in subnet.agent_acks
+    ]
+    lines.append(report.table(["网关", "Agent", "层", "用途", "IP:端口", "结果", "原因"], agent_ack_rows))
+
     lines.append(report.section("端到端会话（每条业务边映射一条会话）"))
     session_rows = [
         [
@@ -134,8 +149,19 @@ async def run() -> None:
     lines.append(report.table(["层", "Agent", "预测指标", "未来 H 步"], pred_rows))
 
     lines.append(report.section("网关确认"))
-    ack_rows = [[a.gateway_id, "接受 ✓" if a.accepted else "拒绝 ✗", a.reason] for a in subnet.gateway_acks]
-    lines.append(report.table(["网关", "结果", "原因"], ack_rows))
+    ack_rows = [
+        [
+            ack.gateway_id,
+            ack.operation,
+            "接受 ✓" if ack.accepted else "拒绝 ✗",
+            ack.session_count,
+            ack.route_count,
+            "  ".join(_short_session_id(item) for item in ack.installed_session_ids) or "-",
+            ack.reason,
+        ]
+        for ack in subnet.gateway_acks
+    ]
+    lines.append(report.table(["网关", "操作", "结果", "会话数", "路由数", "会话", "原因"], ack_rows))
 
     print("\n".join(lines))
 
@@ -153,6 +179,10 @@ def _format_links(links: tuple[tuple[str, str], ...]) -> str:
     if not links:
         return "本地"
     return "  ".join(f"{source}->{target}" for source, target in links)
+
+
+def _short_session_id(session_id: str) -> str:
+    return session_id.rsplit("-", 1)[-1]
 
 
 def main() -> None:

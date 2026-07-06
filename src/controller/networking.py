@@ -11,6 +11,7 @@ from src.controller.risk import RiskCalculator
 from src.core.gateway import Gateway
 from src.core.models import (
     AgentCard,
+    AgentConfirmAck,
     AgentLayer,
     ExperimentMetrics,
     FlowMatch,
@@ -52,10 +53,11 @@ class AgentController:
     async def build_task_subnet(self, task: TaskSpec) -> tuple[TaskSubnet, ExperimentMetrics]:
         start = perf_counter()
         subnet = TaskSubnet(task=task, app_agents=set(task.app_agents), state=TaskState.NETWORKING)
-        app_cards = await self._confirm_app_members(task)
-        support_cards = await self._select_support_agents(task, app_cards)
+        app_cards, app_acks = await self._confirm_app_members(task)
+        support_cards, support_acks = await self._select_support_agents(task, app_cards)
         sessions = self._map_edges_to_sessions(task, app_cards, support_cards)
 
+        subnet.agent_acks = app_acks + support_acks
         subnet.trans_agents = {session.t_agent_id for session in sessions}
         subnet.net_agents = {session.n_agent_id for session in sessions}
         subnet.edges = self._build_edges(task, sessions)
@@ -333,21 +335,24 @@ class AgentController:
         )
         return new_subnet, risk_after, result
 
-    async def _confirm_app_members(self, task: TaskSpec) -> dict[str, AgentCard]:
+    async def _confirm_app_members(self, task: TaskSpec) -> tuple[dict[str, AgentCard], list[AgentConfirmAck]]:
         cards: dict[str, AgentCard] = {}
+        acks: list[AgentConfirmAck] = []
         for agent_id in task.app_agents:
             card = await self._find_agent(agent_id)
             if card is None or card.layer != AgentLayer.APPLICATION:
                 raise ValueError(f"application agent unavailable: {agent_id}")
             cards[agent_id] = card
-        return cards
+            acks.append(_agent_ack(task.task_id, card, "app_member"))
+        return cards, acks
 
     async def _select_support_agents(
         self,
         task: TaskSpec,
         app_cards: dict[str, AgentCard],
-    ) -> dict[str, tuple[AgentCard, AgentCard]]:
+    ) -> tuple[dict[str, tuple[AgentCard, AgentCard]], list[AgentConfirmAck]]:
         selected: dict[str, tuple[AgentCard, AgentCard]] = {}
+        ack_by_agent: dict[tuple[str, str], AgentConfirmAck] = {}
         for edge in task.biz_edges:
             source = app_cards[edge.source]
             t_agent = await self._first_support("transport_session", preferred_gateway=source.gateway_id)
@@ -355,7 +360,17 @@ class AgentController:
             if t_agent is None or n_agent is None:
                 raise ValueError(f"support agents unavailable for edge {edge.source}->{edge.target}")
             selected[f"{edge.source}->{edge.target}"] = (t_agent, n_agent)
-        return selected
+            ack_by_agent[(t_agent.agent_id, "transport_session")] = _agent_ack(
+                task.task_id,
+                t_agent,
+                "transport_session",
+            )
+            ack_by_agent[(n_agent.agent_id, "network_bearer")] = _agent_ack(
+                task.task_id,
+                n_agent,
+                "network_bearer",
+            )
+        return selected, list(ack_by_agent.values())
 
     def _map_edges_to_sessions(
         self,
@@ -590,6 +605,22 @@ def _priority_to_dscp(priority: int) -> int:
     if priority == 2:
         return 0x68
     return 0x00
+
+
+def _agent_ack(task_id: str, card: AgentCard, purpose: str) -> AgentConfirmAck:
+    return AgentConfirmAck(
+        task_id=task_id,
+        gateway_id=card.gateway_id,
+        agent_id=card.agent_id,
+        accepted=True,
+        purpose=purpose,
+        layer=card.layer,
+        role=card.role,
+        endpoint=card.endpoint,
+        ip=card.ip,
+        port=card.port,
+        capabilities=card.capabilities,
+    )
 
 
 def _session_gateways(session: SessionSpec) -> tuple[str, ...]:

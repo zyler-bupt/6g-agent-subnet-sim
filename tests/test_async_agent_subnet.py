@@ -8,7 +8,7 @@ from src.agents.phy_agent import PhyAgentStub
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator, RiskWeights
 from src.core.gateway import Gateway
-from src.core.models import AgentLayer
+from src.core.models import AgentLayer, FlowMatch, GatewayRouteAction, GatewayRouteEntry
 from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.bus import AsyncMessageBus
 from src.sim.scenarios import rescue_task
@@ -46,7 +46,65 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertEqual(subnet.phy_agents, set())
             self.assertEqual(len(subnet.session_supports), 3)
             self.assertEqual(len(subnet.path_supports), 3)
+            self.assertEqual(len(subnet.agent_acks), 10)
             self.assertTrue(all(ack.accepted for ack in subnet.gateway_acks))
+            self.assertTrue(all(ack.accepted for ack in subnet.agent_acks))
+
+        asyncio.run(run())
+
+    def test_agentcard_and_gateway_install_acks_are_auditable(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+
+            app_ack = next(ack for ack in subnet.agent_acks if ack.agent_id == "agent-drone-capture")
+            self.assertEqual(app_ack.gateway_id, "gw-ue")
+            self.assertEqual(app_ack.purpose, "app_member")
+            self.assertEqual(app_ack.ip, "10.10.1.2")
+            self.assertEqual(app_ack.port, 9101)
+
+            support_ack = next(ack for ack in subnet.agent_acks if ack.agent_id == "nagent-gw-ue")
+            self.assertEqual(support_ack.purpose, "network_bearer")
+            self.assertIn("network_bearer", support_ack.capabilities)
+
+            ue_ack = next(ack for ack in subnet.gateway_acks if ack.gateway_id == "gw-ue")
+            self.assertTrue(ue_ack.accepted)
+            self.assertEqual(ue_ack.operation, "install")
+            self.assertEqual(ue_ack.session_count, 2)
+            self.assertEqual(ue_ack.route_count, 2)
+            self.assertIn("task-rescue-001-sess-1", ue_ack.installed_session_ids)
+            self.assertIn("task-rescue-001-sess-3", ue_ack.installed_session_ids)
+            self.assertTrue(all(route_id.startswith("task-rescue-001:") for route_id in ue_ack.installed_route_ids))
+
+        asyncio.run(run())
+
+    def test_gateway_rejects_unavailable_local_delivery_agent(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            gateway = build_rescue_topology(provider)["gw-mec"]
+            action = GatewayRouteAction(
+                mode="local_delivery",
+                allow=True,
+                local_agent="missing-agent",
+                local_agent_ip="10.10.2.2",
+                local_agent_port=9999,
+            )
+            entry = GatewayRouteEntry(
+                task_id="task-x",
+                session_id="sess-x",
+                gateway_id="gw-mec",
+                flow_id="a->b",
+                match=FlowMatch(src_agent="a", dst_agent="b", flow_type="video"),
+                action=action,
+                t_agent_id="tagent-gw-mec",
+                n_agent_id="nagent-gw-mec",
+            )
+            ack = await gateway.install_subnet(rescue_task(), [], [entry])
+            self.assertFalse(ack.accepted)
+            self.assertEqual(ack.operation, "install")
+            self.assertEqual(ack.reason, "local_agent_unavailable:missing-agent")
+            self.assertEqual(gateway.installed_route_table(), [])
 
         asyncio.run(run())
 

@@ -1,6 +1,7 @@
 from src.core.models import (
     AgentAction,
     AgentCard,
+    AgentConfirmAck,
     AgentLayer,
     AgentPrediction,
     AgentRole,
@@ -26,6 +27,7 @@ from src.core.models import (
 __all__ = [
     "AgentAction",
     "AgentCard",
+    "AgentConfirmAck",
     "AgentLayer",
     "AgentPrediction",
     "AgentRole",

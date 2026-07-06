@@ -146,6 +146,22 @@ class SessionSupportSpec:
 
 
 @dataclass(frozen=True)
+class AgentConfirmAck:
+    task_id: str
+    gateway_id: str
+    agent_id: str
+    accepted: bool
+    purpose: str
+    layer: AgentLayer | None = None
+    role: AgentRole | None = None
+    endpoint: str = ""
+    ip: str = ""
+    port: int | None = None
+    capabilities: tuple[str, ...] = field(default_factory=tuple)
+    reason: str = "ok"
+
+
+@dataclass(frozen=True)
 class FlowMatch:
     src_agent: str
     dst_agent: str
@@ -194,6 +210,11 @@ class GatewayAck:
     task_id: str
     accepted: bool
     reason: str = "ok"
+    operation: str = "install"
+    installed_session_ids: tuple[str, ...] = field(default_factory=tuple)
+    installed_route_ids: tuple[str, ...] = field(default_factory=tuple)
+    session_count: int = 0
+    route_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -218,6 +239,7 @@ class TaskSubnet:
     gateway_routes: dict[str, list[GatewayRouteEntry]] = field(default_factory=dict)
     path_supports: dict[str, PathSupportSpec] = field(default_factory=dict)
     session_supports: dict[str, SessionSupportSpec] = field(default_factory=dict)
+    agent_acks: list[AgentConfirmAck] = field(default_factory=list)
     state: TaskState = TaskState.CREATED
     gateway_acks: list[GatewayAck] = field(default_factory=list)
     predictions: dict[str, AgentPrediction] = field(default_factory=dict)
