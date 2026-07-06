@@ -7,6 +7,7 @@ from src.agents.base import exponential_forecast
 from src.agents.phy_agent import PhyAgentStub
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator, RiskWeights
+from src.core.gateway import Gateway
 from src.core.models import AgentLayer
 from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.bus import AsyncMessageBus
@@ -84,6 +85,65 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertEqual(local.action.local_agent_ip, "10.10.2.2")
             self.assertEqual(local.action.local_agent_port, 9201)
             self.assertIsNone(local.action.next_hop_gateway_ip)
+
+        asyncio.run(run())
+
+    def test_gateway_route_table_installs_multihop_transit_entries(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            gateways = build_rescue_topology(provider)
+            gateways["gw-relay"] = Gateway(
+                gateway_id="gw-relay",
+                subnet_id="relay-subnet",
+                node="relay-node",
+                gateway_ip="10.10.9.2",
+            )
+            controller = AgentController(
+                gateways,
+                gateway_paths={
+                    ("gw-ue", "gw-mec"): ("gw-ue", "gw-relay", "gw-mec"),
+                },
+            )
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+            session_id = "task-rescue-001-sess-1"
+            session = next(item for item in subnet.sessions if item.session_id == session_id)
+
+            self.assertEqual(session.gateway_path, ("gw-ue", "gw-relay", "gw-mec"))
+            self.assertIn("gw-relay", subnet.involved_gateways)
+            self.assertIn(session_id, controller.gateways["gw-relay"].installed_sessions)
+
+            ue_route = next(
+                entry
+                for entry in controller.gateways["gw-ue"].installed_route_table()
+                if entry.session_id == session_id
+            )
+            relay_route = next(
+                entry
+                for entry in controller.gateways["gw-relay"].installed_route_table()
+                if entry.session_id == session_id
+            )
+            mec_route = next(
+                entry
+                for entry in controller.gateways["gw-mec"].installed_route_table()
+                if entry.session_id == session_id
+            )
+
+            self.assertEqual(ue_route.action.mode, "forward_to_gateway")
+            self.assertEqual(ue_route.action.next_hop_gateway, "gw-relay")
+            self.assertEqual(ue_route.action.next_hop_gateway_ip, "10.10.9.2")
+            self.assertIsNone(ue_route.action.local_agent_ip)
+            self.assertEqual(ue_route.hop_index, 0)
+
+            self.assertEqual(relay_route.action.mode, "forward_to_gateway")
+            self.assertEqual(relay_route.action.next_hop_gateway, "gw-mec")
+            self.assertEqual(relay_route.action.next_hop_gateway_ip, "10.10.2.2")
+            self.assertIsNone(relay_route.action.local_agent_ip)
+            self.assertEqual(relay_route.hop_index, 1)
+
+            self.assertEqual(mec_route.action.mode, "local_delivery")
+            self.assertEqual(mec_route.action.local_agent, "agent-edge-recognition")
+            self.assertEqual(mec_route.action.local_agent_ip, "10.10.2.2")
+            self.assertEqual(mec_route.hop_index, 2)
 
         asyncio.run(run())
 

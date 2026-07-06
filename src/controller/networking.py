@@ -38,11 +38,13 @@ class AgentController:
         risk_calculator: RiskCalculator | None = None,
         adjuster: ElasticAdjuster | None = None,
         cost_model: CostModel | None = None,
+        gateway_paths: dict[tuple[str, str], tuple[str, ...]] | None = None,
     ) -> None:
         self.gateways = gateways
         self.cost_model = cost_model or CostModel()
         self.risk_calculator = risk_calculator or RiskCalculator()
         self.adjuster = adjuster or ElasticAdjuster(self.cost_model)
+        self.gateway_paths = dict(gateway_paths or {})
         self.tasks: dict[str, TaskSubnet] = {}
 
     async def build_task_subnet(self, task: TaskSpec) -> tuple[TaskSubnet, ExperimentMetrics]:
@@ -56,9 +58,7 @@ class AgentController:
         subnet.net_agents = {session.n_agent_id for session in sessions}
         subnet.edges = self._build_edges(task, sessions)
         subnet.sessions = sessions
-        subnet.involved_gateways = {
-            gateway for session in sessions for gateway in (session.source_gateway, session.target_gateway)
-        }
+        subnet.involved_gateways = _involved_gateways(sessions)
         subnet.gateway_routes = self._build_gateway_route_tables(task, sessions, app_cards)
         subnet.gateway_acks = await self._install_on_gateways(
             task,
@@ -198,7 +198,7 @@ class AgentController:
         subnet.trans_agents = {s.t_agent_id for s in new_sessions}
         subnet.net_agents = {s.n_agent_id for s in new_sessions}
         subnet.edges = self._build_edges(task, new_sessions)
-        subnet.involved_gateways |= affected_gateways
+        subnet.involved_gateways |= affected_gateways | _involved_gateways(new_sessions)
         subnet.state = TaskState.NETWORKED if not unresolved else TaskState.DEGRADED
         app_cards = self._current_app_cards(task)
         subnet.gateway_routes = self._build_gateway_route_tables(task, new_sessions, app_cards)
@@ -258,7 +258,7 @@ class AgentController:
             return
         task_id = subnet.task.task_id
         affected_gateways = {
-            gateway_id for session in sessions for gateway_id in (session.source_gateway, session.target_gateway)
+            gateway_id for session in sessions for gateway_id in _session_gateways(session)
         }
         changed_session_ids = {session.session_id for session in sessions}
         changed_routes = [
@@ -364,6 +364,7 @@ class AgentController:
             source = app_cards[edge.source]
             target = app_cards[edge.target]
             t_agent, n_agent = support_cards[f"{edge.source}->{edge.target}"]
+            gateway_path = self._gateway_path(source.gateway_id, target.gateway_id)
             sessions.append(
                 SessionSpec(
                     session_id=f"{task.task_id}-sess-{index}",
@@ -376,6 +377,8 @@ class AgentController:
                     target_gateway=target.gateway_id,
                     latency_budget_ms=edge.latency_budget_ms,
                     data_rate_mbps=edge.data_rate_mbps,
+                    path_id="->".join(gateway_path),
+                    gateway_path=gateway_path,
                 )
             )
         return sessions
@@ -422,7 +425,9 @@ class AgentController:
         }
         for session in sessions:
             edge = edges[(session.source, session.target)]
-            for gateway_id in (session.source_gateway, session.target_gateway):
+            gateway_path = _session_gateways(session)
+            for hop_index, gateway_id in enumerate(gateway_path):
+                next_hop_gateway = gateway_path[hop_index + 1] if hop_index + 1 < len(gateway_path) else None
                 entry = self._route_entry_for_gateway(
                     task,
                     session,
@@ -430,6 +435,8 @@ class AgentController:
                     edge.priority,
                     app_cards,
                     gateway_id,
+                    hop_index,
+                    next_hop_gateway,
                 )
                 tables.setdefault(gateway_id, []).append(entry)
         return tables
@@ -442,6 +449,8 @@ class AgentController:
         priority: int,
         app_cards: dict[str, AgentCard],
         gateway_id: str,
+        hop_index: int,
+        next_hop_gateway: str | None,
     ) -> GatewayRouteEntry:
         target = app_cards[session.target]
         match = FlowMatch(
@@ -461,7 +470,9 @@ class AgentController:
                 priority=priority,
             )
         else:
-            next_hop = self.gateways[session.target_gateway]
+            if next_hop_gateway is None:
+                raise ValueError(f"missing next hop for route {session.session_id} at {gateway_id}")
+            next_hop = self.gateways[next_hop_gateway]
             action = GatewayRouteAction(
                 mode="forward_to_gateway",
                 allow=True,
@@ -479,10 +490,28 @@ class AgentController:
             action=action,
             t_agent_id=session.t_agent_id,
             n_agent_id=session.n_agent_id,
+            path_id=session.path_id,
+            gateway_path=session.gateway_path,
+            hop_index=hop_index,
             latency_budget_ms=session.latency_budget_ms,
             min_bandwidth_mbps=session.data_rate_mbps,
             status=session.status,
         )
+
+    def _gateway_path(self, source_gateway: str, target_gateway: str) -> tuple[str, ...]:
+        if source_gateway == target_gateway:
+            return (source_gateway,)
+        path = self.gateway_paths.get((source_gateway, target_gateway), (source_gateway, target_gateway))
+        if not path:
+            raise ValueError(f"empty gateway path for {source_gateway}->{target_gateway}")
+        if path[0] != source_gateway or path[-1] != target_gateway:
+            raise ValueError(
+                f"gateway path must start at {source_gateway} and end at {target_gateway}: {path}"
+            )
+        unknown = [gateway_id for gateway_id in path if gateway_id not in self.gateways]
+        if unknown:
+            raise ValueError(f"gateway path references unknown gateways: {unknown}")
+        return tuple(path)
 
     def _current_app_cards(self, task: TaskSpec) -> dict[str, AgentCard]:
         cards = {}
@@ -528,3 +557,15 @@ def _priority_to_dscp(priority: int) -> int:
     if priority == 2:
         return 0x68
     return 0x00
+
+
+def _session_gateways(session: SessionSpec) -> tuple[str, ...]:
+    return session.gateway_path or (session.source_gateway, session.target_gateway)
+
+
+def _involved_gateways(sessions: list[SessionSpec]) -> set[str]:
+    return {
+        gateway_id
+        for session in sessions
+        for gateway_id in _session_gateways(session)
+    }

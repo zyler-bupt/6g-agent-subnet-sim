@@ -54,7 +54,7 @@ class Gateway:
     ) -> GatewayAck:
         await asyncio.sleep(0)
         for session in sessions:
-            if self.gateway_id in {session.source_gateway, session.target_gateway}:
+            if self.gateway_id in _session_gateways(session):
                 self.installed_sessions[session.session_id] = session
         for entry in route_entries:
             if entry.gateway_id == self.gateway_id:
@@ -70,7 +70,7 @@ class Gateway:
         await asyncio.sleep(0)
         self.update_count += 1
         for session in changed_sessions:
-            if self.gateway_id in {session.source_gateway, session.target_gateway}:
+            if self.gateway_id in _session_gateways(session):
                 self.installed_sessions[session.session_id] = session
         for entry in route_entries:
             if entry.gateway_id == self.gateway_id:
@@ -85,4 +85,8 @@ class Gateway:
 
 
 def entry_key(entry: GatewayRouteEntry) -> str:
-    return f"{entry.task_id}:{entry.session_id}:{entry.gateway_id}:{entry.action.mode}"
+    return f"{entry.task_id}:{entry.session_id}:{entry.gateway_id}:{entry.hop_index}:{entry.action.mode}"
+
+
+def _session_gateways(session: SessionSpec) -> tuple[str, ...]:
+    return session.gateway_path or (session.source_gateway, session.target_gateway)

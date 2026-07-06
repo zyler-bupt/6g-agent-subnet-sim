@@ -120,6 +120,8 @@ class SessionSpec:
     target_gateway: str
     latency_budget_ms: float
     data_rate_mbps: float
+    path_id: str = ""
+    gateway_path: tuple[str, ...] = field(default_factory=tuple)
     status: str = "established"
 
 
@@ -156,6 +158,9 @@ class GatewayRouteEntry:
     t_agent_id: str
     n_agent_id: str
     p_agent_id: str | None = None
+    path_id: str = ""
+    gateway_path: tuple[str, ...] = field(default_factory=tuple)
+    hop_index: int = 0
     latency_budget_ms: float = 0.0
     min_bandwidth_mbps: float = 0.0
     status: str = "installed"

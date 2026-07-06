@@ -67,7 +67,7 @@ async def run() -> None:
             f"{s.source} → {s.target}",
             s.t_agent_id,
             s.n_agent_id,
-            f"{s.source_gateway} → {s.target_gateway}",
+            " → ".join(s.gateway_path or (s.source_gateway, s.target_gateway)),
         ]
         for i, s in enumerate(subnet.sessions, start=1)
     ]
@@ -82,6 +82,7 @@ async def run() -> None:
                 [
                     gateway_id,
                     entry.session_id.rsplit("-", 1)[-1],
+                    f"{entry.hop_index + 1}/{len(entry.gateway_path) or 1}",
                     f"{entry.match.src_agent} → {entry.match.dst_agent}",
                     entry.action.mode,
                     _route_action_target(entry),
@@ -90,7 +91,7 @@ async def run() -> None:
             )
     lines.append(
         report.table(
-            ["网关", "会话", "业务流", "动作", "下一跳/本地投递", "支撑Agent"],
+            ["网关", "会话", "跳", "业务流", "动作", "下一跳/本地投递", "支撑Agent"],
             route_rows,
         )
     )
