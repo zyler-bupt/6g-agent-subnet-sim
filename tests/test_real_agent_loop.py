@@ -112,6 +112,48 @@ class RealAgentLoopTests(unittest.TestCase):
             self.assertEqual(payload["ip_tos"], 0xB8)
             self.assertEqual(len(executor.network_advice_log), 1)
 
+    def test_executor_calls_htb_controller_for_network_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp) / "flowgen.json"
+            htb = _FakeHtbController()
+            executor = FlowgenControl(
+                control_file=control,
+                initial_target_mbps=10.0,
+                bandwidth_controller=htb,
+            )
+            from src.agents.net_agent import NetAgent
+
+            net_card = _card()
+            net_card = AgentCard(
+                **{
+                    **net_card.__dict__,
+                    "agent_id": "nagent-test",
+                    "layer": AgentLayer.NETWORK,
+                    "role": AgentRole.SUPPORT,
+                }
+            )
+            NetAgent(net_card, SyntheticMetricProvider(), action_executor=executor).execute(
+                rescue_task(),
+                AgentAction(
+                    agent_id="nagent-test",
+                    layer=AgentLayer.NETWORK,
+                    action_type="raise_monitoring_and_bearer_advice",
+                    params={"bearer_advice": "prioritize_task_flow"},
+                ),
+            )
+
+            self.assertEqual(htb.calls, [0xB8])
+            self.assertEqual(executor.network_advice_log[0]["htb_commands"], [["tc", "htb"]])
+
+
+class _FakeHtbController:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def prioritize_task_flow(self, ip_tos: int) -> list[list[str]]:
+        self.calls.append(ip_tos)
+        return [["tc", "htb"]]
+
 
 if __name__ == "__main__":
     unittest.main()

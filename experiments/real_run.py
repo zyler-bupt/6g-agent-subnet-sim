@@ -19,6 +19,7 @@ from src.metrics.provider import MetricProvider
 from src.metrics.trace import TraceMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
+from testbed.netem import HtbController
 
 _OP_LABEL = {
     "local_tune": "局部调参",
@@ -64,6 +65,7 @@ async def run(args: argparse.Namespace) -> dict:
         control_file=Path(args.flowgen_control_file),
         initial_target_mbps=args.initial_target_mbps,
         default_tcp_congestion=args.tcp_congestion,
+        bandwidth_controller=_build_htb_controller(args),
     )
     _configure_real_agents(controller, subnet, args.horizon, args.history_steps, executor)
 
@@ -158,6 +160,20 @@ def _build_provider(args: argparse.Namespace) -> MetricProvider:
             sample_interval_s=args.sample_interval_s,
         )
     return provider
+
+
+def _build_htb_controller(args: argparse.Namespace) -> HtbController | None:
+    if not args.htb_dev:
+        return None
+    return HtbController(
+        namespace=args.htb_namespace,
+        dev=args.htb_dev,
+        total_mbps=args.htb_total_mbps,
+        priority_mbps=args.htb_priority_mbps,
+        default_mbps=args.htb_default_mbps,
+        sudo=args.sudo,
+        dry_run=args.htb_dry_run,
+    )
 
 
 def _netns_target(
@@ -807,6 +823,12 @@ def main() -> None:
     parser.add_argument("--netem-delay-ms", type=float)
     parser.add_argument("--netem-loss-percent", type=float)
     parser.add_argument("--clear-netem", action="store_true", default=True)
+    parser.add_argument("--htb-namespace", default="h-router")
+    parser.add_argument("--htb-dev", help="Router device where nAgent installs tc htb for priority DSCP traffic.")
+    parser.add_argument("--htb-total-mbps", type=float, default=100.0)
+    parser.add_argument("--htb-priority-mbps", type=float, default=80.0)
+    parser.add_argument("--htb-default-mbps", type=float, default=20.0)
+    parser.add_argument("--htb-dry-run", action="store_true")
     parser.add_argument(
         "--skip-rebuild-baseline",
         action="store_true",

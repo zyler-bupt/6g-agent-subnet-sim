@@ -14,6 +14,7 @@ class FlowgenControl:
     initial_target_mbps: float = 16.0
     default_tcp_congestion: str = "cubic"
     default_ip_tos: int = 0xB8
+    bandwidth_controller: Any | None = None
     network_advice_log: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -47,11 +48,15 @@ class FlowgenControl:
         return self.state
 
     def prioritize_task_flow(self, task_id: str, agent_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        htb_commands = []
+        if self.bandwidth_controller is not None:
+            htb_commands = self.bandwidth_controller.prioritize_task_flow(self.default_ip_tos)
         advice = {
             "task_id": task_id,
             "agent_id": agent_id,
             "params": dict(params),
             "ip_tos": self.default_ip_tos,
+            "htb_commands": htb_commands,
         }
         self.network_advice_log.append(advice)
         self._state["ip_tos"] = self.default_ip_tos
