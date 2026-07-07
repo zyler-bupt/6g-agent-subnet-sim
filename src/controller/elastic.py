@@ -62,11 +62,17 @@ class ElasticAdjuster:
                 target_gateway=session.target_gateway,
                 latency_budget_ms=session.latency_budget_ms,
                 data_rate_mbps=session.data_rate_mbps * 0.9,
+                path_id=session.path_id,
+                gateway_path=session.gateway_path,
                 status="retuned",
             )
             for session in subnet.sessions
         )
-        gateways = {gateway for session in changed for gateway in (session.source_gateway, session.target_gateway)}
+        gateways = {
+            gateway
+            for session in changed
+            for gateway in (session.gateway_path or (session.source_gateway, session.target_gateway))
+        }
         operations = {
             "local_tune": tuned,
             "session_setup": len(changed),

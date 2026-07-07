@@ -7,7 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from experiments.real_run import _apply_path_support_targets, _build_link_target_profile, _build_target_profile
+from experiments.real_run import (
+    _apply_path_support_targets,
+    _build_link_target_profile,
+    _build_target_profile,
+    _evaluate_adjustment,
+)
+from src.controller.elastic import ElasticAdjuster
 from src.controller.networking import AgentController
 from src.metrics.synthetic import SyntheticMetricProvider
 from src.metrics.netns import NetnsMetricProvider, NetnsTarget
@@ -156,6 +162,62 @@ class RealMetricsStage3Tests(unittest.TestCase):
             self.assertEqual(provider.describe_target("nagent-gw-relay")["namespace"], "h-relay")
             self.assertEqual(provider.describe_target("nagent-gw-relay")["target_ip"], "10.10.2.2")
             self.assertEqual(bindings["nagent-gw-relay"]["selected_link"], ["gw-relay", "gw-mec"])
+
+        asyncio.run(run())
+
+    def test_real_adjustment_summary_reports_controller_decision(self) -> None:
+        import asyncio
+
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            gateways = build_topology_from_catalog(_catalog_with_relay(), provider)
+            controller = AgentController(
+                gateways,
+                gateway_paths={("gw-ue", "gw-mec"): ("gw-ue", "gw-relay", "gw-mec")},
+            )
+            task = rescue_task()
+            subnet, _ = await controller.build_task_subnet(task)
+            provider.inject_event(task.task_id, "bearer_degradation", severity=1.3)
+
+            summary = await _evaluate_adjustment(controller, subnet, timestamp=4.0)
+
+            self.assertIn(summary["strategy"], {"local_tuning", "support_session_retune"})
+            self.assertIn("risk_before", summary)
+            self.assertIn("risk_after", summary)
+            self.assertIn("service_interruption_ms", summary)
+            self.assertIsInstance(summary["actions"], list)
+            self.assertIsInstance(summary["changed_sessions"], list)
+
+        asyncio.run(run())
+
+    def test_elastic_retune_preserves_given_gateway_path(self) -> None:
+        import asyncio
+
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            gateways = build_topology_from_catalog(_catalog_with_relay(), provider)
+            controller = AgentController(
+                gateways,
+                gateway_paths={("gw-ue", "gw-mec"): ("gw-ue", "gw-relay", "gw-mec")},
+            )
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+
+            result = ElasticAdjuster().choose_minimal_adjustment(
+                subnet,
+                risk_before=2.0,
+                risk_after_local_actions=2.0,
+            )
+
+            self.assertEqual(result.strategy, "support_session_retune")
+            changed = {
+                session.session_id: session
+                for session in result.changed_sessions
+            }
+            retuned = changed["task-rescue-001-sess-1"]
+            self.assertEqual(retuned.gateway_path, ("gw-ue", "gw-relay", "gw-mec"))
+            self.assertEqual(retuned.path_id, "gw-ue->gw-relay->gw-mec")
+            self.assertEqual(retuned.status, "retuned")
+            self.assertEqual(result.changed_gateways, 4)
 
         asyncio.run(run())
 

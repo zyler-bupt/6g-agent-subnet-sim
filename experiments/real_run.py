@@ -58,6 +58,7 @@ async def run(args: argparse.Namespace) -> dict:
     )
 
     event = None
+    adjustment = None
     if args.netem_delay_ms is not None or args.netem_loss_percent is not None:
         _apply_netem(args)
         try:
@@ -69,9 +70,20 @@ async def run(args: argparse.Namespace) -> dict:
                 interval_s=args.sample_interval_s,
                 start_timestamp=args.history_steps * args.sample_interval_s,
             )
+            adjustment = await _evaluate_adjustment(
+                controller,
+                subnet,
+                timestamp=2 * args.history_steps * args.sample_interval_s,
+            )
         finally:
             if args.clear_netem:
                 _clear_netem(args)
+    else:
+        adjustment = await _evaluate_adjustment(
+            controller,
+            subnet,
+            timestamp=args.history_steps * args.sample_interval_s,
+        )
 
     return {
         "task_id": task.task_id,
@@ -90,6 +102,7 @@ async def run(args: argparse.Namespace) -> dict:
         "network_advice": executor.network_advice_log,
         "baseline": _result_to_jsonable(baseline),
         "event": _result_to_jsonable(event) if event is not None else None,
+        "adjustment": adjustment,
     }
 
 
@@ -360,6 +373,26 @@ def _result_to_jsonable(result: RealLoopResult) -> dict:
     }
 
 
+async def _evaluate_adjustment(
+    controller: AgentController,
+    subnet: TaskSubnet,
+    timestamp: float,
+) -> dict[str, Any]:
+    risk_before, risk_after, adjustment = await controller.evaluate_and_adjust(subnet, timestamp)
+    return {
+        "risk_before": risk_before,
+        "risk_after": risk_after,
+        "strategy": adjustment.strategy,
+        "changed_agents": adjustment.changed_agents,
+        "changed_edges": adjustment.changed_edges,
+        "changed_gateways": adjustment.changed_gateways,
+        "service_interruption_ms": adjustment.service_interruption_ms,
+        "operations": dict(adjustment.operations),
+        "actions": [to_jsonable(action) for action in adjustment.actions],
+        "changed_sessions": [to_jsonable(session) for session in adjustment.changed_sessions],
+    }
+
+
 def _ordered_agents(controller: AgentController, subnet: TaskSubnet) -> list:
     return sorted(
         controller._agents_for_subnet(subnet),
@@ -429,6 +462,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "support_bindings": result["support_bindings"],
         "agent_confirm_acks": result["agent_confirm_acks"],
         "gateway_install_acks": result["gateway_install_acks"],
+        "adjustment": result["adjustment"],
         "baseline": _compact_loop_result(result["baseline"]),
     }
     if result.get("event") is not None:
