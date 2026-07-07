@@ -11,6 +11,7 @@ from experiments.real_run import (
     _apply_path_support_targets,
     _build_link_target_profile,
     _build_target_profile,
+    _build_htb_controller,
     _evaluate_adjustment,
     _evaluate_rebuild_baseline,
     _render_real_report,
@@ -109,6 +110,15 @@ class RealMetricsStage3Tests(unittest.TestCase):
         self.assertEqual(targets["nagent-gw-mec"].target_ip, "10.10.3.2")
         self.assertEqual(targets["nagent-gw-cloud"].namespace, "h-cloud")
         self.assertEqual(targets["nagent-gw-cloud"].target_ip, "10.10.1.2")
+
+    def test_htb_guard_rejects_replacing_active_netem_device(self) -> None:
+        args = _Args()
+        args.htb_dev = "rt-cloud0"
+        args.event_dev = "rt-cloud0"
+        args.netem_delay_ms = 80.0
+
+        with self.assertRaisesRegex(ValueError, "same root qdisc"):
+            _build_htb_controller(args)
 
     def test_path_support_targets_update_nagent_measurement_links(self) -> None:
         import asyncio
@@ -267,6 +277,16 @@ class _Args:
     iperf_seconds = 1
     command_timeout_s = 8.0
     sudo = False
+    htb_dev = None
+    htb_namespace = "h-router"
+    htb_total_mbps = 100.0
+    htb_priority_mbps = 80.0
+    htb_default_mbps = 20.0
+    htb_dry_run = False
+    htb_allow_replace_event_qdisc = False
+    event_dev = "rt-cloud0"
+    netem_delay_ms = None
+    netem_loss_percent = None
 
 
 def _catalog_with_relay():

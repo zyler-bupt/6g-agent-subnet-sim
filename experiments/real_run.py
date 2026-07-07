@@ -165,6 +165,13 @@ def _build_provider(args: argparse.Namespace) -> MetricProvider:
 def _build_htb_controller(args: argparse.Namespace) -> HtbController | None:
     if not args.htb_dev:
         return None
+    event_active = args.netem_delay_ms is not None or args.netem_loss_percent is not None
+    if event_active and args.htb_dev == args.event_dev and not args.htb_allow_replace_event_qdisc:
+        raise ValueError(
+            "htb_dev and event_dev both point at the same root qdisc. "
+            "Use a different --htb-dev, omit --htb-dev, or pass "
+            "--htb-allow-replace-event-qdisc if replacing the netem event is intentional."
+        )
     return HtbController(
         namespace=args.htb_namespace,
         dev=args.htb_dev,
@@ -829,6 +836,11 @@ def main() -> None:
     parser.add_argument("--htb-priority-mbps", type=float, default=80.0)
     parser.add_argument("--htb-default-mbps", type=float, default=20.0)
     parser.add_argument("--htb-dry-run", action="store_true")
+    parser.add_argument(
+        "--htb-allow-replace-event-qdisc",
+        action="store_true",
+        help="Allow htb to replace a netem root qdisc on the same device. Usually keep this off.",
+    )
     parser.add_argument(
         "--skip-rebuild-baseline",
         action="store_true",
