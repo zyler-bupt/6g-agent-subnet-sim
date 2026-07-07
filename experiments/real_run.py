@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src import report
 from src.agents.controls import FlowgenControl
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator
@@ -18,6 +19,24 @@ from src.metrics.provider import MetricProvider
 from src.metrics.trace import TraceMetricProvider
 from src.sim.scenarios import rescue_task
 from src.sim.topology import build_rescue_topology
+
+_OP_LABEL = {
+    "local_tune": "局部调参",
+    "session_setup": "会话重调",
+    "gateway_install": "网关装载",
+    "member_confirm": "成员确认",
+    "agent_replace": "替换支撑Agent",
+    "reroute": "跨子网改接",
+}
+
+_STRATEGY_LABEL = {
+    "local_tuning": "tier1 局部调参",
+    "support_agent_replace": "tier2 替换支撑Agent",
+    "support_session_retune": "tier2 会话重调",
+    "communication_reroute": "tier3 调整通信关系",
+    "no_adjustment": "无需调整",
+    "full_rebuild": "全量重建",
+}
 
 
 @dataclass
@@ -545,6 +564,157 @@ def _latest_sense_by_agent(sense_log: list[dict[str, Any]]) -> dict[str, dict[st
     return latest
 
 
+def _render_real_report(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(report.banner("真实测试床闭环演示"))
+    lines.append(report.section("运行配置"))
+    lines.append(
+        report.kv_block(
+            [
+                ("任务", result["task_id"]),
+                ("测量 profile", result["target_profile"]),
+                ("历史/预测窗口", f"{result['history_steps']} 步历史 → {result['horizon']} 步预测"),
+                ("控制文件", result["flowgen_control_file"]),
+            ]
+        )
+    )
+
+    bindings = result.get("path_measurement_bindings") or {}
+    if bindings:
+        lines.append(report.section("nAgent 真实测量链路绑定"))
+        rows = []
+        for n_agent_id, binding in sorted(bindings.items()):
+            target = binding.get("measurement_target", {})
+            rows.append(
+                [
+                    n_agent_id,
+                    " → ".join(binding.get("gateway_path", [])),
+                    "->".join(binding.get("selected_link", [])),
+                    target.get("label", ""),
+                    f"{target.get('namespace', '')}:{target.get('target_ip', '')}",
+                ]
+            )
+        lines.append(
+            report.table(
+                headers=["nAgent", "网关路径", "实测链路", "测量说明", "netns:目标IP"],
+                rows=rows,
+            )
+        )
+
+    lines.append(report.section("事件前后真实感知"))
+    lines.append(_loop_snapshot_table("baseline", result["baseline"]))
+    if result.get("event") is not None:
+        lines.append("")
+        lines.append(_loop_snapshot_table("event", result["event"]))
+
+    adjustment = result.get("adjustment")
+    if adjustment is not None:
+        lines.append(report.section("Controller 最小弹性调整"))
+        lines.append(_adjustment_block("最小调整", adjustment))
+
+    full = result.get("full_rebuild_baseline")
+    if adjustment is not None and full is not None:
+        lines.append(report.section("最小调整 vs 全量重建"))
+        minimal_ms = float(adjustment["service_interruption_ms"])
+        full_ms = float(full["service_interruption_ms"])
+        lines.append(
+            report.table(
+                headers=["方法", "策略", "风险", "变更A/E/GW", "中断(ms)", "操作"],
+                rows=[
+                    [
+                        "最小调整",
+                        _strategy(adjustment["strategy"]),
+                        f"{adjustment['risk_before']:.3f}→{adjustment['risk_after']:.3f}",
+                        _change_counts(adjustment),
+                        f"{minimal_ms:.0f}",
+                        _op_summary(adjustment["operations"]),
+                    ],
+                    [
+                        "全量重建",
+                        _strategy(full["strategy"]),
+                        f"{full['risk_before']:.3f}→{full['risk_after']:.3f}",
+                        _change_counts(full),
+                        f"{full_ms:.0f}",
+                        _op_summary(full["operations"]),
+                    ],
+                ],
+            )
+        )
+        lines.append(report.bullet(f"中断成本对比：{report.pct_change(full_ms, minimal_ms)}"))
+    return "\n".join(lines)
+
+
+def _loop_snapshot_table(name: str, result: dict[str, Any]) -> str:
+    latest = _latest_sense_by_agent(result["sense_log"])
+    rows = []
+    for agent_id, item in sorted(latest.items()):
+        values = item["values"]
+        target = item.get("measurement_target", {})
+        rows.append(
+            [
+                name,
+                item["layer"],
+                agent_id,
+                target.get("label", ""),
+                _first_metric(values, "latency_ms", "rtt_ms"),
+                _first_metric(values, "loss_rate", "retransmission_rate"),
+                _first_metric(
+                    values,
+                    "available_bandwidth_mbps",
+                    "throughput_mbps",
+                    "send_rate_mbps",
+                    "data_rate_mbps",
+                ),
+                _first_metric(values, "utilization"),
+            ]
+        )
+    return report.table(
+        headers=["阶段", "层", "Agent", "测量链路", "时延/RTT", "丢包/重传", "带宽/速率", "利用率"],
+        rows=rows,
+    )
+
+
+def _first_metric(values: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        if key in values:
+            value = values[key]
+            if isinstance(value, float):
+                return f"{value:.3f}"
+            return str(value)
+    return "-"
+
+
+def _adjustment_block(label: str, adjustment: dict[str, Any]) -> str:
+    actions = [
+        f"{item['agent_id']}:{item['action_type']}"
+        for item in adjustment.get("actions", [])
+        if item.get("action_type")
+    ]
+    return report.kv_block(
+        [
+            (label, _strategy(adjustment["strategy"])),
+            ("风险", f"{adjustment['risk_before']:.3f} → {adjustment['risk_after']:.3f}"),
+            ("变更A/E/GW", _change_counts(adjustment)),
+            ("中断成本", f"{adjustment['service_interruption_ms']:.0f} ms"),
+            ("操作", _op_summary(adjustment["operations"])),
+            ("动作", "  ".join(actions) if actions else "无"),
+        ]
+    )
+
+
+def _change_counts(adjustment: dict[str, Any]) -> str:
+    return f"{adjustment['changed_agents']}/{adjustment['changed_edges']}/{adjustment['changed_gateways']}"
+
+
+def _op_summary(operations: dict[str, int]) -> str:
+    parts = [f"{_OP_LABEL.get(name, name)}×{count}" for name, count in operations.items() if count]
+    return "  ".join(parts) if parts else "无"
+
+
+def _strategy(name: str) -> str:
+    return _STRATEGY_LABEL.get(name, name)
+
+
 def _gateway_route_tables(controller: AgentController) -> dict[str, list[dict[str, Any]]]:
     tables: dict[str, list[dict[str, Any]]] = {}
     for gateway_id, gateway in sorted(controller.gateways.items()):
@@ -642,10 +812,14 @@ def main() -> None:
         action="store_true",
         help="Skip the independent full-rebuild baseline comparison to shorten real testbed runs.",
     )
+    parser.add_argument("--report", action="store_true", help="Print a compact Chinese demo report instead of JSON.")
     parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
 
     result = asyncio.run(run(args))
+    if args.report:
+        print(_render_real_report(to_jsonable(result)))
+        return
     if args.summary_only:
         result = _summary_payload(to_jsonable(result))
     print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2, sort_keys=True))

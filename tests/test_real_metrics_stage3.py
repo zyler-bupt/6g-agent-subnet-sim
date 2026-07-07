@@ -13,6 +13,7 @@ from experiments.real_run import (
     _build_target_profile,
     _evaluate_adjustment,
     _evaluate_rebuild_baseline,
+    _render_real_report,
 )
 from src.controller.elastic import ElasticAdjuster
 from src.controller.networking import AgentController
@@ -240,6 +241,17 @@ class RealMetricsStage3Tests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_real_report_renders_demo_sections(self) -> None:
+        text = _render_real_report(_fake_real_run_result())
+
+        self.assertIn("真实测试床闭环演示", text)
+        self.assertIn("nAgent 真实测量链路绑定", text)
+        self.assertIn("事件前后真实感知", text)
+        self.assertIn("Controller 最小弹性调整", text)
+        self.assertIn("最小调整 vs 全量重建", text)
+        self.assertIn("tier2 会话重调", text)
+        self.assertIn("全量重建", text)
+
 
 class _Args:
     target_profile = "rescue"
@@ -267,6 +279,81 @@ def _catalog_with_relay():
     return rescue_topology_catalog().with_gateway(relay).with_agents(
         *support_agent_specs("gw-relay")
     )
+
+
+def _fake_real_run_result():
+    baseline_sense = {
+        "step": 0,
+        "timestamp": 0.0,
+        "agent_id": "nagent-gw-ue",
+        "agent_name": "network bearer",
+        "layer": "net",
+        "measurement_target": {
+            "label": "terminal -> edge video stream",
+            "namespace": "h-term",
+            "target_ip": "10.10.2.2",
+        },
+        "values": {
+            "latency_ms": 0.03,
+            "loss_rate": 0.0,
+            "available_bandwidth_mbps": 100.0,
+            "utilization": 0.16,
+        },
+    }
+    event_sense = {
+        **baseline_sense,
+        "timestamp": 10.0,
+        "values": {
+            "latency_ms": 80.0,
+            "loss_rate": 0.05,
+            "available_bandwidth_mbps": 30.0,
+            "utilization": 0.53,
+        },
+    }
+    adjustment = {
+        "risk_before": 1.2,
+        "risk_after": 0.8,
+        "strategy": "support_session_retune",
+        "changed_agents": 0,
+        "changed_edges": 3,
+        "changed_gateways": 3,
+        "service_interruption_ms": 63.0,
+        "operations": {"local_tune": 2, "session_setup": 3, "gateway_install": 3},
+        "actions": [
+            {
+                "agent_id": "nagent-gw-ue",
+                "action_type": "raise_monitoring_and_bearer_advice",
+            }
+        ],
+        "changed_sessions": [],
+    }
+    return {
+        "task_id": "task-rescue-001",
+        "target_profile": "rescue",
+        "history_steps": 10,
+        "horizon": 5,
+        "flowgen_control_file": "/tmp/6g-agent-testbed/flowgen-control.json",
+        "path_measurement_bindings": {
+            "nagent-gw-ue": {
+                "gateway_path": ["gw-ue", "gw-mec"],
+                "selected_link": ["gw-ue", "gw-mec"],
+                "measurement_target": {
+                    "label": "terminal -> edge video stream",
+                    "namespace": "h-term",
+                    "target_ip": "10.10.2.2",
+                },
+            }
+        },
+        "baseline": {"risk": 0.1, "sense_log": [baseline_sense]},
+        "event": {"risk": 1.2, "sense_log": [event_sense]},
+        "adjustment": adjustment,
+        "full_rebuild_baseline": {
+            **adjustment,
+            "strategy": "full_rebuild",
+            "service_interruption_ms": 99.0,
+            "operations": {"member_confirm": 4, "session_setup": 3, "gateway_install": 3},
+        },
+    }
 
 
 if __name__ == "__main__":
