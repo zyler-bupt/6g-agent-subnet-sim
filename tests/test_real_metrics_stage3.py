@@ -12,6 +12,7 @@ from experiments.real_run import (
     _build_link_target_profile,
     _build_target_profile,
     _evaluate_adjustment,
+    _evaluate_rebuild_baseline,
 )
 from src.controller.elastic import ElasticAdjuster
 from src.controller.networking import AgentController
@@ -218,6 +219,24 @@ class RealMetricsStage3Tests(unittest.TestCase):
             self.assertEqual(retuned.path_id, "gw-ue->gw-relay->gw-mec")
             self.assertEqual(retuned.status, "retuned")
             self.assertEqual(result.changed_gateways, 4)
+
+        asyncio.run(run())
+
+    def test_full_rebuild_baseline_summary_reports_rebuild_cost(self) -> None:
+        import asyncio
+
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            controller = AgentController(build_rescue_topology(provider))
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+
+            summary = await _evaluate_rebuild_baseline(controller, subnet, timestamp=4.0)
+
+            self.assertEqual(summary["strategy"], "full_rebuild")
+            self.assertEqual(summary["operations"]["member_confirm"], 4)
+            self.assertEqual(summary["operations"]["session_setup"], 3)
+            self.assertEqual(summary["operations"]["gateway_install"], 3)
+            self.assertGreater(summary["service_interruption_ms"], 0)
 
         asyncio.run(run())
 

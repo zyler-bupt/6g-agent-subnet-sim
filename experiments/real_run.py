@@ -59,6 +59,7 @@ async def run(args: argparse.Namespace) -> dict:
 
     event = None
     adjustment = None
+    full_rebuild_baseline = None
     if args.netem_delay_ms is not None or args.netem_loss_percent is not None:
         _apply_netem(args)
         try:
@@ -75,6 +76,11 @@ async def run(args: argparse.Namespace) -> dict:
                 subnet,
                 timestamp=2 * args.history_steps * args.sample_interval_s,
             )
+            if not args.skip_rebuild_baseline:
+                full_rebuild_baseline = await _evaluate_rebuild_baseline_from_args(
+                    args,
+                    timestamp=2 * args.history_steps * args.sample_interval_s + 0.1,
+                )
         finally:
             if args.clear_netem:
                 _clear_netem(args)
@@ -84,6 +90,11 @@ async def run(args: argparse.Namespace) -> dict:
             subnet,
             timestamp=args.history_steps * args.sample_interval_s,
         )
+        if not args.skip_rebuild_baseline:
+            full_rebuild_baseline = await _evaluate_rebuild_baseline_from_args(
+                args,
+                timestamp=args.history_steps * args.sample_interval_s + 0.1,
+            )
 
     return {
         "task_id": task.task_id,
@@ -103,6 +114,7 @@ async def run(args: argparse.Namespace) -> dict:
         "baseline": _result_to_jsonable(baseline),
         "event": _result_to_jsonable(event) if event is not None else None,
         "adjustment": adjustment,
+        "full_rebuild_baseline": full_rebuild_baseline,
     }
 
 
@@ -304,7 +316,7 @@ def _configure_real_agents(
     subnet: TaskSubnet,
     horizon: int,
     history_steps: int,
-    executor: FlowgenControl,
+    executor: FlowgenControl | None,
 ) -> None:
     for agent in controller._agents_for_subnet(subnet):
         agent.horizon = horizon
@@ -379,6 +391,46 @@ async def _evaluate_adjustment(
     timestamp: float,
 ) -> dict[str, Any]:
     risk_before, risk_after, adjustment = await controller.evaluate_and_adjust(subnet, timestamp)
+    return _adjustment_to_jsonable(risk_before, risk_after, adjustment)
+
+
+async def _evaluate_rebuild_baseline_from_args(
+    args: argparse.Namespace,
+    timestamp: float,
+) -> dict[str, Any]:
+    task = rescue_task()
+    provider = _build_provider(args)
+    controller = AgentController(build_rescue_topology(provider))
+    subnet, build_metrics = await controller.build_task_subnet(task)
+    path_measurement_bindings = _apply_path_support_targets(
+        provider,
+        subnet,
+        _build_link_target_profile(args),
+        controller,
+    )
+    _configure_real_agents(controller, subnet, args.horizon, args.history_steps, executor=None)
+    summary = await _evaluate_rebuild_baseline(controller, subnet, timestamp)
+    summary["build_metrics"] = to_jsonable(build_metrics)
+    summary["path_measurement_bindings"] = path_measurement_bindings
+    return summary
+
+
+async def _evaluate_rebuild_baseline(
+    controller: AgentController,
+    subnet: TaskSubnet,
+    timestamp: float,
+) -> dict[str, Any]:
+    predictions = await controller.run_agent_loop(subnet, timestamp)
+    risk_before = controller.risk_calculator.risk(subnet.task, predictions)
+    _rebuilt, risk_after, adjustment = await controller.rebuild_task_subnet(subnet, timestamp + 0.1)
+    return _adjustment_to_jsonable(risk_before, risk_after, adjustment)
+
+
+def _adjustment_to_jsonable(
+    risk_before: float,
+    risk_after: float,
+    adjustment,
+) -> dict[str, Any]:
     return {
         "risk_before": risk_before,
         "risk_after": risk_after,
@@ -463,6 +515,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "agent_confirm_acks": result["agent_confirm_acks"],
         "gateway_install_acks": result["gateway_install_acks"],
         "adjustment": result["adjustment"],
+        "full_rebuild_baseline": result["full_rebuild_baseline"],
         "baseline": _compact_loop_result(result["baseline"]),
     }
     if result.get("event") is not None:
@@ -584,6 +637,11 @@ def main() -> None:
     parser.add_argument("--netem-delay-ms", type=float)
     parser.add_argument("--netem-loss-percent", type=float)
     parser.add_argument("--clear-netem", action="store_true", default=True)
+    parser.add_argument(
+        "--skip-rebuild-baseline",
+        action="store_true",
+        help="Skip the independent full-rebuild baseline comparison to shorten real testbed runs.",
+    )
     parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
 
