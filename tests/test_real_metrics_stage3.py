@@ -7,11 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from experiments.real_run import _build_target_profile
+from experiments.real_run import _apply_path_support_targets, _build_link_target_profile, _build_target_profile
+from src.controller.networking import AgentController
 from src.metrics.synthetic import SyntheticMetricProvider
 from src.metrics.netns import NetnsMetricProvider, NetnsTarget
 from src.metrics.parsers import parse_iperf3_json, parse_ping, parse_ss_ti
 from src.metrics.trace import TraceMetricProvider
+from src.sim.scenarios import rescue_task
+from src.sim.topology import GatewaySpec, build_rescue_topology, build_topology_from_catalog, rescue_topology_catalog, support_agent_specs
 
 
 PING_SAMPLE = """
@@ -91,28 +94,98 @@ class RealMetricsStage3Tests(unittest.TestCase):
         self.assertEqual(provider.describe_target("unknown-agent")["target_ip"], "10.10.3.2")
 
     def test_real_run_rescue_profile_maps_agents_to_multiple_links(self) -> None:
-        class Args:
-            target_profile = "rescue"
-            term_namespace = "h-term"
-            edge_namespace = "h-edge"
-            cloud_namespace = "h-cloud"
-            term_ip = "10.10.1.2"
-            edge_ip = "10.10.2.2"
-            cloud_ip = "10.10.3.2"
-            iperf_port = 5201
-            ping_count = 5
-            ping_interval_s = 0.2
-            iperf_seconds = 1
-            command_timeout_s = 8.0
-            sudo = False
-
-        targets = _build_target_profile(Args(), NetnsTarget("h-term", "10.10.3.2"))
+        targets = _build_target_profile(_Args(), NetnsTarget("h-term", "10.10.3.2"))
         self.assertEqual(targets["nagent-gw-ue"].namespace, "h-term")
         self.assertEqual(targets["nagent-gw-ue"].target_ip, "10.10.2.2")
         self.assertEqual(targets["nagent-gw-mec"].namespace, "h-edge")
         self.assertEqual(targets["nagent-gw-mec"].target_ip, "10.10.3.2")
         self.assertEqual(targets["nagent-gw-cloud"].namespace, "h-cloud")
         self.assertEqual(targets["nagent-gw-cloud"].target_ip, "10.10.1.2")
+
+    def test_path_support_targets_update_nagent_measurement_links(self) -> None:
+        import asyncio
+
+        async def run() -> None:
+            args = _Args()
+            default = NetnsTarget("h-term", "10.10.3.2", label="default")
+            provider = NetnsMetricProvider(
+                targets=_build_target_profile(args, default),
+                default_target=default,
+            )
+            controller = AgentController(build_rescue_topology(SyntheticMetricProvider()))
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+
+            bindings = _apply_path_support_targets(
+                provider,
+                subnet,
+                _build_link_target_profile(args),
+                controller,
+            )
+
+            self.assertEqual(provider.describe_target("nagent-gw-ue")["namespace"], "h-term")
+            self.assertEqual(provider.describe_target("nagent-gw-ue")["target_ip"], "10.10.2.2")
+            self.assertEqual(bindings["nagent-gw-ue"]["selected_link"], ["gw-ue", "gw-mec"])
+            self.assertEqual(bindings["nagent-gw-mec"]["selected_link"], ["gw-mec", "gw-cloud"])
+            self.assertEqual(bindings["nagent-gw-cloud"]["selected_link"], ["gw-cloud", "gw-ue"])
+
+        asyncio.run(run())
+
+    def test_path_support_targets_follow_given_relay_path_agent(self) -> None:
+        import asyncio
+
+        async def run() -> None:
+            args = _Args()
+            relay_target = NetnsTarget("h-relay", "10.10.2.2", label="relay -> edge path support")
+            link_targets = _build_link_target_profile(args)
+            link_targets[("gw-relay", "gw-mec")] = relay_target
+            provider = NetnsMetricProvider(
+                targets={},
+                default_target=NetnsTarget("h-term", "10.10.3.2", label="default"),
+            )
+            gateways = build_topology_from_catalog(_catalog_with_relay(), SyntheticMetricProvider())
+            gateways["gw-ue"].fail_agent("nagent-gw-ue")
+            gateways["gw-mec"].fail_agent("nagent-gw-mec")
+            controller = AgentController(
+                gateways,
+                gateway_paths={("gw-ue", "gw-mec"): ("gw-ue", "gw-relay", "gw-mec")},
+            )
+            subnet, _ = await controller.build_task_subnet(rescue_task())
+
+            bindings = _apply_path_support_targets(provider, subnet, link_targets, controller)
+
+            self.assertEqual(provider.describe_target("nagent-gw-relay")["namespace"], "h-relay")
+            self.assertEqual(provider.describe_target("nagent-gw-relay")["target_ip"], "10.10.2.2")
+            self.assertEqual(bindings["nagent-gw-relay"]["selected_link"], ["gw-relay", "gw-mec"])
+
+        asyncio.run(run())
+
+
+class _Args:
+    target_profile = "rescue"
+    term_namespace = "h-term"
+    edge_namespace = "h-edge"
+    cloud_namespace = "h-cloud"
+    term_ip = "10.10.1.2"
+    edge_ip = "10.10.2.2"
+    cloud_ip = "10.10.3.2"
+    iperf_port = 5201
+    ping_count = 5
+    ping_interval_s = 0.2
+    iperf_seconds = 1
+    command_timeout_s = 8.0
+    sudo = False
+
+
+def _catalog_with_relay():
+    relay = GatewaySpec(
+        gateway_id="gw-relay",
+        subnet_id="relay-subnet",
+        node="relay-node",
+        gateway_ip="10.10.9.2",
+    )
+    return rescue_topology_catalog().with_gateway(relay).with_agents(
+        *support_agent_specs("gw-relay")
+    )
 
 
 if __name__ == "__main__":

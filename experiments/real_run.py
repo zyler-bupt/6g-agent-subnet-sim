@@ -35,6 +35,12 @@ async def run(args: argparse.Namespace) -> dict:
     provider = _build_provider(args)
     controller = AgentController(build_rescue_topology(provider))
     subnet, build_metrics = await controller.build_task_subnet(task)
+    path_measurement_bindings = _apply_path_support_targets(
+        provider,
+        subnet,
+        _build_link_target_profile(args),
+        controller,
+    )
     executor = FlowgenControl(
         control_file=Path(args.flowgen_control_file),
         initial_target_mbps=args.initial_target_mbps,
@@ -71,6 +77,7 @@ async def run(args: argparse.Namespace) -> dict:
         "task_id": task.task_id,
         "target_profile": args.target_profile,
         "measurement_targets": _describe_provider_targets(provider),
+        "path_measurement_bindings": path_measurement_bindings,
         "gateway_route_tables": _gateway_route_tables(controller),
         "support_bindings": _support_bindings(subnet),
         "agent_confirm_acks": to_jsonable(subnet.agent_acks),
@@ -175,6 +182,107 @@ def _build_target_profile(
         "nagent-gw-cloud": cloud_to_term,
         "nagent-gw-cloud-standby": cloud_to_term,
         "pagent-stub-ue": term_to_edge,
+    }
+
+
+def _build_link_target_profile(args: argparse.Namespace) -> dict[tuple[str, str], NetnsTarget]:
+    gateway_targets = {
+        "gw-ue": (
+            args.term_namespace,
+            args.term_ip,
+            "terminal",
+        ),
+        "gw-mec": (
+            args.edge_namespace,
+            args.edge_ip,
+            "edge",
+        ),
+        "gw-cloud": (
+            args.cloud_namespace,
+            args.cloud_ip,
+            "cloud",
+        ),
+    }
+    link_targets: dict[tuple[str, str], NetnsTarget] = {}
+    for source_gateway, (namespace, _, source_label) in gateway_targets.items():
+        for target_gateway, (_, target_ip, target_label) in gateway_targets.items():
+            if source_gateway == target_gateway:
+                continue
+            link_targets[(source_gateway, target_gateway)] = _netns_target(
+                args,
+                namespace=namespace,
+                target_ip=target_ip,
+                label=f"{source_label} -> {target_label} path support",
+            )
+    return link_targets
+
+
+def _apply_path_support_targets(
+    provider: MetricProvider,
+    subnet: TaskSubnet,
+    link_targets: dict[tuple[str, str], NetnsTarget],
+    controller: AgentController,
+) -> dict[str, dict[str, Any]]:
+    netns_provider = _netns_provider(provider)
+    if netns_provider is None:
+        return {}
+
+    bindings: dict[str, dict[str, Any]] = {}
+    for path_support in subnet.path_supports.values():
+        agent = controller._agent_by_id(path_support.n_agent_id)
+        preferred_gateway = agent.card.gateway_id if agent is not None else ""
+        selected_link = _select_measurement_link(path_support.monitored_links, preferred_gateway, link_targets)
+        if selected_link is None:
+            continue
+        target = link_targets[selected_link]
+        netns_provider.targets[path_support.n_agent_id] = target
+        bindings[path_support.n_agent_id] = {
+            "path_support_id": path_support.support_id,
+            "path_id": path_support.path_id,
+            "gateway_path": list(path_support.gateway_path),
+            "selected_link": list(selected_link),
+            "measurement_target": _target_to_jsonable(target),
+        }
+    return bindings
+
+
+def _select_measurement_link(
+    monitored_links: tuple[tuple[str, str], ...],
+    preferred_source_gateway: str,
+    link_targets: dict[tuple[str, str], NetnsTarget],
+) -> tuple[str, str] | None:
+    preferred = [
+        link
+        for link in monitored_links
+        if link[0] == preferred_source_gateway and link in link_targets
+    ]
+    if preferred:
+        return preferred[0]
+    for link in monitored_links:
+        if link in link_targets:
+            return link
+    return None
+
+
+def _netns_provider(provider: MetricProvider) -> NetnsMetricProvider | None:
+    if isinstance(provider, NetnsMetricProvider):
+        return provider
+    base_provider = getattr(provider, "base_provider", None)
+    if isinstance(base_provider, NetnsMetricProvider):
+        return base_provider
+    return None
+
+
+def _target_to_jsonable(target: NetnsTarget) -> dict[str, int | float | str | bool]:
+    return {
+        "label": target.label,
+        "namespace": target.namespace,
+        "target_ip": target.target_ip,
+        "iperf_port": target.iperf_port,
+        "ping_count": target.ping_count,
+        "ping_interval_s": target.ping_interval_s,
+        "iperf_seconds": target.iperf_seconds,
+        "sudo": target.sudo,
     }
 
 
@@ -316,6 +424,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "history_steps": result["history_steps"],
         "horizon": result["horizon"],
         "measurement_targets": result["measurement_targets"],
+        "path_measurement_bindings": result["path_measurement_bindings"],
         "gateway_route_tables": result["gateway_route_tables"],
         "support_bindings": result["support_bindings"],
         "agent_confirm_acks": result["agent_confirm_acks"],
