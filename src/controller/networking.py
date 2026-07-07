@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 from src.agents.base import BaseAgent
@@ -32,6 +32,13 @@ _SUPPORT_CAPABILITY = {
     "trans": "transport_session",
     "net": "network_bearer",
 }
+
+
+@dataclass(frozen=True)
+class _EdgeSupport:
+    t_agent: AgentCard
+    n_agent: AgentCard
+    gateway_path: tuple[str, ...]
 
 
 class AgentController:
@@ -350,16 +357,30 @@ class AgentController:
         self,
         task: TaskSpec,
         app_cards: dict[str, AgentCard],
-    ) -> tuple[dict[str, tuple[AgentCard, AgentCard]], list[AgentConfirmAck]]:
-        selected: dict[str, tuple[AgentCard, AgentCard]] = {}
+    ) -> tuple[dict[str, _EdgeSupport], list[AgentConfirmAck]]:
+        selected: dict[str, _EdgeSupport] = {}
         ack_by_agent: dict[tuple[str, str], AgentConfirmAck] = {}
         for edge in task.biz_edges:
             source = app_cards[edge.source]
-            t_agent = await self._first_support("transport_session", preferred_gateway=source.gateway_id)
-            n_agent = await self._first_support("network_bearer", preferred_gateway=source.gateway_id)
+            target = app_cards[edge.target]
+            gateway_path = self._gateway_path(source.gateway_id, target.gateway_id)
+            t_agent = await self._first_support(
+                "transport_session",
+                preferred_gateway=source.gateway_id,
+                allowed_gateways=(source.gateway_id,),
+            )
+            n_agent = await self._first_support(
+                "network_bearer",
+                preferred_gateway=gateway_path[0],
+                allowed_gateways=gateway_path,
+            )
             if t_agent is None or n_agent is None:
                 raise ValueError(f"support agents unavailable for edge {edge.source}->{edge.target}")
-            selected[f"{edge.source}->{edge.target}"] = (t_agent, n_agent)
+            selected[f"{edge.source}->{edge.target}"] = _EdgeSupport(
+                t_agent=t_agent,
+                n_agent=n_agent,
+                gateway_path=gateway_path,
+            )
             ack_by_agent[(t_agent.agent_id, "transport_session")] = _agent_ack(
                 task.task_id,
                 t_agent,
@@ -376,28 +397,27 @@ class AgentController:
         self,
         task: TaskSpec,
         app_cards: dict[str, AgentCard],
-        support_cards: dict[str, tuple[AgentCard, AgentCard]],
+        support_cards: dict[str, _EdgeSupport],
     ) -> list[SessionSpec]:
         sessions = []
         for index, edge in enumerate(task.biz_edges, start=1):
             source = app_cards[edge.source]
             target = app_cards[edge.target]
-            t_agent, n_agent = support_cards[f"{edge.source}->{edge.target}"]
-            gateway_path = self._gateway_path(source.gateway_id, target.gateway_id)
+            support = support_cards[f"{edge.source}->{edge.target}"]
             sessions.append(
                 SessionSpec(
                     session_id=f"{task.task_id}-sess-{index}",
                     task_id=task.task_id,
                     source=edge.source,
                     target=edge.target,
-                    t_agent_id=t_agent.agent_id,
-                    n_agent_id=n_agent.agent_id,
+                    t_agent_id=support.t_agent.agent_id,
+                    n_agent_id=support.n_agent.agent_id,
                     source_gateway=source.gateway_id,
                     target_gateway=target.gateway_id,
                     latency_budget_ms=edge.latency_budget_ms,
                     data_rate_mbps=edge.data_rate_mbps,
-                    path_id="->".join(gateway_path),
-                    gateway_path=gateway_path,
+                    path_id="->".join(support.gateway_path),
+                    gateway_path=support.gateway_path,
                 )
             )
         return sessions
@@ -577,12 +597,24 @@ class AgentController:
                 return card
         return None
 
-    async def _first_support(self, capability: str, preferred_gateway: str | None = None) -> AgentCard | None:
-        gateway_order = []
-        if preferred_gateway is not None:
-            gateway_order.append(self.gateways[preferred_gateway])
-        gateway_order.extend(gateway for key, gateway in self.gateways.items() if key != preferred_gateway)
+    async def _first_support(
+        self,
+        capability: str,
+        preferred_gateway: str | None = None,
+        allowed_gateways: tuple[str, ...] | None = None,
+    ) -> AgentCard | None:
+        gateway_ids: list[str] = []
+        if allowed_gateways is None:
+            gateway_ids = list(self.gateways)
+        else:
+            gateway_ids = list(dict.fromkeys(allowed_gateways))
+        if preferred_gateway is not None and preferred_gateway in gateway_ids:
+            gateway_ids.remove(preferred_gateway)
+            gateway_ids.insert(0, preferred_gateway)
+        gateway_order = [self.gateways[gateway_id] for gateway_id in gateway_ids]
         for gateway in gateway_order:
+            if not gateway.online:
+                continue
             cards = await gateway.confirm_support(capability)
             if cards:
                 return cards[0]

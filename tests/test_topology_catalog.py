@@ -80,15 +80,7 @@ class TopologyCatalogTests(unittest.TestCase):
     def test_catalog_relay_gateway_can_receive_multihop_routes_and_ack(self) -> None:
         async def run() -> None:
             provider = SyntheticMetricProvider()
-            relay = GatewaySpec(
-                gateway_id="gw-relay",
-                subnet_id="relay-subnet",
-                node="relay-node",
-                gateway_ip="10.10.9.2",
-            )
-            catalog = rescue_topology_catalog().with_gateway(relay).with_agents(
-                *support_agent_specs("gw-relay")
-            )
+            catalog = _catalog_with_relay()
             gateways = build_topology_from_catalog(catalog, provider)
             controller = AgentController(
                 gateways,
@@ -113,6 +105,49 @@ class TopologyCatalogTests(unittest.TestCase):
             self.assertEqual(relay_route.action.next_hop_gateway_ip, "10.10.2.2")
 
         asyncio.run(run())
+
+    def test_path_support_agent_is_selected_from_given_gateway_path(self) -> None:
+        async def run() -> None:
+            provider = SyntheticMetricProvider()
+            gateways = build_topology_from_catalog(_catalog_with_relay(), provider)
+            gateways["gw-ue"].fail_agent("nagent-gw-ue")
+            gateways["gw-mec"].fail_agent("nagent-gw-mec")
+            controller = AgentController(
+                gateways,
+                gateway_paths={("gw-ue", "gw-mec"): ("gw-ue", "gw-relay", "gw-mec")},
+            )
+
+            subnet, metrics = await controller.build_task_subnet(rescue_task())
+            session_id = "task-rescue-001-sess-1"
+            session = next(item for item in subnet.sessions if item.session_id == session_id)
+            session_support = subnet.session_supports[session_id]
+            path_support = subnet.path_supports[session_support.path_support_id]
+            support_ack = next(
+                ack
+                for ack in subnet.agent_acks
+                if ack.agent_id == "nagent-gw-relay" and ack.purpose == "network_bearer"
+            )
+
+            self.assertTrue(metrics.networking_success)
+            self.assertEqual(session.gateway_path, ("gw-ue", "gw-relay", "gw-mec"))
+            self.assertEqual(session.n_agent_id, "nagent-gw-relay")
+            self.assertEqual(path_support.n_agent_id, "nagent-gw-relay")
+            self.assertEqual(path_support.gateway_path, session.gateway_path)
+            self.assertEqual(support_ack.gateway_id, "gw-relay")
+
+        asyncio.run(run())
+
+
+def _catalog_with_relay():
+    relay = GatewaySpec(
+        gateway_id="gw-relay",
+        subnet_id="relay-subnet",
+        node="relay-node",
+        gateway_ip="10.10.9.2",
+    )
+    return rescue_topology_catalog().with_gateway(relay).with_agents(
+        *support_agent_specs("gw-relay")
+    )
 
 
 if __name__ == "__main__":
