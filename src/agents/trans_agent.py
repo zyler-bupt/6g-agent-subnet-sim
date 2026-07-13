@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.agents.base import BaseAgent
-from src.agents.forecast import exponential_forecast
+from src.agents.forecast import forecast_history
 from src.core.models import AgentAction, AgentLayer, AgentPrediction, TaskSpec
 from src.metrics.provider import MetricSnapshot
 
@@ -25,14 +25,14 @@ class TransAgent(BaseAgent):
                 layer=AgentLayer.TRANSPORT,
                 metric="trans_latency_ms",
                 horizon=self.horizon,
-                values=exponential_forecast(rtt_history, self.horizon),
+                values=forecast_history(rtt_history, self.horizon, method=self.forecast_method),
             ),
             AgentPrediction(
                 agent_id=self.agent_id,
                 layer=AgentLayer.TRANSPORT,
                 metric="trans_loss_rate",
                 horizon=self.horizon,
-                values=exponential_forecast(loss_history, self.horizon),
+                values=forecast_history(loss_history, self.horizon, method=self.forecast_method),
             ),
         ]
 

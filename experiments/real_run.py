@@ -11,6 +11,7 @@ from typing import Any
 
 from src import report
 from src.agents.controls import FlowgenControl
+from src.agents.forecast import SUPPORTED_FORECAST_METHODS
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator
 from src.core.models import AgentAction, AgentPrediction, TaskSubnet, to_jsonable
@@ -67,7 +68,14 @@ async def run(args: argparse.Namespace) -> dict:
         default_tcp_congestion=args.tcp_congestion,
         bandwidth_controller=_build_htb_controller(args),
     )
-    _configure_real_agents(controller, subnet, args.horizon, args.history_steps, executor)
+    _configure_real_agents(
+        controller,
+        subnet,
+        args.horizon,
+        args.history_steps,
+        executor,
+        args.forecast_method,
+    )
 
     baseline = await _sample_predict_and_act(
         controller,
@@ -129,6 +137,7 @@ async def run(args: argparse.Namespace) -> dict:
         "build_metrics": to_jsonable(build_metrics),
         "history_steps": args.history_steps,
         "horizon": args.horizon,
+        "forecast_method": args.forecast_method,
         "flowgen_control_file": str(args.flowgen_control_file),
         "executor_state": executor.state,
         "network_advice": executor.network_advice_log,
@@ -359,10 +368,12 @@ def _configure_real_agents(
     horizon: int,
     history_steps: int,
     executor: FlowgenControl | None,
+    forecast_method: str,
 ) -> None:
     for agent in controller._agents_for_subnet(subnet):
         agent.horizon = horizon
         agent.history_window = history_steps
+        agent.forecast_method = forecast_method
         agent.action_executor = executor
 
 
@@ -450,7 +461,14 @@ async def _evaluate_rebuild_baseline_from_args(
         _build_link_target_profile(args),
         controller,
     )
-    _configure_real_agents(controller, subnet, args.horizon, args.history_steps, executor=None)
+    _configure_real_agents(
+        controller,
+        subnet,
+        args.horizon,
+        args.history_steps,
+        executor=None,
+        forecast_method=args.forecast_method,
+    )
     summary = await _evaluate_rebuild_baseline(controller, subnet, timestamp)
     summary["build_metrics"] = to_jsonable(build_metrics)
     summary["path_measurement_bindings"] = path_measurement_bindings
@@ -480,6 +498,7 @@ def _adjustment_to_jsonable(
         "changed_agents": adjustment.changed_agents,
         "changed_edges": adjustment.changed_edges,
         "changed_gateways": adjustment.changed_gateways,
+        "estimated_interruption_ms": adjustment.estimated_interruption_ms,
         "service_interruption_ms": adjustment.service_interruption_ms,
         "operations": dict(adjustment.operations),
         "actions": [to_jsonable(action) for action in adjustment.actions],
@@ -550,6 +569,7 @@ def _summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "target_profile": result["target_profile"],
         "history_steps": result["history_steps"],
         "horizon": result["horizon"],
+        "forecast_method": result.get("forecast_method", "adaptive"),
         "measurement_targets": result["measurement_targets"],
         "path_measurement_bindings": result["path_measurement_bindings"],
         "gateway_route_tables": result["gateway_route_tables"],
@@ -597,6 +617,7 @@ def _render_real_report(result: dict[str, Any]) -> str:
                 ("任务", result["task_id"]),
                 ("测量 profile", result["target_profile"]),
                 ("历史/预测窗口", f"{result['history_steps']} 步历史 → {result['horizon']} 步预测"),
+                ("预测方法", result.get("forecast_method", "adaptive")),
                 ("控制文件", result["flowgen_control_file"]),
             ]
         )
@@ -638,11 +659,11 @@ def _render_real_report(result: dict[str, Any]) -> str:
     full = result.get("full_rebuild_baseline")
     if adjustment is not None and full is not None:
         lines.append(report.section("最小调整 vs 全量重建"))
-        minimal_ms = float(adjustment["service_interruption_ms"])
-        full_ms = float(full["service_interruption_ms"])
+        minimal_ms = float(adjustment.get("estimated_interruption_ms", adjustment["service_interruption_ms"]))
+        full_ms = float(full.get("estimated_interruption_ms", full["service_interruption_ms"]))
         lines.append(
             report.table(
-                headers=["方法", "策略", "风险", "变更A/E/GW", "中断(ms)", "操作"],
+                headers=["方法", "策略", "风险", "变更A/E/GW", "估计中断(ms)", "操作"],
                 rows=[
                     [
                         "最小调整",
@@ -663,7 +684,7 @@ def _render_real_report(result: dict[str, Any]) -> str:
                 ],
             )
         )
-        lines.append(report.bullet(f"中断成本对比：{report.pct_change(full_ms, minimal_ms)}"))
+        lines.append(report.bullet(f"CostModel 估计中断对比：{report.pct_change(full_ms, minimal_ms)}"))
     return "\n".join(lines)
 
 
@@ -718,7 +739,7 @@ def _adjustment_block(label: str, adjustment: dict[str, Any]) -> str:
             (label, _strategy(adjustment["strategy"])),
             ("风险", f"{adjustment['risk_before']:.3f} → {adjustment['risk_after']:.3f}"),
             ("变更A/E/GW", _change_counts(adjustment)),
-            ("中断成本", f"{adjustment['service_interruption_ms']:.0f} ms"),
+            ("估计中断成本", f"{adjustment.get('estimated_interruption_ms', adjustment['service_interruption_ms']):.0f} ms（非实测恢复）"),
             ("操作", _op_summary(adjustment["operations"])),
             ("动作", "  ".join(actions) if actions else "无"),
         ]
@@ -819,6 +840,12 @@ def main() -> None:
     parser.add_argument("--sudo", action="store_true")
     parser.add_argument("--history-steps", type=int, default=10)
     parser.add_argument("--horizon", type=int, default=5)
+    parser.add_argument(
+        "--forecast-method",
+        choices=SUPPORTED_FORECAST_METHODS,
+        default="adaptive",
+        help="Small-data forecast method for Agent predictions.",
+    )
     parser.add_argument("--sample-interval-s", type=float, default=1.0)
     parser.add_argument("--initial-target-mbps", type=float, default=16.0)
     parser.add_argument("--tcp-congestion", default="cubic")

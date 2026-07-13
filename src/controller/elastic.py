@@ -15,7 +15,14 @@ class AdjustmentResult:
     changed_edges: int
     changed_gateways: int
     service_interruption_ms: float
+    estimated_interruption_ms: float = 0.0
     operations: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # service_interruption_ms is retained for old callers and files. Both
+        # names describe a CostModel estimate, not measured business recovery.
+        if self.estimated_interruption_ms == 0.0 and self.service_interruption_ms != 0.0:
+            object.__setattr__(self, "estimated_interruption_ms", self.service_interruption_ms)
 
 
 def _active_actions(actions: list[AgentAction]) -> int:

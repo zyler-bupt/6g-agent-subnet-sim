@@ -63,6 +63,7 @@ async def _fresh_world() -> tuple[SyntheticMetricProvider, TaskSpec, AgentContro
 def _metrics(build: ExperimentMetrics, risk_before, risk_after, threshold, adj) -> ExperimentMetrics:
     return ExperimentMetrics(
         networking_success=build.networking_success,
+        controller_build_ms=build.controller_build_ms,
         networking_latency_ms=build.networking_latency_ms,
         session_count=build.session_count,
         involved_gateway_count=build.involved_gateway_count,
@@ -73,6 +74,7 @@ def _metrics(build: ExperimentMetrics, risk_before, risk_after, threshold, adj) 
         changed_edges=adj.changed_edges,
         changed_gateways=adj.changed_gateways,
         control_updates=adj.changed_gateways,
+        estimated_interruption_ms=adj.estimated_interruption_ms,
         service_interruption_ms=adj.service_interruption_ms,
     )
 
@@ -162,7 +164,7 @@ def render_report(outcomes: list[Outcome]) -> str:
                 ("任务", task.goal),
                 ("组网", f"{len(task.biz_edges)} 条业务链路 → 3 条端到端会话，涉及 3 个子网网关"),
                 ("阈值 τ", f"{task.qos.risk_threshold:.2f}"),
-                ("说明", "每个场景在两个同种子世界上分别执行『最小调整』与『全量重建』，数值均为实测"),
+                ("说明", "调整动作真实执行；中断时长来自同一 CostModel，属于估计值而非业务恢复实测"),
             ]
         )
     )
@@ -176,15 +178,15 @@ def render_report(outcomes: list[Outcome]) -> str:
                 o.trigger,
                 _strategy(o.minimal_strategy),
                 f"{o.minimal.changed_agents}/{o.minimal.changed_edges}/{o.minimal.changed_gateways}",
-                f"{o.minimal.service_interruption_ms:.0f}",
-                f"{o.full.service_interruption_ms:.0f}",
-                report.pct_change(o.full.service_interruption_ms, o.minimal.service_interruption_ms),
+                f"{o.minimal.estimated_interruption_ms:.0f}",
+                f"{o.full.estimated_interruption_ms:.0f}",
+                report.pct_change(o.full.estimated_interruption_ms, o.minimal.estimated_interruption_ms),
                 "✓" if o.minimal.qos_satisfied else "✗",
             ]
         )
     lines.append(
         report.table(
-            headers=["场景", "触发", "最小调整策略", "变更A/E/GW", "中断(ms)", "重建中断", "中断降幅", "QoS"],
+            headers=["场景", "触发", "最小调整策略", "变更A/E/GW", "估计中断(ms)", "重建估计", "估计降幅", "QoS"],
             rows=rows,
         )
     )
@@ -209,13 +211,13 @@ def render_report(outcomes: list[Outcome]) -> str:
     lines.append(report.bullet("支撑Agent失效且本地有备用：tier2 就地替换，仅触碰本子网"))
     lines.append(report.bullet("支撑Agent失效且本地无备用：tier3 跨子网改接，最小范围重路由"))
     avg_drop = sum(
-        (o.full.service_interruption_ms - o.minimal.service_interruption_ms)
-        / o.full.service_interruption_ms
+        (o.full.estimated_interruption_ms - o.minimal.estimated_interruption_ms)
+        / o.full.estimated_interruption_ms
         for o in outcomes
-        if o.full.service_interruption_ms
+        if o.full.estimated_interruption_ms
     ) / max(1, len(outcomes))
     lines.append("")
-    lines.append(f"  ✓ 相比全量重建，最小调整在满足 QoS 的同时平均减少业务中断约 {avg_drop*100:.0f}%。")
+    lines.append(f"  相比全量重建，最小调整的 CostModel 估计中断平均降低约 {avg_drop*100:.0f}%。")
     return "\n".join(lines)
 
 
@@ -237,14 +239,14 @@ def _plot(output_dir: Path, outcomes: list[Outcome]) -> None:
     if plt is None:
         return
     labels = [o.name for o in outcomes]
-    minimal = [o.minimal.service_interruption_ms for o in outcomes]
-    full = [o.full.service_interruption_ms for o in outcomes]
+    minimal = [o.minimal.estimated_interruption_ms for o in outcomes]
+    full = [o.full.estimated_interruption_ms for o in outcomes]
     x = range(len(labels))
     width = 0.38
     fig, ax = plt.subplots(figsize=(8, 3.6))
     ax.bar([i - width / 2 for i in x], minimal, width, label="minimal", color="#3572a5")
     ax.bar([i + width / 2 for i in x], full, width, label="full_rebuild", color="#999999")
-    ax.set_ylabel("interruption ms")
+    ax.set_ylabel("estimated interruption ms")
     ax.set_xticks(list(x))
     ax.set_xticklabels([f"S{i+1}" for i in x])
     ax.legend()

@@ -51,7 +51,7 @@ async def run() -> None:
         report.kv_block(
             [
                 ("状态", f"{subnet.state.value}  " + ("✓ 组网完成" if metrics.networking_success else "✗ 失败")),
-                ("建网耗时", f"{metrics.networking_latency_ms:.2f} ms"),
+                ("Controller 构建耗时", f"{metrics.controller_build_ms:.2f} ms（非端到端）"),
                 ("应用层成员", "  ".join(sorted(subnet.app_agents))),
                 ("传输层支撑", "  ".join(sorted(subnet.trans_agents))),
                 ("网络层支撑", "  ".join(sorted(subnet.net_agents))),

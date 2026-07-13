@@ -78,3 +78,6 @@ class SyntheticMetricProvider:
     def inject_event(self, task_id: str, event_type: str, severity: float = 1.0) -> None:
         current = self._events.setdefault(task_id, {})
         current[event_type] = max(current.get(event_type, 0.0), severity)
+
+    def clear_event(self, task_id: str, event_type: str) -> None:
+        self._events.setdefault(task_id, {}).pop(event_type, None)

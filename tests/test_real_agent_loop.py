@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.agents.app_agent import AppAgent
 from src.agents.controls import FlowgenControl
+from src.agents.forecast import SUPPORTED_FORECAST_METHODS, forecast_history
 from src.core.models import AgentAction, AgentCard, AgentLayer, AgentRole, AgentState
 from src.metrics.synthetic import SyntheticMetricProvider
 from src.sim.scenarios import rescue_task
@@ -37,6 +38,29 @@ class RealAgentLoopTests(unittest.TestCase):
 
     def test_horizon_five_prediction(self) -> None:
         agent = AppAgent(_card(), SyntheticMetricProvider(), horizon=5, history_window=10)
+        task = rescue_task()
+        for step in range(10):
+            agent.sense(task, float(step))
+        prediction = agent.predict(task)[0]
+        self.assertEqual(prediction.horizon, 5)
+        self.assertEqual(len(prediction.values), 5)
+
+    def test_small_data_forecast_methods_return_valid_horizon(self) -> None:
+        history = [10.0, 11.0, 9.5, 10.5, 10.2]
+        for method in SUPPORTED_FORECAST_METHODS:
+            with self.subTest(method=method):
+                values = forecast_history(history, 4, method=method)
+                self.assertEqual(len(values), 4)
+                self.assertTrue(all(value >= 0.0 for value in values))
+
+    def test_agent_can_use_kalman_forecast_method(self) -> None:
+        agent = AppAgent(
+            _card(),
+            SyntheticMetricProvider(),
+            horizon=5,
+            history_window=10,
+            forecast_method="kalman",
+        )
         task = rescue_task()
         for step in range(10):
             agent.sense(task, float(step))

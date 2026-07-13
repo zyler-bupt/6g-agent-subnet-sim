@@ -8,7 +8,7 @@ from src.agents.base import BaseAgent
 from src.controller.cost import CostModel
 from src.controller.elastic import AdjustmentResult, ElasticAdjuster
 from src.controller.risk import RiskCalculator
-from src.core.gateway import Gateway
+from src.core.gateway import Gateway, entry_key
 from src.core.models import (
     AgentCard,
     AgentConfirmAck,
@@ -84,6 +84,7 @@ class AgentController:
         elapsed_ms = (perf_counter() - start) * 1000
         metrics = ExperimentMetrics(
             networking_success=subnet.state == TaskState.NETWORKED,
+            controller_build_ms=elapsed_ms,
             networking_latency_ms=elapsed_ms,
             session_count=len(sessions),
             involved_gateway_count=len(subnet.involved_gateways),
@@ -167,6 +168,8 @@ class AgentController:
         subnet: TaskSubnet,
         failed: set[str],
         timestamp: float,
+        *,
+        evaluate_after: bool = True,
     ) -> tuple[AdjustmentResult, float]:
         task = subnet.task
         used_ids = (subnet.trans_agents | subnet.net_agents) - failed
@@ -217,8 +220,11 @@ class AgentController:
         subnet.gateway_routes = self._build_gateway_route_tables(task, new_sessions, app_cards)
         await self._apply_sessions(subnet, tuple(s for s in new_sessions if s.status == "rehomed"))
 
-        predictions = await self.run_agent_loop(subnet, timestamp + 0.2)
-        risk_after = self.risk_calculator.risk(task, predictions)
+        if evaluate_after:
+            predictions = await self.run_agent_loop(subnet, timestamp + 0.2)
+            risk_after = self.risk_calculator.risk(task, predictions)
+        else:
+            risk_after = 0.0
 
         replaced = local_replacements + cross_subnet_reroutes
         changed_sessions = tuple(s for s in new_sessions if s.status == "rehomed")
@@ -240,6 +246,26 @@ class AgentController:
             operations=operations,
         )
         return result, risk_after
+
+    async def apply_failed_support_recovery(
+        self,
+        subnet: TaskSubnet,
+        failed: set[str],
+        timestamp: float,
+    ) -> AdjustmentResult:
+        """Apply a confirmed support-Agent recovery without probing the failed path.
+
+        Detection and planning have already established the failure. Data-plane
+        verification must run after the replacement and external route update,
+        otherwise an intentional blackhole is misreported as a controller error.
+        """
+        result, _risk_after = await self._heal_failed_support(
+            subnet,
+            failed,
+            timestamp,
+            evaluate_after=False,
+        )
+        return result
 
     async def _resolve_support(
         self,
@@ -286,6 +312,41 @@ class AgentController:
                 for gateway_id in affected_gateways
             ]
         )
+
+    def missing_gateway_routes(self, subnet: TaskSubnet) -> dict[str, list[GatewayRouteEntry]]:
+        """Return logical task routes absent from each in-process gateway."""
+        missing: dict[str, list[GatewayRouteEntry]] = {}
+        for gateway_id, expected in subnet.gateway_routes.items():
+            gateway = self.gateways[gateway_id]
+            absent = [entry for entry in expected if entry_key(entry) not in gateway.route_table]
+            if absent:
+                missing[gateway_id] = absent
+        return missing
+
+    async def reinstall_gateway_routes(
+        self,
+        subnet: TaskSubnet,
+        gateway_ids: set[str],
+    ) -> list[GatewayAck]:
+        """Reinstall the full logical task slice on selected gateways."""
+        acknowledgements = list(
+            await asyncio.gather(
+                *[
+                    self.gateways[gateway_id].install_subnet(
+                        subnet.task,
+                        subnet.sessions,
+                        subnet.gateway_routes.get(gateway_id, []),
+                    )
+                    for gateway_id in sorted(gateway_ids)
+                ]
+            )
+        )
+        by_gateway = {ack.gateway_id: ack for ack in subnet.gateway_acks}
+        by_gateway.update({ack.gateway_id: ack for ack in acknowledgements})
+        subnet.gateway_acks = [by_gateway[gateway_id] for gateway_id in sorted(by_gateway)]
+        if all(ack.accepted for ack in subnet.gateway_acks):
+            subnet.state = TaskState.NETWORKED
+        return acknowledgements
 
     def _agent_by_id(self, agent_id: str) -> BaseAgent | None:
         for gateway in self.gateways.values():

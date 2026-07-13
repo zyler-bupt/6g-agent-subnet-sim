@@ -249,6 +249,9 @@ class TaskSubnet:
 @dataclass
 class ExperimentMetrics:
     networking_success: bool = False
+    controller_build_ms: float = 0.0
+    # Backward-compatible alias. This measures controller-side construction
+    # only; it is not end-to-end task-subnet build latency.
     networking_latency_ms: float = 0.0
     session_count: int = 0
     involved_gateway_count: int = 0
@@ -259,8 +262,21 @@ class ExperimentMetrics:
     changed_edges: int = 0
     changed_gateways: int = 0
     control_updates: int = 0
+    estimated_interruption_ms: float = 0.0
+    # Backward-compatible alias for the CostModel estimate.
     service_interruption_ms: float = 0.0
     prediction_mae: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.controller_build_ms == 0.0 and self.networking_latency_ms != 0.0:
+            self.controller_build_ms = self.networking_latency_ms
+        elif self.networking_latency_ms == 0.0 and self.controller_build_ms != 0.0:
+            self.networking_latency_ms = self.controller_build_ms
+
+        if self.estimated_interruption_ms == 0.0 and self.service_interruption_ms != 0.0:
+            self.estimated_interruption_ms = self.service_interruption_ms
+        elif self.service_interruption_ms == 0.0 and self.estimated_interruption_ms != 0.0:
+            self.service_interruption_ms = self.estimated_interruption_ms
 
 
 def to_jsonable(value: Any) -> Any:

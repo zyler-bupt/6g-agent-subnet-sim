@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.agents.base import BaseAgent
-from src.agents.forecast import exponential_forecast
+from src.agents.forecast import forecast_history
 from src.core.models import AgentAction, AgentLayer, AgentPrediction, TaskSpec
 from src.metrics.provider import MetricSnapshot
 
@@ -27,14 +27,14 @@ class NetAgent(BaseAgent):
                 layer=AgentLayer.NETWORK,
                 metric="net_bandwidth_mbps",
                 horizon=self.horizon,
-                values=exponential_forecast(bandwidth, self.horizon),
+                values=forecast_history(bandwidth, self.horizon, method=self.forecast_method),
             ),
             AgentPrediction(
                 agent_id=self.agent_id,
                 layer=AgentLayer.NETWORK,
                 metric="net_utilization",
                 horizon=self.horizon,
-                values=exponential_forecast(congestion, self.horizon),
+                values=forecast_history(congestion, self.horizon, method=self.forecast_method),
             ),
         ]
 

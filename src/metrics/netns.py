@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,23 @@ class NetnsMetricProvider:
         self._cache[cache_key] = (now, snapshot)
         return snapshot
 
+    async def snapshot_async(
+        self,
+        task_id: str,
+        agent_id: str,
+        timestamp: float,
+    ) -> MetricSnapshot:
+        target = self.target_for(agent_id)
+        cache_key = f"{task_id}:{target.namespace}:{target.target_ip}:{target.iperf_port}"
+        cached = self._cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] <= self.cache_ttl_s:
+            return cached[1]
+
+        snapshot = await self._measure_async(task_id, timestamp, target)
+        self._cache[cache_key] = (now, snapshot)
+        return snapshot
+
     def apply_effect(self, task_id: str, effect: dict[str, float]) -> None:
         current = self._effects.setdefault(task_id, {})
         for key, value in effect.items():
@@ -69,8 +87,7 @@ class NetnsMetricProvider:
         }
 
     def _measure(self, task_id: str, timestamp: float, target: NetnsTarget) -> MetricSnapshot:
-        ping = parse_ping(
-            self._run(
+        ping_output = self._run(
                 target,
                 "ping",
                 "-c",
@@ -81,9 +98,7 @@ class NetnsMetricProvider:
                 "2",
                 target.target_ip,
             )
-        )
-        iperf = parse_iperf3_json(
-            self._run(
+        iperf_output = self._run(
                 target,
                 "iperf3",
                 "-c",
@@ -94,9 +109,7 @@ class NetnsMetricProvider:
                 str(target.iperf_seconds),
                 "-J",
             )
-        )
-        ss = parse_ss_ti(
-            self._run(
+        ss_output = self._run(
                 target,
                 "ss",
                 "-tin",
@@ -104,7 +117,71 @@ class NetnsMetricProvider:
                 target.target_ip,
                 allow_failure=True,
             )
+        return self._snapshot_from_outputs(
+            task_id,
+            timestamp,
+            ping_output,
+            iperf_output,
+            ss_output,
         )
+
+    async def _measure_async(
+        self,
+        task_id: str,
+        timestamp: float,
+        target: NetnsTarget,
+    ) -> MetricSnapshot:
+        ping_output, iperf_output, ss_output = await asyncio.gather(
+            self._run_async(
+                target,
+                "ping",
+                "-c",
+                str(target.ping_count),
+                "-i",
+                f"{target.ping_interval_s:g}",
+                "-W",
+                "2",
+                target.target_ip,
+            ),
+            self._run_async(
+                target,
+                "iperf3",
+                "-c",
+                target.target_ip,
+                "-p",
+                str(target.iperf_port),
+                "-t",
+                str(target.iperf_seconds),
+                "-J",
+            ),
+            self._run_async(
+                target,
+                "ss",
+                "-tin",
+                "dst",
+                target.target_ip,
+                allow_failure=True,
+            ),
+        )
+        return self._snapshot_from_outputs(
+            task_id,
+            timestamp,
+            ping_output,
+            iperf_output,
+            ss_output,
+        )
+
+    def _snapshot_from_outputs(
+        self,
+        task_id: str,
+        timestamp: float,
+        ping_output: str,
+        iperf_output: str,
+        ss_output: str,
+    ) -> MetricSnapshot:
+        ping = parse_ping(ping_output)
+        iperf = parse_iperf3_json(iperf_output)
+        ss = parse_ss_ti(ss_output)
 
         effects = self._effects.setdefault(task_id, {})
         app_rate = self.app_rate_mbps * effects.get("app_rate_multiplier", 1.0)
@@ -129,6 +206,41 @@ class NetnsMetricProvider:
             utilization=utilization,
             queue_backlog=max(0.0, utilization - 0.72) * 100.0,
         )
+
+    @staticmethod
+    async def _run_async(
+        target: NetnsTarget,
+        *args: str,
+        allow_failure: bool = False,
+    ) -> str:
+        command = ["ip", "netns", "exec", target.namespace, *args]
+        if target.sudo:
+            command = ["sudo", *command]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=target.command_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            raise RuntimeError("command timed out: " + " ".join(command))
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0 and allow_failure:
+            return stdout_text
+        if process.returncode != 0:
+            raise RuntimeError(
+                "command failed: "
+                + " ".join(command)
+                + f"\nexit={process.returncode}\nstdout={stdout_text}\nstderr={stderr_text}"
+            )
+        return stdout_text
 
     @staticmethod
     def _run(

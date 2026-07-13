@@ -5,7 +5,7 @@ from typing import Any
 
 from src.core.models import AgentAction, AgentCard, AgentPrediction, AgentState, TaskSpec
 from src.metrics.provider import MetricProvider, MetricSnapshot
-from src.agents.forecast import exponential_forecast
+from src.agents.forecast import exponential_forecast, forecast_history
 
 
 @dataclass
@@ -15,6 +15,7 @@ class BaseAgent:
     horizon: int = 3
     history_window: int = 10
     action_executor: Any | None = None
+    forecast_method: str = "adaptive"
     history: dict[str, list[float]] = field(default_factory=dict)
 
     @property

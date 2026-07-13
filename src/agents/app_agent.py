@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.agents.base import BaseAgent
-from src.agents.forecast import exponential_forecast
+from src.agents.forecast import forecast_history
 from src.core.models import AgentAction, AgentLayer, AgentPrediction, TaskSpec
 from src.metrics.provider import MetricSnapshot
 
@@ -23,7 +23,7 @@ class AppAgent(BaseAgent):
                 layer=AgentLayer.APPLICATION,
                 metric="app_demand_mbps",
                 horizon=self.horizon,
-                values=exponential_forecast(history, self.horizon),
+                values=forecast_history(history, self.horizon, method=self.forecast_method),
             )
         ]
 

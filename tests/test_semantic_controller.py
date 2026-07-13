@@ -123,6 +123,12 @@ class SemanticControllerTests(unittest.TestCase):
         self.assertEqual(app.horizon, 2)
         self.assertEqual(len(net.values), 2)
 
+    def test_predictors_accept_small_data_methods(self) -> None:
+        app = ApplicationPredictor(forecast_method="kalman").predict([1.0, 1.4, 1.2], 3)
+        net = NetworkPredictor(forecast_method="holt").predict([5.0, 4.8, 4.6], 3)
+        self.assertEqual(len(app.values), 3)
+        self.assertEqual(len(net.values), 3)
+
     def test_feasibility_and_policy(self) -> None:
         app = PredictionResult(
             agent_id=AgentID.APPLICATION_AGENT,

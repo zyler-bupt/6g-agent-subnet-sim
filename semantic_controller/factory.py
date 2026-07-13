@@ -9,15 +9,21 @@ from semantic_controller.embedding import (
     OpenAICompatibleEmbeddingEncoder,
 )
 from semantic_controller.planner import ConstrainedRulePlanner, OpenManusTaskPlanner
+from semantic_controller.predictors import ApplicationPredictor, NetworkPredictor
 from semantic_controller.qwen import OpenAICompatibleChatClient, QwenGoalRecognizer
 from semantic_controller.recognizer import RetrievalAugmentedRuleRecognizer
 
 
 def build_semantic_controller_from_env() -> SemanticController:
     retriever = GoalPrototypeRetriever(encoder=_build_embedding_encoder())
+    forecast_method = os.environ.get("FORECAST_METHOD", "adaptive")
+    application_predictor = ApplicationPredictor(forecast_method=forecast_method)
+    network_predictor = NetworkPredictor(forecast_method=forecast_method)
     qwen_base_url = os.environ.get("QWEN_BASE_URL")
     if not qwen_base_url:
         return SemanticController(
+            application_predictor=application_predictor,
+            network_predictor=network_predictor,
             goal_recognizer=RetrievalAugmentedRuleRecognizer(retriever=retriever),
             task_planner=ConstrainedRulePlanner(),
         )
@@ -33,7 +39,12 @@ def build_semantic_controller_from_env() -> SemanticController:
         planner = OpenManusTaskPlanner(client=client)
     else:
         planner = ConstrainedRulePlanner()
-    return SemanticController(goal_recognizer=recognizer, task_planner=planner)
+    return SemanticController(
+        application_predictor=application_predictor,
+        network_predictor=network_predictor,
+        goal_recognizer=recognizer,
+        task_planner=planner,
+    )
 
 
 def _build_embedding_encoder():
