@@ -72,6 +72,8 @@ class ElasticAdjuster:
                 path_id=session.path_id,
                 gateway_path=session.gateway_path,
                 status="retuned",
+                business_edge_id=session.business_edge_id,
+                p_agent_ids=session.p_agent_ids,
             )
             for session in subnet.sessions
         )

@@ -1,0 +1,27 @@
+simulation:
+  seeds: 30
+  timeout_ms: 10000
+  result_mode: in_memory_transactionally_verified_control_plane_simulation
+
+task:
+  agent_counts: [10, 20, 40, 60, 80]
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+  dag_type: random
+
+topology:
+  multi_hop: true
+
+breakdown:
+  small_agents: 10
+  medium_agents: 40
+  large_agents: 80
+
+verification:
+  backend: in_memory_synthetic_business_edge_verifier
+  contains_ping: false
+  contains_iperf3: false
+  # No fixed probe sleep is inserted. Timings measure the actual in-memory
+  # staged/stable verification work performed by the shared transaction.
+  probe_delay_ms: 0.0

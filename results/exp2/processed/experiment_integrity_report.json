@@ -1,0 +1,102 @@
+{
+  "checks": [
+    {
+      "details": {
+        "bad_points": {},
+        "main_runs": 2160
+      },
+      "name": "30 seeds at every main experiment point",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "four methods present for each scenario/seed",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "scenario fingerprints identical across methods",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "proposal pools identical across methods",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "Ground Truth independent from method",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "negative": [],
+        "non_monotonic": []
+      },
+      "name": "no negative latency or reversed timestamps",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "failed_rollback": [],
+        "missing_rollback": []
+      },
+      "name": "infeasible executions use successful rollback",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "errors": [],
+        "runs": 540
+      },
+      "name": "Proposed detects oracle conflicts and commits feasible actions",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "independent": [],
+        "no_verification": []
+      },
+      "name": "Independent and no-verification skip global detection",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "extra": [],
+        "missing": []
+      },
+      "name": "all failed raw runs preserved",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "summary means and CI derive from raw samples",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "actual": 1710,
+        "expected": 1710
+      },
+      "name": "pairwise comparison uses matched scenario/seed samples",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "all methods share logged TransactionExecutor path",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "snapshots": 720
+      },
+      "name": "scenario snapshots are method independent",
+      "status": "PASS"
+    }
+  ],
+  "checks_passed": 14,
+  "checks_total": 14,
+  "main_run_count": 2160,
+  "raw_run_count": 2430,
+  "status": "PASS"
+}

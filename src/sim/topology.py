@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.agents import AppAgent, NetAgent, PhyAgentStub, TransAgent
+from src.agents import AppAgent, NetAgent, PhyAgent, TransAgent
 from src.agents.base import BaseAgent
 from src.core.gateway import Gateway
 from src.core.models import AgentCard, AgentLayer, AgentRole, AgentState
@@ -25,7 +25,7 @@ _AGENT_CLASS_BY_LAYER: dict[AgentLayer, type[BaseAgent]] = {
     AgentLayer.APPLICATION: AppAgent,
     AgentLayer.TRANSPORT: TransAgent,
     AgentLayer.NETWORK: NetAgent,
-    AgentLayer.PHYSICAL: PhyAgentStub,
+    AgentLayer.PHYSICAL: PhyAgent,
 }
 
 
@@ -52,6 +52,7 @@ class AgentSpec:
     ip: str = ""
     port: int | None = None
     status: str = "online"
+    state_values: dict[str, float | int | str | bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,7 @@ def _card_from_spec(spec: AgentSpec, gateway: Gateway) -> AgentCard:
         endpoint=spec.endpoint or f"sim://{spec.gateway_id}/{spec.agent_id}",
         capabilities=spec.capabilities,
         status=spec.status,
-        state=AgentState({}),
+        state=AgentState(dict(spec.state_values)),
         ip=spec.ip or gateway.gateway_ip,
         port=spec.port,
     )
@@ -119,6 +120,23 @@ def support_agent_specs(
             role=AgentRole.SUPPORT,
             gateway_id=gateway_id,
             capabilities=("network_bearer", "bandwidth_monitor", "congestion_monitor"),
+        ),
+        AgentSpec(
+            agent_id=f"pagent-{gateway_id}",
+            name=f"{gateway_id}物理接入Agent",
+            layer=AgentLayer.PHYSICAL,
+            role=AgentRole.SUPPORT,
+            gateway_id=gateway_id,
+            capabilities=(
+                "physical_access",
+                "radio_resource_monitor",
+                "physical_reservation",
+            ),
+            state_values={
+                "total_capacity_mbps": 100.0,
+                "signal_quality": 0.98,
+                "reliability": 0.999,
+            },
         ),
     )
     if not standby_network:
@@ -201,14 +219,6 @@ def rescue_topology_catalog() -> TopologyCatalog:
         *support_agent_specs("gw-ue"),
         *support_agent_specs("gw-mec", standby_network=True),
         *support_agent_specs("gw-cloud", standby_network=True),
-        AgentSpec(
-            "pagent-stub-ue",
-            "物理层占位pAgent",
-            AgentLayer.PHYSICAL,
-            AgentRole.SUPPORT,
-            "gw-ue",
-            ("phy_stub",),
-        ),
     )
 
 

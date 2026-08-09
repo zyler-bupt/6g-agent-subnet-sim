@@ -4,7 +4,7 @@ import asyncio
 import unittest
 
 from src.agents.base import exponential_forecast
-from src.agents.phy_agent import PhyAgentStub
+from src.agents.phy_agent import PhyAgent
 from src.controller.networking import AgentController
 from src.controller.risk import RiskCalculator, RiskWeights
 from src.core.gateway import Gateway
@@ -34,7 +34,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
         self.assertGreaterEqual(snapshot.loss_rate, 0)
         self.assertLessEqual(snapshot.loss_rate, 0.35)
 
-    def test_rescue_subnet_maps_business_edges_to_trans_and_net(self) -> None:
+    def test_rescue_subnet_maps_business_edges_to_all_four_layers(self) -> None:
         async def run() -> None:
             provider = SyntheticMetricProvider()
             controller = AgentController(build_rescue_topology(provider))
@@ -43,10 +43,14 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertEqual(len(subnet.sessions), 3)
             self.assertEqual(len(subnet.trans_agents), 3)
             self.assertEqual(len(subnet.net_agents), 3)
-            self.assertEqual(subnet.phy_agents, set())
+            self.assertEqual(
+                subnet.phy_agents,
+                {"pagent-gw-ue", "pagent-gw-mec", "pagent-gw-cloud"},
+            )
+            self.assertEqual(len(subnet.physical_bindings), 6)
             self.assertEqual(len(subnet.session_supports), 3)
             self.assertEqual(len(subnet.path_supports), 3)
-            self.assertEqual(len(subnet.agent_acks), 10)
+            self.assertEqual(len(subnet.agent_acks), 13)
             self.assertTrue(all(ack.accepted for ack in subnet.gateway_acks))
             self.assertTrue(all(ack.accepted for ack in subnet.agent_acks))
 
@@ -238,7 +242,7 @@ class AsyncAgentSubnetTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_agent_loop_produces_three_layer_predictions(self) -> None:
+    def test_agent_loop_produces_four_layer_predictions(self) -> None:
         async def run() -> None:
             provider = SyntheticMetricProvider()
             controller = AgentController(build_rescue_topology(provider))
@@ -248,18 +252,30 @@ class AsyncAgentSubnetTests(unittest.TestCase):
             self.assertIn(AgentLayer.APPLICATION, layers)
             self.assertIn(AgentLayer.TRANSPORT, layers)
             self.assertIn(AgentLayer.NETWORK, layers)
-            self.assertNotIn(AgentLayer.PHYSICAL, layers)
+            self.assertIn(AgentLayer.PHYSICAL, layers)
 
         asyncio.run(run())
 
-    def test_physical_stub_is_noop_and_lambda_h_defaults_zero(self) -> None:
+    def test_physical_agent_reports_and_proposes_without_direct_mutation(self) -> None:
         provider = SyntheticMetricProvider()
         gateway = build_rescue_topology(provider)["gw-ue"]
-        stub = gateway.agents["pagent-stub-ue"]
-        self.assertIsInstance(stub, PhyAgentStub)
+        physical = gateway.agents["pagent-gw-ue"]
+        self.assertIsInstance(physical, PhyAgent)
         task = rescue_task()
-        self.assertEqual(stub.predict(task), [])
-        self.assertEqual(RiskWeights().lambda_h, 0.0)
+        predictions = physical.predict(task)
+        self.assertEqual(
+            {item.metric for item in predictions},
+            {"phy_reliability", "phy_available_capacity_mbps"},
+        )
+        bindings_before = dict(physical.resource_bindings)
+        action = physical.propose_for_edge(18.0, currently_bound=False)
+        physical.execute(task, action)
+        self.assertIn(
+            action.action_type,
+            {"KEEP_RESOURCE", "ALLOCATE_RESOURCE", "RELEASE_RESOURCE", "SWITCH_ACCESS"},
+        )
+        self.assertEqual(physical.resource_bindings, bindings_before)
+        self.assertGreater(RiskWeights().lambda_h, 0.0)
 
     def test_risk_and_minimal_adjustment(self) -> None:
         async def run() -> None:

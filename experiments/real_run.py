@@ -257,7 +257,9 @@ def _build_target_profile(
         "tagent-gw-cloud": cloud_to_term,
         "nagent-gw-cloud": cloud_to_term,
         "nagent-gw-cloud-standby": cloud_to_term,
-        "pagent-stub-ue": term_to_edge,
+        "pagent-gw-ue": term_to_edge,
+        "pagent-gw-mec": edge_to_cloud,
+        "pagent-gw-cloud": cloud_to_term,
     }
 
 

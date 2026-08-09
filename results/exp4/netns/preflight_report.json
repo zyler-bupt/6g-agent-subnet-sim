@@ -1,0 +1,16 @@
+{
+  "status": "BLOCKED",
+  "result_mode": "real_linux_netns_mechanism_validation_not_executed",
+  "checked_at": "2026-08-07",
+  "uid": 1008,
+  "available_commands": ["ip", "ping", "iperf3", "tc"],
+  "failed_checks": [
+    "process is not root",
+    "ip netns query lacks CAP_NET_ADMIN/CAP_SYS_ADMIN",
+    "tc qdisc query lacks CAP_NET_ADMIN",
+    "sudo -n requires a password"
+  ],
+  "atomicity_claimed": false,
+  "batch_results_affected": false,
+  "next_command": "sudo python3 testbed/stage5_netns_link_failure.py --output-dir results/exp4/netns"
+}

@@ -1,0 +1,9 @@
+{
+  "contains_iperf3": false,
+  "contains_ping": false,
+  "paper_scope_note": "In-memory transactionally verified control-plane simulation; not ping/iPerf3 or 6G data-plane measurement.",
+  "result_mode": "in_memory_transactionally_verified_control_plane_simulation",
+  "t_ctrl_definition": "t_stage_started - t_task_received",
+  "t_form_definition": "t_stable_verify_finished - t_task_received",
+  "verification_backend": "in_memory_synthetic_business_edge_verifier"
+}

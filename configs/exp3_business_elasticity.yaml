@@ -1,0 +1,26 @@
+simulation:
+  seeds: 30
+  timeout_ms: 10000
+
+task:
+  num_agents: 20
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+  agent_removal_ratio: 0.10
+  removed_agent_type: leaf
+  dag_type: random
+
+topology:
+  num_gateways: 4
+  multi_hop: true
+
+runtime:
+  probe_interval_ms: 10
+
+sweeps:
+  agent_counts: [10, 20, 40, 60, 80]
+  gateway_counts: [2, 4, 8, 12]
+  cross_gateway_edge_ratios: [0.2, 0.4, 0.6, 0.8]
+  agent_removal_ratios: [0.05, 0.10, 0.20, 0.40]
+  removed_agent_types: [leaf, intermediate, fan_in, fan_out]

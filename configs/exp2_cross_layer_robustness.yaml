@@ -1,0 +1,47 @@
+simulation:
+  seeds: 30
+  timeout_ms: 10000
+  coordination_timeout_ms: 1000
+  result_mode: in_memory_transactional_control_plane_simulation
+
+task:
+  num_agents: 10
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+
+topology:
+  multi_hop: true
+
+scenario_audit:
+  source_runs: results/exp2/raw/runs.csv
+  source_proposals: results/exp2/raw/proposals.jsonl
+
+unresolvable:
+  cases:
+    - physical_capacity_absolute
+    - all_routes_latency
+    - reliability_impossible
+    - shared_resource_shortage
+  methods: [proposed, independent, adjacent, no_verification]
+
+noise:
+  ratios: [0.0, 0.05, 0.10, 0.20]
+  methods: [proposed, adjacent]
+  scenarios:
+    application_capacity: 1.2
+    transport_network: 0.85
+    network_physical: 0.4
+
+stale_state:
+  stale_ms: [0, 20, 50, 100, 200]
+  methods: [proposed, independent, adjacent, no_verification]
+
+missing_layer:
+  layers: [application, transport, network, physical]
+  methods: [proposed, adjacent]
+
+proposal_scale:
+  proposals_per_layer: [1, 2, 3, 4, 5]
+  methods: [proposed, adjacent]
+  coordination_timeout_ms: 1000

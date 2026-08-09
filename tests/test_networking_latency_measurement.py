@@ -21,7 +21,7 @@ class NetworkingLatencyMeasurementTests(unittest.TestCase):
         self.assertTrue(result["summary"]["success"])
         for sample in result["samples"]:
             self.assertTrue(sample["success"])
-            self.assertEqual(sample["subnet_state"], "networked")
+            self.assertEqual(sample["subnet_state"], "stable")
             self.assertGreaterEqual(sample["controller_build_ms"], 0.0)
             self.assertEqual(sample["controller_build_ms"], sample["networking_latency_ms"])
             self.assertEqual(sample["session_count"], 3)

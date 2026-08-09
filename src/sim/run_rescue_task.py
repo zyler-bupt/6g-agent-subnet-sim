@@ -55,7 +55,7 @@ async def run() -> None:
                 ("应用层成员", "  ".join(sorted(subnet.app_agents))),
                 ("传输层支撑", "  ".join(sorted(subnet.trans_agents))),
                 ("网络层支撑", "  ".join(sorted(subnet.net_agents))),
-                ("物理层(占位)", "  ".join(sorted(subnet.phy_agents)) or "（暂不实装）"),
+                ("物理层支撑", "  ".join(sorted(subnet.phy_agents))),
             ]
         )
     )

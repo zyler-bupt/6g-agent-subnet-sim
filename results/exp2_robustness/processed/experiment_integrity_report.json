@@ -1,0 +1,147 @@
+{
+  "checks": [
+    {
+      "details": [
+        "application_capacity",
+        "network_physical",
+        "transport_network"
+      ],
+      "name": "three main scenarios reported separately",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "30 paired seeds at every robustness point",
+      "status": "PASS"
+    },
+    {
+      "details": {},
+      "name": "all methods receive identical paired observations",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "cases": [
+          "all_routes_latency",
+          "physical_capacity_absolute",
+          "reliability_impossible",
+          "shared_resource_shortage"
+        ],
+        "errors": []
+      },
+      "name": "four unresolvable mechanisms have zero feasible combinations",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "Proposed safely rejects every unresolvable conflict",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "no method commits an unresolvable configuration",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "noise Ground Truth always uses true state",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "Proposed rejects stale proposal versions/read sets",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "missing layers are absent and use conservative bounds",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "proposal combination growth is measured as n^4",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "runs": 300,
+        "timeouts": 0
+      },
+      "name": "proposal-scale timeout outcomes are retained",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "extra": [],
+        "missing": []
+      },
+      "name": "all failures and safe rejections are retained",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "paired_runs": 810,
+        "same_selection_rate": 0.0
+      },
+      "name": "Independent and no-verification mechanisms select differently",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "sample_sizes": [
+          30
+        ],
+        "tests": 804
+      },
+      "name": "paired statistical tests use same-seed samples",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "no negative timing or memory values",
+      "status": "PASS"
+    },
+    {
+      "details": [],
+      "name": "no partial commits",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "results_dir": "results/exp2_robustness",
+        "source_integrity": "PASS"
+      },
+      "name": "results remain isolated from Exp2",
+      "status": "PASS"
+    },
+    {
+      "details": [
+        "in_memory_transactional_control_plane_simulation"
+      ],
+      "name": "all results identify control-plane simulation mode",
+      "status": "PASS"
+    },
+    {
+      "details": {
+        "inputs_are_not_mutated": true,
+        "no_shared_result_cache": true,
+        "objectives_are_distinct": true,
+        "oracle_receives_private_deepcopies": true,
+        "proposed_does_not_filter_on_ground_truth_labels": true,
+        "proposed_does_not_read_ground_truth_best_combination": true,
+        "proposed_is_exact_feasible_combination_search": true,
+        "runtime_results_are_separate_objects": true,
+        "shared_constraint_evaluator_only": true,
+        "solver_functions_are_distinct": true,
+        "tie_breaks_are_distinct": true
+      },
+      "name": "Ground Truth independence audit passes",
+      "status": "PASS"
+    }
+  ],
+  "checks_passed": 19,
+  "checks_total": 19,
+  "main_scenario_audit_rows": 2160,
+  "robustness_runs": 2340,
+  "status": "PASS"
+}

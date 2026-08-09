@@ -1,0 +1,6 @@
+method,mean,ci95,success_rate,infeasible_configuration_rate,sample_count
+proposed,1.0,0.0,1.0,0.0,30
+without_application,0.0,0.0,0.0,1.0,30
+without_transport,0.0,0.0,0.0,1.0,30
+without_network,0.0,0.0,0.0,1.0,30
+without_physical,0.0,0.0,0.0,1.0,30

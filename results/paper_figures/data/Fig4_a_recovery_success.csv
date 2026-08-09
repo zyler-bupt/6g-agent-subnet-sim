@@ -1,0 +1,10 @@
+paper_fault_family,method,sample_count,mean_percent,ci95_percent
+Agent Failure,full_rebuild,150,100.0,0.0
+Agent Failure,network_only,150,20.0,6.422778256869277
+Agent Failure,proposed,150,100.0,0.0
+Link Failure,full_rebuild,150,100.0,0.0
+Link Failure,network_only,150,100.0,0.0
+Link Failure,proposed,150,100.0,0.0
+Physical Capacity Drop,full_rebuild,150,100.0,0.0
+Physical Capacity Drop,network_only,150,40.0,7.8662647301860575
+Physical Capacity Drop,proposed,150,100.0,0.0

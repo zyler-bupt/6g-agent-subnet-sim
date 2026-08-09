@@ -5,25 +5,34 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 
 from src.agents.base import BaseAgent
+from src.agents.phy_agent import PhyAgent
 from src.controller.cost import CostModel
 from src.controller.elastic import AdjustmentResult, ElasticAdjuster
+from src.controller.feasibility import check_four_layer_feasibility
 from src.controller.risk import RiskCalculator
 from src.core.gateway import Gateway, entry_key
+from src.core.events import RuntimeEvent
 from src.core.models import (
     AgentCard,
     AgentConfirmAck,
     AgentLayer,
+    ApplicationAgentState,
     ExperimentMetrics,
     FlowMatch,
     GatewayAck,
     GatewayRouteAction,
     GatewayRouteEntry,
+    GatewayState,
+    NetworkAgentState,
     PathSupportSpec,
+    PhysicalAgentState,
+    PhysicalResourceBinding,
     SessionSpec,
     SessionSupportSpec,
     TaskSpec,
     TaskState,
     TaskSubnet,
+    TransportAgentState,
 )
 
 # Capability required from a support Agent of each layer, used when replacing a
@@ -38,7 +47,17 @@ _SUPPORT_CAPABILITY = {
 class _EdgeSupport:
     t_agent: AgentCard
     n_agent: AgentCard
+    p_agents: tuple[AgentCard, ...]
     gateway_path: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SubnetCompilation:
+    subnet: TaskSubnet
+    mapping_finished_at: float
+    layer_binding_finished_at: float
+    feasibility_finished_at: float
+    compile_finished_at: float
 
 
 class AgentController:
@@ -57,39 +76,301 @@ class AgentController:
         self.gateway_paths = dict(gateway_paths or {})
         self.tasks: dict[str, TaskSubnet] = {}
 
-    async def build_task_subnet(self, task: TaskSpec) -> tuple[TaskSubnet, ExperimentMetrics]:
-        start = perf_counter()
-        subnet = TaskSubnet(task=task, app_agents=set(task.app_agents), state=TaskState.NETWORKING)
-        app_cards, app_acks = await self._confirm_app_members(task)
-        support_cards, support_acks = await self._select_support_agents(task, app_cards)
-        sessions = self._map_edges_to_sessions(task, app_cards, support_cards)
+    async def handle_runtime_event(
+        self,
+        event: RuntimeEvent,
+        *,
+        run_id: int = 1,
+        seed: int = 0,
+        verifier=None,
+    ):
+        """Dispatch a versioned runtime transaction through one Controller entry.
 
+        Stage 2 intentionally supports only ``AGENT_REMOVE``.  The local import
+        keeps the existing networking module independent from future event
+        transaction implementations while preserving ``AgentController`` as the
+        public control-plane entry point.
+        """
+
+        from src.controller.transactions import AgentRemovalTransaction
+
+        return await AgentRemovalTransaction(self, verifier=verifier).handle(
+            event,
+            run_id=run_id,
+            seed=seed,
+        )
+
+    async def build_task_subnet(
+        self,
+        task: TaskSpec,
+        *,
+        verifier=None,
+        transactional_installer=None,
+        run_id: int = 0,
+        seed: int = 0,
+    ) -> tuple[TaskSubnet, ExperimentMetrics]:
+        """Build version 0 -> 1 through the same transaction used at runtime."""
+
+        from src.controller.impact import ImpactScope
+        from src.controller.reconfiguration import ReconfigurationPlan, delta_by_gateway
+        from src.controller.transaction_executor import TransactionExecutor
+        from src.core.events import EventLogRecord, EventStage, RuntimeEvent, RuntimeEventType
+        from src.core.rules import RuleDelta
+
+        task_received = perf_counter()
+        previous = self.tasks.get(task.task_id)
+        version = previous.version + 1 if previous is not None else 1
+        compilation = await self.compile_task_subnet(task, version=version)
+        subnet = compilation.subnet
+        old_rules = previous.rules if previous is not None else {}
+        new_rules = subnet.rules
+        additions = tuple(
+            new_rules[rule_id] for rule_id in sorted(set(new_rules) - set(old_rules))
+        )
+        # A repeated full construction reinstalls every surviving rule rather
+        # than disguising a rebuild as a zero-cost diff.
+        updates = tuple(
+            new_rules[rule_id] for rule_id in sorted(set(new_rules) & set(old_rules))
+        )
+        deletions = tuple(
+            old_rules[rule_id] for rule_id in sorted(set(old_rules) - set(new_rules))
+        )
+        delta = RuleDelta(additions=additions, updates=updates, deletions=deletions)
+        gateways = frozenset(
+            subnet.involved_gateways
+            | (previous.involved_gateways if previous is not None else set())
+        )
+        scope = ImpactScope(
+            affected_agents=frozenset(
+                subnet.app_agents | subnet.trans_agents | subnet.net_agents | subnet.phy_agents
+            ),
+            affected_business_edges=frozenset(subnet.business_edges),
+            affected_sessions=frozenset(session.session_id for session in subnet.sessions),
+            affected_routes=frozenset(subnet.routes),
+            affected_physical_resources=frozenset(subnet.physical_bindings),
+            affected_gateways=gateways,
+            affected_rules=frozenset(subnet.rules),
+        )
+        plan = ReconfigurationPlan(
+            method="initial_build" if previous is None else "full_rebuild",
+            target_state=subnet,
+            impact_scope=scope,
+            rule_delta_by_gateway=delta_by_gateway(delta, gateways),
+            affected_gateways=gateways,
+            affected_layers=frozenset({"application", "transport", "network", "physical"}),
+            transaction_gateways=gateways,
+            verification_gateways=gateways,
+            full_rule_install=True,
+        )
+        event = RuntimeEvent(
+            event_id=f"formation-{task.task_id}-v{version}",
+            task_id=task.task_id,
+            event_type=RuntimeEventType.TASK_BUILD.value,
+            occurred_at=task_received,
+            payload={"version": version},
+        )
+
+        def formation_record(stage: str, timestamp: float) -> EventLogRecord:
+            return EventLogRecord(
+                run_id=run_id,
+                event_id=event.event_id,
+                task_id=task.task_id,
+                old_version=version - 1,
+                new_version=version,
+                timestamp=timestamp,
+                component="AgentController",
+                event_type=event.event_type,
+                event_stage=stage,
+                details={},
+            )
+
+        pre_stage_records = (
+            formation_record("MAPPING_FINISHED", compilation.mapping_finished_at),
+            formation_record(
+                "LAYER_BINDING_FINISHED",
+                compilation.layer_binding_finished_at,
+            ),
+            formation_record("FEASIBILITY_FINISHED", compilation.feasibility_finished_at),
+            formation_record("COMPILE_FINISHED", compilation.compile_finished_at),
+            formation_record(EventStage.DELTA_COMPILED.value, compilation.compile_finished_at),
+        )
+        execution = await TransactionExecutor(
+            self,
+            installer=transactional_installer,
+            verifier=verifier,
+        ).execute(
+            previous,
+            plan,
+            event,
+            run_id=run_id,
+            seed=seed,
+            received_at=task_received,
+            pre_stage_records=pre_stage_records,
+        )
+        subnet = execution.state
+        if execution.success:
+            subnet.gateway_acks = [
+                GatewayAck(
+                    gateway_id=gateway_id,
+                    task_id=task.task_id,
+                    accepted=True,
+                    operation="install",
+                    installed_session_ids=tuple(
+                        sorted(
+                            self.gateways[gateway_id].get_stable_sessions(task.task_id)
+                        )
+                    ),
+                    installed_route_ids=tuple(
+                        sorted(self.gateways[gateway_id].get_stable_rules(task.task_id))
+                    ),
+                    session_count=len(
+                        self.gateways[gateway_id].get_stable_sessions(task.task_id)
+                    ),
+                    route_count=len(
+                        self.gateways[gateway_id].get_stable_rules(task.task_id)
+                    ),
+                    version=version,
+                )
+                for gateway_id in sorted(gateways)
+            ]
+        else:
+            subnet.gateway_acks = [
+                GatewayAck(
+                    gateway_id=gateway_id,
+                    task_id=task.task_id,
+                    accepted=False,
+                    reason=execution.failure_reason,
+                    operation="install",
+                    version=version,
+                )
+                for gateway_id in sorted(gateways)
+            ]
+
+        stage_started = execution.timestamp(EventStage.STAGE_STARTED)
+        stage_finished = execution.timestamp(EventStage.STAGE_FINISHED)
+        staged_verify_started = execution.timestamp(EventStage.VERIFY_STARTED)
+        staged_verify_finished = execution.timestamp(EventStage.VERIFY_FINISHED)
+        activate_started = execution.timestamp(EventStage.ACTIVATE_STARTED)
+        activate_finished = execution.timestamp(EventStage.ACTIVATE_FINISHED)
+        stable_verify_started = execution.timestamp(EventStage.POST_ACTIVATE_VERIFY_STARTED)
+        stable_verify_finished = execution.timestamp(
+            EventStage.POST_ACTIVATE_VERIFY_FINISHED
+        )
+        duration = lambda start, finish: max(0.0, (finish - start) * 1000.0) if finish else 0.0
+        controller_compute_ms = duration(task_received, compilation.compile_finished_at)
+        metrics = ExperimentMetrics(
+            networking_success=execution.success,
+            controller_compute_ms=controller_compute_ms,
+            controller_build_ms=controller_compute_ms,
+            networking_latency_ms=controller_compute_ms,
+            formation_latency_ms=(
+                duration(task_received, stable_verify_finished) if execution.success else 0.0
+            ),
+            session_count=len(subnet.sessions),
+            involved_gateway_count=len(gateways),
+            qos_satisfied=execution.success,
+            mapping_latency_ms=duration(task_received, compilation.mapping_finished_at),
+            binding_latency_ms=duration(
+                compilation.mapping_finished_at,
+                compilation.layer_binding_finished_at,
+            ),
+            feasibility_latency_ms=duration(
+                compilation.layer_binding_finished_at,
+                compilation.feasibility_finished_at,
+            ),
+            compile_latency_ms=duration(
+                compilation.feasibility_finished_at,
+                compilation.compile_finished_at,
+            ),
+            stage_latency_ms=duration(stage_started, stage_finished),
+            verification_latency_ms=(
+                duration(staged_verify_started, staged_verify_finished)
+                + duration(stable_verify_started, stable_verify_finished)
+            ),
+            activation_latency_ms=duration(activate_started, activate_finished),
+            t_task_received=task_received,
+            t_mapping_finished=compilation.mapping_finished_at,
+            t_layer_binding_finished=compilation.layer_binding_finished_at,
+            t_feasibility_finished=compilation.feasibility_finished_at,
+            t_compile_finished=compilation.compile_finished_at,
+            t_stage_started=stage_started,
+            t_stage_finished=stage_finished,
+            t_staged_verify_finished=staged_verify_finished,
+            t_activate_finished=activate_finished,
+            t_stable_verify_finished=stable_verify_finished,
+            control_messages=execution.control_messages,
+            control_bytes=execution.control_bytes,
+            rollback_triggered=execution.rollback_triggered,
+            rollback_success=execution.rollback_success,
+            failure_reason=execution.failure_reason,
+            transaction_event_log=execution.event_log,
+        )
+        return subnet, metrics
+
+    async def compile_task_subnet(
+        self,
+        task: TaskSpec,
+        *,
+        version: int,
+        gateway_path_overrides: dict[tuple[str, str], tuple[str, ...]] | None = None,
+        excluded_support_agents: frozenset[str] = frozenset(),
+    ) -> SubnetCompilation:
+        """Compile a complete task configuration without mutating gateways.
+
+        This is the common planning primitive used by initial construction and
+        the Full-Rebuild strategy.  Physical bindings are projected here and
+        become real only after the shared transaction has activated.
+        """
+
+        subnet = TaskSubnet(task=task, version=version, state=TaskState.PLANNING)
+        app_cards, app_acks = await self._confirm_app_members(task)
+        mapping_finished_at = perf_counter()
+
+        support_cards, support_acks = await self._select_support_agents(
+            task,
+            app_cards,
+            gateway_path_overrides=gateway_path_overrides,
+            excluded_support_agents=excluded_support_agents,
+        )
+        sessions = self._map_edges_to_sessions(task, app_cards, support_cards)
         subnet.agent_acks = app_acks + support_acks
-        subnet.trans_agents = {session.t_agent_id for session in sessions}
-        subnet.net_agents = {session.n_agent_id for session in sessions}
+        subnet.application_agents = self._build_application_states(task, app_cards)
         subnet.edges = self._build_edges(task, sessions)
         subnet.sessions = sessions
         subnet.involved_gateways = _involved_gateways(sessions)
+        subnet.monitored_edge_ids = {edge.edge_id for edge in task.biz_edges}
         subnet.path_supports, subnet.session_supports = self._build_support_bindings(sessions)
-        subnet.gateway_routes = self._build_gateway_route_tables(task, sessions, app_cards)
-        subnet.gateway_acks = await self._install_on_gateways(
+        subnet.transport_agents, subnet.network_agents = self._build_support_states(
             task,
-            subnet.involved_gateways,
             sessions,
-            subnet.gateway_routes,
         )
-        subnet.state = TaskState.NETWORKED if all(ack.accepted for ack in subnet.gateway_acks) else TaskState.FAILED
-        self.tasks[task.task_id] = subnet
+        subnet.physical_bindings, subnet.physical_agents = self._plan_physical_bindings(
+            task,
+            sessions,
+            version,
+        )
+        layer_binding_finished_at = perf_counter()
 
-        elapsed_ms = (perf_counter() - start) * 1000
-        metrics = ExperimentMetrics(
-            networking_success=subnet.state == TaskState.NETWORKED,
-            controller_build_ms=elapsed_ms,
-            networking_latency_ms=elapsed_ms,
-            session_count=len(sessions),
-            involved_gateway_count=len(subnet.involved_gateways),
+        feasibility = check_four_layer_feasibility(subnet)
+        feasibility_finished_at = perf_counter()
+        if not feasibility.feasible:
+            raise ValueError(
+                "four-layer feasibility failed: " + " | ".join(feasibility.violations)
+            )
+        subnet.gateway_routes = self._build_gateway_route_tables(
+            task,
+            sessions,
+            app_cards,
+            version=version,
         )
-        return subnet, metrics
+        compile_finished_at = perf_counter()
+        return SubnetCompilation(
+            subnet=subnet,
+            mapping_finished_at=mapping_finished_at,
+            layer_binding_finished_at=layer_binding_finished_at,
+            feasibility_finished_at=feasibility_finished_at,
+            compile_finished_at=compile_finished_at,
+        )
 
     async def run_agent_loop(self, subnet: TaskSubnet, timestamp: float) -> list:
         agents = self._agents_for_subnet(subnet)
@@ -210,15 +491,23 @@ class AgentController:
 
         # Commit the healed subnet and push updates only to the affected gateways.
         subnet.sessions = new_sessions
-        subnet.trans_agents = {s.t_agent_id for s in new_sessions}
-        subnet.net_agents = {s.n_agent_id for s in new_sessions}
+        subnet.transport_agents, subnet.network_agents = self._build_support_states(
+            task,
+            new_sessions,
+        )
         subnet.edges = self._build_edges(task, new_sessions)
         subnet.involved_gateways |= affected_gateways | _involved_gateways(new_sessions)
-        subnet.state = TaskState.NETWORKED if not unresolved else TaskState.DEGRADED
+        subnet.state = TaskState.STABLE if not unresolved else TaskState.DEGRADED
         subnet.path_supports, subnet.session_supports = self._build_support_bindings(new_sessions)
         app_cards = self._current_app_cards(task)
-        subnet.gateway_routes = self._build_gateway_route_tables(task, new_sessions, app_cards)
+        subnet.gateway_routes = self._build_gateway_route_tables(
+            task,
+            new_sessions,
+            app_cards,
+            version=subnet.version,
+        )
         await self._apply_sessions(subnet, tuple(s for s in new_sessions if s.status == "rehomed"))
+        subnet.gateways = self._gateway_state_snapshot(task.task_id, subnet.involved_gateways)
 
         if evaluate_after:
             predictions = await self.run_agent_loop(subnet, timestamp + 0.2)
@@ -345,7 +634,11 @@ class AgentController:
         by_gateway.update({ack.gateway_id: ack for ack in acknowledgements})
         subnet.gateway_acks = [by_gateway[gateway_id] for gateway_id in sorted(by_gateway)]
         if all(ack.accepted for ack in subnet.gateway_acks):
-            subnet.state = TaskState.NETWORKED
+            subnet.state = TaskState.STABLE
+            subnet.gateways = self._gateway_state_snapshot(
+                subnet.task.task_id,
+                subnet.involved_gateways,
+            )
         return acknowledgements
 
     def _agent_by_id(self, agent_id: str) -> BaseAgent | None:
@@ -360,29 +653,20 @@ class AgentController:
         subnet: TaskSubnet,
         timestamp: float,
     ) -> tuple[TaskSubnet, float, AdjustmentResult]:
-        """Full-rebuild baseline: tear down the whole subnet and rebuild it.
+        """Full-rebuild baseline using full compilation and transactional install.
 
-        Unlike the minimal adjustment, this really re-confirms every member,
-        re-installs every gateway and re-establishes every session. The returned
-        cost reflects that full work (computed with the same shared cost model),
-        so it is a fair, executed baseline rather than a hand-picked number.
+        Unlike the minimal adjustment, this re-confirms every member,
+        recompiles every session, and reinstalls every task rule.  The previous
+        version remains active until the common transaction commits.
         """
         task = subnet.task
 
-        # 1. Real teardown of the entire existing subnet on every involved gateway.
-        for gateway_id in subnet.involved_gateways:
-            gateway = self.gateways[gateway_id]
-            gateway.update_count += 1
-            for session in subnet.sessions:
-                gateway.installed_sessions.pop(session.session_id, None)
-                for key, entry in list(gateway.route_table.items()):
-                    if entry.session_id == session.session_id:
-                        gateway.route_table.pop(key)
-
-        # 2. Real rebuild from scratch (confirm members, select support, install).
+        # Recompile every object and reinstall every surviving rule through the
+        # versioned transaction.  The old stable version stays live until the
+        # new version passes verification, so a failed rebuild remains atomic.
         new_subnet, _ = await self.build_task_subnet(task)
 
-        # 3. Re-evaluate risk on the freshly built subnet.
+        # Re-evaluate risk on the freshly built subnet.
         predictions = await self.run_agent_loop(new_subnet, timestamp)
         risk_after = self.risk_calculator.risk(task, predictions)
 
@@ -395,7 +679,12 @@ class AgentController:
             strategy="full_rebuild",
             actions=tuple(new_subnet.actions),
             changed_sessions=tuple(new_subnet.sessions),
-            changed_agents=len(new_subnet.app_agents | new_subnet.trans_agents | new_subnet.net_agents),
+            changed_agents=len(
+                new_subnet.app_agents
+                | new_subnet.trans_agents
+                | new_subnet.net_agents
+                | new_subnet.phy_agents
+            ),
             changed_edges=len(new_subnet.edges),
             changed_gateways=len(new_subnet.involved_gateways),
             service_interruption_ms=self.cost_model.interruption_ms(operations),
@@ -418,28 +707,59 @@ class AgentController:
         self,
         task: TaskSpec,
         app_cards: dict[str, AgentCard],
+        *,
+        gateway_path_overrides: dict[tuple[str, str], tuple[str, ...]] | None = None,
+        excluded_support_agents: frozenset[str] = frozenset(),
     ) -> tuple[dict[str, _EdgeSupport], list[AgentConfirmAck]]:
         selected: dict[str, _EdgeSupport] = {}
         ack_by_agent: dict[tuple[str, str], AgentConfirmAck] = {}
         for edge in task.biz_edges:
             source = app_cards[edge.source]
             target = app_cards[edge.target]
-            gateway_path = self._gateway_path(source.gateway_id, target.gateway_id)
+            gateway_path = (
+                gateway_path_overrides.get((source.gateway_id, target.gateway_id))
+                if gateway_path_overrides is not None
+                else None
+            ) or self._gateway_path(source.gateway_id, target.gateway_id)
+            if gateway_path[0] != source.gateway_id or gateway_path[-1] != target.gateway_id:
+                raise ValueError(
+                    "gateway path override endpoints do not match business edge"
+                )
+            unknown = [item for item in gateway_path if item not in self.gateways]
+            if unknown:
+                raise ValueError(f"gateway path override references unknown gateways: {unknown}")
             t_agent = await self._first_support(
                 "transport_session",
                 preferred_gateway=source.gateway_id,
                 allowed_gateways=(source.gateway_id,),
+                excluded_agent_ids=excluded_support_agents,
             )
             n_agent = await self._first_support(
                 "network_bearer",
                 preferred_gateway=gateway_path[0],
                 allowed_gateways=gateway_path,
+                excluded_agent_ids=excluded_support_agents,
             )
+            p_agents: list[AgentCard] = []
+            for gateway_id in dict.fromkeys((source.gateway_id, target.gateway_id)):
+                p_agent = await self._first_support(
+                    "physical_access",
+                    preferred_gateway=gateway_id,
+                    allowed_gateways=(gateway_id,),
+                    excluded_agent_ids=excluded_support_agents,
+                )
+                if p_agent is None:
+                    raise ValueError(
+                        f"physical support unavailable for edge {edge.source}->{edge.target} "
+                        f"at {gateway_id}"
+                    )
+                p_agents.append(p_agent)
             if t_agent is None or n_agent is None:
                 raise ValueError(f"support agents unavailable for edge {edge.source}->{edge.target}")
-            selected[f"{edge.source}->{edge.target}"] = _EdgeSupport(
+            selected[edge.edge_id] = _EdgeSupport(
                 t_agent=t_agent,
                 n_agent=n_agent,
+                p_agents=tuple(p_agents),
                 gateway_path=gateway_path,
             )
             ack_by_agent[(t_agent.agent_id, "transport_session")] = _agent_ack(
@@ -452,6 +772,12 @@ class AgentController:
                 n_agent,
                 "network_bearer",
             )
+            for p_agent in p_agents:
+                ack_by_agent[(p_agent.agent_id, "physical_access")] = _agent_ack(
+                    task.task_id,
+                    p_agent,
+                    "physical_access",
+                )
         return selected, list(ack_by_agent.values())
 
     def _map_edges_to_sessions(
@@ -464,7 +790,7 @@ class AgentController:
         for index, edge in enumerate(task.biz_edges, start=1):
             source = app_cards[edge.source]
             target = app_cards[edge.target]
-            support = support_cards[f"{edge.source}->{edge.target}"]
+            support = support_cards[edge.edge_id]
             sessions.append(
                 SessionSpec(
                     session_id=f"{task.task_id}-sess-{index}",
@@ -479,6 +805,8 @@ class AgentController:
                     data_rate_mbps=edge.data_rate_mbps,
                     path_id="->".join(support.gateway_path),
                     gateway_path=support.gateway_path,
+                    business_edge_id=edge.edge_id,
+                    p_agent_ids=tuple(agent.agent_id for agent in support.p_agents),
                 )
             )
         return sessions
@@ -490,6 +818,8 @@ class AgentController:
             edges.add((session.source, session.t_agent_id, "uses_trans"))
             edges.add((session.t_agent_id, session.n_agent_id, "uses_net"))
             edges.add((session.n_agent_id, session.target, "supports_delivery"))
+            for p_agent_id in session.p_agent_ids:
+                edges.add((p_agent_id, session.source, "supports_physical_access"))
         return edges
 
     def _build_support_bindings(
@@ -508,6 +838,7 @@ class AgentController:
                 gateway_path=gateway_path,
                 n_agent_id=session.n_agent_id,
                 monitored_links=_path_links(gateway_path),
+                p_agent_ids=session.p_agent_ids,
             )
             session_supports[session.session_id] = SessionSupportSpec(
                 support_id=session_support_id,
@@ -516,8 +847,255 @@ class AgentController:
                 path_support_id=path_support_id,
                 path_id=session.path_id,
                 gateway_path=gateway_path,
+                p_agent_ids=session.p_agent_ids,
             )
         return path_supports, session_supports
+
+    @staticmethod
+    def _build_application_states(
+        task: TaskSpec,
+        app_cards: dict[str, AgentCard],
+    ) -> dict[str, ApplicationAgentState]:
+        states: dict[str, ApplicationAgentState] = {}
+        for agent_id, card in app_cards.items():
+            outgoing = [edge for edge in task.biz_edges if edge.source == agent_id]
+            incident = [
+                edge
+                for edge in task.biz_edges
+                if edge.source == agent_id or edge.target == agent_id
+            ]
+            states[agent_id] = ApplicationAgentState(
+                agent_id=agent_id,
+                gateway_id=card.gateway_id,
+                node=card.node,
+                data_rate_mbps=sum(edge.data_rate_mbps for edge in outgoing),
+                priority=max(
+                    (edge.priority for edge in incident),
+                    default=task.qos.priority,
+                ),
+                online=card.online,
+            )
+        return states
+
+    def _build_support_states(
+        self,
+        task: TaskSpec,
+        sessions: list[SessionSpec],
+    ) -> tuple[dict[str, TransportAgentState], dict[str, NetworkAgentState]]:
+        transport: dict[str, TransportAgentState] = {}
+        network: dict[str, NetworkAgentState] = {}
+        for agent_id in sorted({session.t_agent_id for session in sessions}):
+            assigned = [session for session in sessions if session.t_agent_id == agent_id]
+            agent = self._agent_by_id(agent_id)
+            if agent is None:
+                continue
+            transport[agent_id] = TransportAgentState(
+                agent_id=agent_id,
+                gateway_id=agent.card.gateway_id,
+                session_ids=tuple(sorted(session.session_id for session in assigned)),
+                send_rate_mbps=sum(session.data_rate_mbps for session in assigned),
+                reliability=task.qos.min_reliability,
+                online=agent.card.online,
+            )
+        for agent_id in sorted({session.n_agent_id for session in sessions}):
+            assigned = [session for session in sessions if session.n_agent_id == agent_id]
+            agent = self._agent_by_id(agent_id)
+            if agent is None:
+                continue
+            capacity = float(
+                agent.card.state.values.get(
+                    "available_capacity_mbps",
+                    max(100.0, task.qos.min_bandwidth_mbps),
+                )
+            )
+            network[agent_id] = NetworkAgentState(
+                agent_id=agent_id,
+                gateway_id=agent.card.gateway_id,
+                path_ids=tuple(sorted({session.path_id for session in assigned})),
+                available_capacity_mbps=capacity,
+                online=agent.card.online,
+            )
+        return transport, network
+
+    def _allocate_physical_bindings(
+        self,
+        task: TaskSpec,
+        sessions: list[SessionSpec],
+        version: int,
+    ) -> tuple[
+        dict[str, PhysicalResourceBinding],
+        dict[str, PhysicalResourceBinding],
+    ]:
+        requirements: dict[str, list[tuple[str, float]]] = {}
+        for session in sessions:
+            for agent_id in session.p_agent_ids:
+                requirements.setdefault(agent_id, []).append(
+                    (session.business_edge_id, session.data_rate_mbps)
+                )
+
+        agents: dict[str, PhyAgent] = {}
+        for agent_id, items in requirements.items():
+            agent = self._agent_by_id(agent_id)
+            if not isinstance(agent, PhyAgent):
+                raise ValueError(f"physical Agent unavailable: {agent_id}")
+            agents[agent_id] = agent
+            target_ids = {
+                f"{task.task_id}:{edge_id}:{agent_id}:physical"
+                for edge_id, _required in items
+            }
+            retained = sum(
+                binding.reserved_capacity_mbps
+                for binding_id, binding in agent.resource_bindings.items()
+                if binding.active and binding_id not in target_ids
+            )
+            requested = sum(required for _edge_id, required in items)
+            if not agent.card.online or retained + requested > agent.total_capacity_mbps + 1e-9:
+                raise ValueError(
+                    f"physical capacity exceeded at {agent_id}: "
+                    f"required={requested:g}, retained={retained:g}, "
+                    f"capacity={agent.total_capacity_mbps:g}"
+                )
+
+        bindings: dict[str, PhysicalResourceBinding] = {}
+        previous: dict[str, PhysicalResourceBinding] = {}
+        try:
+            for agent_id, items in requirements.items():
+                agent = agents[agent_id]
+                for edge_id, required in items:
+                    binding_id = f"{task.task_id}:{edge_id}:{agent_id}:physical"
+                    old = agent.resource_bindings.get(binding_id)
+                    if old is not None:
+                        previous[binding_id] = old
+                    binding = agent.allocate_resource(
+                        task.task_id,
+                        edge_id,
+                        required,
+                        version,
+                    )
+                    bindings[binding.binding_id] = binding
+        except Exception:
+            self._restore_physical_bindings(bindings, previous)
+            raise
+        return bindings, previous
+
+    def _plan_physical_bindings(
+        self,
+        task: TaskSpec,
+        sessions: list[SessionSpec],
+        version: int,
+    ) -> tuple[
+        dict[str, PhysicalResourceBinding],
+        dict[str, PhysicalAgentState],
+    ]:
+        """Return a capacity-checked physical target snapshot without mutation."""
+
+        requirements: dict[str, list[tuple[str, float]]] = {}
+        for session in sessions:
+            for agent_id in session.p_agent_ids:
+                requirements.setdefault(agent_id, []).append(
+                    (session.business_edge_id, session.data_rate_mbps)
+                )
+
+        bindings: dict[str, PhysicalResourceBinding] = {}
+        states: dict[str, PhysicalAgentState] = {}
+        for agent_id, items in sorted(requirements.items()):
+            agent = self._agent_by_id(agent_id)
+            if not isinstance(agent, PhyAgent):
+                raise ValueError(f"physical Agent unavailable: {agent_id}")
+            retained = {
+                binding_id: binding
+                for binding_id, binding in agent.resource_bindings.items()
+                if binding.active and binding.task_id != task.task_id
+            }
+            requested = sum(required for _edge_id, required in items)
+            retained_capacity = sum(
+                binding.reserved_capacity_mbps for binding in retained.values()
+            )
+            if (
+                not agent.card.online
+                or retained_capacity + requested > agent.total_capacity_mbps + 1e-9
+            ):
+                raise ValueError(
+                    f"physical capacity exceeded at {agent_id}: "
+                    f"required={requested:g}, retained={retained_capacity:g}, "
+                    f"capacity={agent.total_capacity_mbps:g}"
+                )
+            desired: dict[str, PhysicalResourceBinding] = {}
+            for edge_id, required in items:
+                binding_id = f"{task.task_id}:{edge_id}:{agent_id}:physical"
+                desired[binding_id] = PhysicalResourceBinding(
+                    binding_id=binding_id,
+                    task_id=task.task_id,
+                    edge_id=edge_id,
+                    agent_id=agent_id,
+                    gateway_id=agent.card.gateway_id,
+                    reserved_capacity_mbps=required,
+                    version=version,
+                )
+            bindings.update(desired)
+            current = agent.report_state()
+            total_reserved = retained_capacity + requested
+            states[agent_id] = replace(
+                current,
+                available_capacity_mbps=max(
+                    0.0,
+                    agent.total_capacity_mbps - total_reserved,
+                ),
+                resource_utilization=min(
+                    1.0,
+                    total_reserved / max(agent.total_capacity_mbps, 1e-9),
+                ),
+                binding_ids=tuple(sorted({*retained, *desired})),
+            )
+        return bindings, states
+
+    def _restore_physical_bindings(
+        self,
+        bindings: dict[str, PhysicalResourceBinding],
+        previous: dict[str, PhysicalResourceBinding],
+    ) -> None:
+        for binding in bindings.values():
+            agent = self._agent_by_id(binding.agent_id)
+            if isinstance(agent, PhyAgent):
+                agent.release_resource(binding.binding_id)
+        for binding in previous.values():
+            agent = self._agent_by_id(binding.agent_id)
+            if isinstance(agent, PhyAgent):
+                agent.restore_resource(binding)
+
+    def _physical_states_for_sessions(
+        self,
+        sessions: list[SessionSpec],
+    ) -> dict[str, PhysicalAgentState]:
+        states: dict[str, PhysicalAgentState] = {}
+        for agent_id in sorted(
+            {agent_id for session in sessions for agent_id in session.p_agent_ids}
+        ):
+            agent = self._agent_by_id(agent_id)
+            if isinstance(agent, PhyAgent):
+                states[agent_id] = agent.report_state()
+        return states
+
+    def _gateway_state_snapshot(
+        self,
+        task_id: str,
+        gateway_ids: set[str],
+    ) -> dict[str, GatewayState]:
+        return {
+            gateway_id: GatewayState(
+                gateway_id=gateway_id,
+                online=self.gateways[gateway_id].online,
+                stable_version=self.gateways[gateway_id].get_stable_version(task_id),
+                staged_version=self.gateways[gateway_id].get_staged_version(task_id),
+                stable_rule_ids=tuple(
+                    sorted(self.gateways[gateway_id].get_stable_rules(task_id))
+                ),
+                staged_rule_ids=tuple(
+                    sorted(self.gateways[gateway_id].get_staged_rules(task_id))
+                ),
+            )
+            for gateway_id in sorted(gateway_ids)
+        }
 
     async def _install_on_gateways(
         self,
@@ -544,6 +1122,8 @@ class AgentController:
         task: TaskSpec,
         sessions: list[SessionSpec],
         app_cards: dict[str, AgentCard],
+        *,
+        version: int = 1,
     ) -> dict[str, list[GatewayRouteEntry]]:
         tables: dict[str, list[GatewayRouteEntry]] = {}
         edges = {
@@ -564,6 +1144,7 @@ class AgentController:
                     gateway_id,
                     hop_index,
                     next_hop_gateway,
+                    version,
                 )
                 tables.setdefault(gateway_id, []).append(entry)
         return tables
@@ -578,6 +1159,7 @@ class AgentController:
         gateway_id: str,
         hop_index: int,
         next_hop_gateway: str | None,
+        version: int,
     ) -> GatewayRouteEntry:
         target = app_cards[session.target]
         match = FlowMatch(
@@ -617,6 +1199,7 @@ class AgentController:
             action=action,
             t_agent_id=session.t_agent_id,
             n_agent_id=session.n_agent_id,
+            p_agent_id=session.p_agent_ids[0] if session.p_agent_ids else None,
             session_support_id=_session_support_id(session),
             path_support_id=_path_support_id(session),
             path_id=session.path_id,
@@ -625,6 +1208,9 @@ class AgentController:
             latency_budget_ms=session.latency_budget_ms,
             min_bandwidth_mbps=session.data_rate_mbps,
             status=session.status,
+            version=version,
+            route_id=f"{session.session_id}:route",
+            p_agent_ids=session.p_agent_ids,
         )
 
     def _gateway_path(self, source_gateway: str, target_gateway: str) -> tuple[str, ...]:
@@ -663,6 +1249,7 @@ class AgentController:
         capability: str,
         preferred_gateway: str | None = None,
         allowed_gateways: tuple[str, ...] | None = None,
+        excluded_agent_ids: frozenset[str] = frozenset(),
     ) -> AgentCard | None:
         gateway_ids: list[str] = []
         if allowed_gateways is None:
@@ -676,16 +1263,27 @@ class AgentController:
         for gateway in gateway_order:
             if not gateway.online:
                 continue
-            cards = await gateway.confirm_support(capability)
+            cards = [
+                card
+                for card in await gateway.confirm_support(capability)
+                if card.agent_id not in excluded_agent_ids
+            ]
             if cards:
                 return cards[0]
         return None
 
     def _agents_for_subnet(self, subnet: TaskSubnet) -> list[BaseAgent]:
+        # Preserve the established a/t/n sampling order for seeded experiments;
+        # physical observations are appended and use their own state model.
         ids = subnet.app_agents | subnet.trans_agents | subnet.net_agents
         agents: list[BaseAgent] = []
         for gateway in self.gateways.values():
             for agent_id in ids:
+                agent = gateway.agents.get(agent_id)
+                if agent is not None and agent not in agents:
+                    agents.append(agent)
+        for gateway in self.gateways.values():
+            for agent_id in subnet.phy_agents:
                 agent = gateway.agents.get(agent_id)
                 if agent is not None and agent not in agents:
                     agents.append(agent)

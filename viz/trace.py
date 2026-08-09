@@ -85,7 +85,7 @@ def _short_label(card) -> str:
     if card.layer.value == "net":
         return "nAgent·备用" if aid.endswith("-standby") else "nAgent"
     if card.layer.value == "phy":
-        return "pAgent·占位"
+        return "pAgent·资源"
     return card.name
 
 

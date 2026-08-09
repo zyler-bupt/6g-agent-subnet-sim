@@ -1,0 +1,13 @@
+x,method,mean,ci95,sample_count,success_rate
+0.05,full_rebuild,0.0,0.0,30,1.0
+0.05,local_only,0.0,0.0,30,0.0
+0.05,proposed,0.0,0.0,30,1.0
+0.1,full_rebuild,0.0,0.0,30,1.0
+0.1,local_only,0.0,0.0,30,0.4
+0.1,proposed,0.0,0.0,30,1.0
+0.2,full_rebuild,0.0,0.0,30,1.0
+0.2,local_only,0.0,0.0,30,0.8666666666666667
+0.2,proposed,0.0,0.0,30,1.0
+0.4,full_rebuild,0.0,0.0,30,1.0
+0.4,local_only,0.0,0.0,30,1.0
+0.4,proposed,0.0,0.0,30,1.0
