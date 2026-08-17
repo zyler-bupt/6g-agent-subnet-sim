@@ -165,16 +165,34 @@ def evaluate_cross_layer_combination(
         transport = projected.transport[edge_id]
         network = projected.network[edge_id]
         physical = projected.physical[edge_id]
+        transport_capacity = transport.admissible_capacity_mbps
         if application.required_rate_mbps > transport.send_rate_mbps + 1e-9:
             violations.append(f"application_transport_rate:{edge_id}")
+        if transport_capacity is not None:
+            if application.required_rate_mbps > transport_capacity + 1e-9:
+                violations.append(f"application_transport_capacity:{edge_id}")
+            if transport.send_rate_mbps > transport_capacity + 1e-9:
+                violations.append(f"transport_admissible_capacity:{edge_id}")
+        if application.required_rate_mbps > network.available_bandwidth_mbps + 1e-9:
+            violations.append(f"application_network_capacity:{edge_id}")
+        if transport.send_rate_mbps > network.available_bandwidth_mbps + 1e-9:
+            violations.append(f"transport_network_rate:{edge_id}")
+        if application.required_rate_mbps > physical.available_capacity_mbps + 1e-9:
+            violations.append(f"application_physical_capacity:{edge_id}")
         if application.required_rate_mbps > min(
             network.available_bandwidth_mbps,
             physical.available_capacity_mbps,
         ) + 1e-9:
+            # Retain the legacy umbrella for existing consumers while exposing
+            # the distinct layer capacity violations above.
             violations.append(f"application_capacity:{edge_id}")
-        if transport.send_rate_mbps > network.available_bandwidth_mbps + 1e-9:
-            violations.append(f"transport_network_rate:{edge_id}")
-        if network.available_bandwidth_mbps > physical.available_capacity_mbps + 1e-9:
+        if transport.send_rate_mbps > physical.available_capacity_mbps + 1e-9:
+            violations.append(f"transport_physical_capacity:{edge_id}")
+        if (
+            not projected.metadata.get("independent_layer_capacities", False)
+            and network.available_bandwidth_mbps
+            > physical.available_capacity_mbps + 1e-9
+        ):
             violations.append(f"network_physical_capacity:{edge_id}")
         if not network.reachable or not physical.online:
             violations.append(f"unreachable:{edge_id}")
@@ -210,6 +228,11 @@ def evaluate_cross_layer_combination(
         )
         throughput = min(
             transport.send_rate_mbps,
+            (
+                transport.send_rate_mbps
+                if transport_capacity is None
+                else transport_capacity
+            ),
             network.available_bandwidth_mbps,
             physical.available_capacity_mbps,
         )
@@ -229,9 +252,12 @@ def evaluate_cross_layer_combination(
         if required_access is not None and physical.access_id != required_access:
             violations.append(f"network_physical_access:{edge_id}")
         resource_id = constraint.shared_resource_id
-        shared_demand[resource_id] = (
-            shared_demand.get(resource_id, 0.0) + transport.send_rate_mbps
+        flow_demand = (
+            application.required_rate_mbps
+            if projected.metadata.get("shared_demand_uses_application_rate", False)
+            else transport.send_rate_mbps
         )
+        shared_demand[resource_id] = shared_demand.get(resource_id, 0.0) + flow_demand
         edge_violations = [
             item for item in violations if item.endswith(f":{edge_id}")
         ]
@@ -341,6 +367,20 @@ def project_cross_layer_state(
                     ),
                     reliability=float(
                         parameters.get("transport_reliability", current.reliability)
+                    ),
+                    admissible_capacity_mbps=(
+                        None
+                        if parameters.get(
+                            "transport_admissible_capacity_mbps",
+                            current.admissible_capacity_mbps,
+                        )
+                        is None
+                        else float(
+                            parameters.get(
+                                "transport_admissible_capacity_mbps",
+                                current.admissible_capacity_mbps,
+                            )
+                        )
                     ),
                 )
             elif proposal.layer == "network" and edge_id in network:

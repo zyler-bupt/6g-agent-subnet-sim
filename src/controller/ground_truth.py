@@ -68,13 +68,19 @@ class GroundTruthSolver:
                 )
             )
 
-        independent = tuple(
-            max(
-                groups[key],
-                key=lambda item: (item.utility, item.proposal_id),
+        if state.metadata.get("ground_truth_conflict_reference") == "keep_combination":
+            independent = tuple(
+                next(item for item in groups[key] if item.is_keep)
+                for key in sorted(groups)
             )
-            for key in sorted(groups)
-        )
+        else:
+            independent = tuple(
+                max(
+                    groups[key],
+                    key=lambda item: (item.utility, item.proposal_id),
+                )
+                for key in sorted(groups)
+            )
         independent_ids = tuple(item.proposal_id for item in independent)
         independent_result = feasibility_by_ids[independent_ids]
         feasible = [item for item in evaluated if item.feasible]

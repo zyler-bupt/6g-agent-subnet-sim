@@ -26,6 +26,9 @@ class TransportLayerState:
     multipath_enabled: bool
     reliability_mode: str
     reliability: float = 0.999
+    # None preserves the legacy model in which send_rate_mbps doubled as the
+    # transport admission ceiling. New scenarios should set this explicitly.
+    admissible_capacity_mbps: float | None = None
 
 
 @dataclass(frozen=True)

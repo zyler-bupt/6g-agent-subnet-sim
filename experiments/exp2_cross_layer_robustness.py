@@ -10,7 +10,7 @@ import tracemalloc
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml
 
@@ -46,6 +46,7 @@ async def run_case(
     run_index: int,
     coordination_timeout_ms: float,
     execute_transaction: bool = True,
+    post_evaluator: Callable[..., Any] = evaluate_cross_layer_combination,
 ) -> tuple[RobustnessRunMetrics, list[dict[str, object]], dict[str, object]]:
     if method not in METHODS:
         raise ValueError(f"unsupported robustness method: {method}")
@@ -86,7 +87,11 @@ async def run_case(
             pressure=snapshot.pressure,
             scenario_fingerprint=snapshot.fingerprint,
         )
-        execution = await AuthorizedActionExecutor(controller, verifier).execute(
+        execution = await AuthorizedActionExecutor(
+            controller,
+            verifier,
+            cross_layer_evaluator=post_evaluator,
+        ).execute(
             stable,
             snapshot.true_state,
             coordination,
@@ -110,13 +115,13 @@ async def run_case(
             for record in transaction.event_log
         ]
     else:
-        post = evaluate_cross_layer_combination(
+        post = post_evaluator(
             snapshot.true_state,
             coordination.selected_proposals,
         )
 
     if post is None:
-        post = evaluate_cross_layer_combination(snapshot.true_state)
+        post = post_evaluator(snapshot.true_state)
     finished = perf_counter()
     rollback_triggered = bool(transaction and transaction.rollback_triggered)
     rollback_success = bool(transaction and transaction.rollback_success)
@@ -264,6 +269,10 @@ async def run_case(
                 "experiment_run_id": metric.run_id,
                 "timestamp": finished,
                 "component": "CrossLayerCoordinator",
+                "experiment": snapshot.experiment,
+                "scenario": snapshot.scenario,
+                "method": method,
+                "scenario_fingerprint": snapshot.fingerprint,
                 "event_stage": (
                     "SAFE_REJECTED" if decision_rejected else "COORDINATION_ONLY"
                 ),

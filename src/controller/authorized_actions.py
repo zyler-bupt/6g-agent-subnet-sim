@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 
 from src.controller.cross_layer_coordinator import CoordinationResult
 from src.controller.conflicts import detect_write_set_conflicts
@@ -49,10 +49,18 @@ class PostActivationCrossLayerVerifier:
     stable-state verifier as every other method.
     """
 
-    def __init__(self, business_verifier) -> None:
+    def __init__(
+        self,
+        business_verifier,
+        *,
+        cross_layer_evaluator: Callable[..., Any] = (
+            evaluate_cross_layer_combination
+        ),
+    ) -> None:
         self.business_verifier = business_verifier
+        self.cross_layer_evaluator = cross_layer_evaluator
         self.invocations = 0
-        self.last_cross_layer_result: CrossLayerFeasibilityResult | None = None
+        self.last_cross_layer_result: Any | None = None
 
     async def verify(self, subnet: TaskSubnet) -> VerifyResult:
         self.invocations += 1
@@ -60,7 +68,7 @@ class PostActivationCrossLayerVerifier:
         runtime = subnet.cross_layer_runtime
         if self.invocations % 2 == 1 or not isinstance(runtime, CrossLayerTaskState):
             return base
-        result = evaluate_cross_layer_combination(runtime)
+        result = self.cross_layer_evaluator(runtime)
         self.last_cross_layer_result = result
         if result.feasible:
             return VerifyResult(
@@ -129,11 +137,15 @@ class AuthorizedActionExecutor:
         *,
         installer: TransactionalInstaller | None = None,
         clock: Callable[[], float] = perf_counter,
+        cross_layer_evaluator: Callable[..., Any] = (
+            evaluate_cross_layer_combination
+        ),
     ) -> None:
         self.controller = controller
         self.business_verifier = business_verifier
         self.installer = installer
         self.clock = clock
+        self.cross_layer_evaluator = cross_layer_evaluator
 
     def authorize(
         self,
@@ -281,7 +293,10 @@ class AuthorizedActionExecutor:
         received_at: float | None = None,
     ) -> CrossLayerExecutionResult:
         plan, actions = self.plan(stable_state, observation, coordination)
-        verifier = PostActivationCrossLayerVerifier(self.business_verifier)
+        verifier = PostActivationCrossLayerVerifier(
+            self.business_verifier,
+            cross_layer_evaluator=self.cross_layer_evaluator,
+        )
         started = self.clock()
         transaction = await TransactionExecutor(
             self.controller,
@@ -299,7 +314,9 @@ class AuthorizedActionExecutor:
         elapsed = (self.clock() - started) * 1000.0
         post = verifier.last_cross_layer_result
         if post is None:
-            post = evaluate_cross_layer_combination(plan.target_state.cross_layer_runtime)
+            post = self.cross_layer_evaluator(
+                plan.target_state.cross_layer_runtime
+            )
         return CrossLayerExecutionResult(
             authorized_actions=actions,
             plan=plan,

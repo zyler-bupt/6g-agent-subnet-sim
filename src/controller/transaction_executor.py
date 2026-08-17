@@ -363,10 +363,15 @@ class TransactionExecutor:
             )
 
         try:
-            physical_restore_snapshot = self._replace_physical_bindings(target)
-            target.physical_agents = self.controller._physical_states_for_sessions(
-                target.sessions
+            physical_unchanged = (
+                "physical" not in plan.affected_layers
+                and target.physical_bindings == stable_state.physical_bindings
             )
+            if not physical_unchanged:
+                physical_restore_snapshot = self._replace_physical_bindings(target)
+                target.physical_agents = self.controller._physical_states_for_sessions(
+                    target.sessions
+                )
         except ValueError as error:
             reason = f"physical activation failed: {error}"
             rollback_ok, messages, byte_count = await self._rollback(

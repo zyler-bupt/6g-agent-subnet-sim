@@ -1,0 +1,37 @@
+experiment:
+  phase: formal
+  frozen: false
+  generator_version: wcnc-final-gamma-v5
+  output_dir: results/exp2_demand_capacity_v5
+
+simulation:
+  seeds: 100
+  seed_range: "0:99"
+  timeout_ms: 10000
+  coordination_timeout_ms: 10000
+  result_mode: in_memory_transactional_control_plane_gamma_simulation
+
+task:
+  num_agents: 10
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+
+demand_capacity:
+  ratios: []
+  definition: "gamma = R_req / min(C_t_admissible, C_n_available, C_p_available)"
+  flows_per_task: 3
+  proposals_per_layer: 2
+  expected_ground_truth_combinations: 4096
+  controlled_variable: demand_to_capacity_ratio
+  nuisance_distribution_policy: identical_across_gamma_for_each_seed
+  shared_trunk_utilization_range: [0.75, 0.90]
+  route_access_switch_probability: 0.55
+  environment_rng_version: wcnc-final-gamma-environment-v4
+  truth_evaluator: independent-demand-capacity-truth-v1
+
+methods:
+  - ours
+  - alc
+  - layer_wise_independent
+  - no_global_verification

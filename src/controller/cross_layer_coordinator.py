@@ -10,6 +10,7 @@ from src.controller.feasibility import (
     CrossLayerFeasibilityResult,
     combination_objective,
     evaluate_cross_layer_combination,
+    project_cross_layer_state,
 )
 from src.controller.ground_truth import proposal_groups
 from src.core.cross_layer import CrossLayerTaskState, LayerProposal
@@ -101,7 +102,12 @@ class CrossLayerCoordinator:
     ) -> CoordinationResult:
         groups = proposal_groups(proposals)
         combinations = tuple(product(*(groups[key] for key in sorted(groups))))
-        local_best = _local_best(groups)
+        common_objective = _uses_common_objective(state)
+        local_best = (
+            _local_objective_best(state, groups)
+            if common_objective
+            else _local_best(groups)
+        )
         feasibility_started = self.clock()
         local_result = evaluate_cross_layer_combination(state, local_best)
         detected = not local_result.feasible
@@ -126,7 +132,14 @@ class CrossLayerCoordinator:
             ids = tuple(item.proposal_id for item in combination)
             if result.feasible:
                 feasible.append(
-                    (_proposed_policy_objective(result, combination), ids, combination, result)
+                    (
+                        _declared_joint_objective(state, combination)
+                        if common_objective
+                        else _proposed_policy_objective(result, combination),
+                        ids,
+                        combination,
+                        result,
+                    )
                 )
             else:
                 rejected_combinations += 1
@@ -137,16 +150,11 @@ class CrossLayerCoordinator:
         selected: tuple[LayerProposal, ...] = ()
         selected_result: CrossLayerFeasibilityResult | None = None
         if feasible:
-            # The policy tie-break deliberately differs from the Ground Truth
-            # oracle.  The oracle minimizes its scientific reference objective
-            # and then ascending proposal ids; the Controller prioritizes the
-            # task policy tuple and uses descending canonical ids only for
-            # otherwise complete ties.
             best_objective = min(item[0] for item in feasible)
             tied = [item for item in feasible if item[0] == best_objective]
-            _objective, _ids, selected, selected_result = max(
-                tied,
-                key=lambda item: item[1],
+            tie_selector = min if common_objective else max
+            _objective, _ids, selected, selected_result = tie_selector(
+                tied, key=lambda item: item[1]
             )
         selected_ids = {proposal.proposal_id for proposal in selected}
         rejected = _rejected_map(
@@ -180,11 +188,23 @@ class CrossLayerCoordinator:
             coordination_latency_ms=0.0,
             feasibility_latency_ms=max(0.0, feasibility_ms),
             details={
-                "selection_policy": "exact_feasible_search_then_task_policy_lexicographic",
+                "selection_policy": (
+                    "global_hard_feasibility_common_objective"
+                    if common_objective
+                    else "exact_feasible_search_then_task_policy_lexicographic"
+                ),
                 "search_type": "exact_feasible-combination search",
                 "feasible_combinations": len(feasible),
-                "objective": "service_margin_then_change_scope_then_overhead",
-                "tie_break": "descending_canonical_proposal_ids",
+                "objective": (
+                    "normalized_deficit_plus_physical_action_cost"
+                    if common_objective
+                    else "service_margin_then_change_scope_then_overhead"
+                ),
+                "tie_break": (
+                    "ascending_canonical_proposal_ids"
+                    if common_objective
+                    else "descending_canonical_proposal_ids"
+                ),
             },
         )
 
@@ -195,7 +215,12 @@ class CrossLayerCoordinator:
         method: str,
     ) -> CoordinationResult:
         groups = proposal_groups(proposals, require_all_layers=False)
-        selected = _local_best(groups)
+        common_objective = _uses_common_objective(state)
+        selected = (
+            _local_objective_best(state, groups)
+            if common_objective
+            else _local_best(groups)
+        )
         selected_ids = {proposal.proposal_id for proposal in selected}
         return CoordinationResult(
             method=method,
@@ -215,7 +240,13 @@ class CrossLayerCoordinator:
             selected_feasibility=None,
             coordination_latency_ms=0.0,
             feasibility_latency_ms=0.0,
-            details={"selection_policy": "independent_layer_maximum_utility"},
+            details={
+                "selection_policy": (
+                    "independent_layer_local_objective"
+                    if common_objective
+                    else "independent_layer_maximum_utility"
+                )
+            },
         )
 
     def _adjacent(
@@ -225,19 +256,34 @@ class CrossLayerCoordinator:
         method: str,
     ) -> CoordinationResult:
         groups = proposal_groups(proposals, require_all_layers=False)
-        selected_by_group = {
-            key: max(items, key=lambda item: (item.utility, item.proposal_id))
-            for key, items in groups.items()
-        }
+        common_objective = _uses_common_objective(state)
+        if common_objective:
+            selected_by_group = {
+                key: min(
+                    items,
+                    key=lambda item: (
+                        _local_layer_objective(state, item),
+                        item.proposal_id,
+                    ),
+                )
+                for key, items in groups.items()
+            }
+        else:
+            selected_by_group = {
+                key: max(items, key=lambda item: (item.utility, item.proposal_id))
+                for key, items in groups.items()
+            }
         detected_records: list[ConflictRecord] = []
         rejected_combo_count = 0
         pairwise_checks = 0
         feasibility_started = self.clock()
         for edge_id in sorted({key[0] for key in groups}):
-            for left_layer, right_layer in (
-                ("application", "transport"),
-                ("transport", "network"),
-                ("network", "physical"),
+            for pair_index, (left_layer, right_layer) in enumerate(
+                (
+                    ("application", "transport"),
+                    ("transport", "network"),
+                    ("network", "physical"),
+                )
             ):
                 left_key = (edge_id, left_layer)
                 right_key = (edge_id, right_layer)
@@ -260,7 +306,15 @@ class CrossLayerCoordinator:
                     conflicts_from_violations(current_pair, current_result.violations)
                 )
                 alternatives = []
-                for left, right in product(groups[left_key], groups[right_key]):
+                candidate_pairs = (
+                    product(groups[left_key], groups[right_key])
+                    if pair_index == 0
+                    else (
+                        (selected_by_group[left_key], right)
+                        for right in groups[right_key]
+                    )
+                )
+                for left, right in candidate_pairs:
                     result = _adjacent_pair_result(
                         state,
                         (left, right),
@@ -270,7 +324,9 @@ class CrossLayerCoordinator:
                     if result.feasible:
                         alternatives.append(
                             (
-                                combination_objective(result, (left, right)),
+                                _adjacent_common_objective((left, right))
+                                if common_objective
+                                else combination_objective(result, (left, right)),
                                 (left.proposal_id, right.proposal_id),
                                 left,
                                 right,
@@ -309,7 +365,13 @@ class CrossLayerCoordinator:
             selected_feasibility=None,
             coordination_latency_ms=0.0,
             feasibility_latency_ms=max(0.0, feasibility_ms),
-            details={"selection_policy": "three_adjacent_pair_checks_only"},
+            details={
+                "selection_policy": (
+                    "adjacent_pair_common_objective"
+                    if common_objective
+                    else "three_adjacent_pair_checks_only"
+                )
+            },
         )
 
     def _no_verification(
@@ -322,14 +384,15 @@ class CrossLayerCoordinator:
         if not groups:
             return _empty_rejection(method, "no_layer_observations")
         combinations = tuple(product(*(groups[key] for key in sorted(groups))))
-        # Joint ranking uses only Agent-declared gain/cost.  It deliberately
-        # does not call the feasibility model before execution.
+        # Joint ranking combines the four layers' declared rates, latency,
+        # reliability and utility as a *soft* end-to-end score.  It never
+        # calls the hard feasibility model.  This keeps the ablation distinct
+        # from layer-wise independent maximization while still allowing an
+        # unsafe combination to reach the common transaction verifier.
         ranked = sorted(
             combinations,
             key=lambda combination: (
-                -sum(item.utility for item in combination)
-                + 0.5 * _declared_interaction_pairs(combination),
-                sum(0 if item.is_keep else 1 for item in combination),
+                _declared_joint_objective(state, tuple(combination)),
                 tuple(item.proposal_id for item in combination),
             ),
         )
@@ -354,7 +417,11 @@ class CrossLayerCoordinator:
             coordination_latency_ms=0.0,
             feasibility_latency_ms=0.0,
             details={
-                "selection_policy": "declared_joint_score_without_feasibility",
+                "selection_policy": (
+                    "global_common_objective_without_hard_verification"
+                    if _uses_common_objective(state)
+                    else "declared_joint_score_without_feasibility"
+                ),
                 "final_verification_skipped": True,
             },
         )
@@ -366,6 +433,89 @@ def _local_best(
     return tuple(
         max(groups[key], key=lambda item: (item.utility, item.proposal_id))
         for key in sorted(groups)
+    )
+
+
+def _uses_common_objective(state: CrossLayerTaskState) -> bool:
+    return state.metadata.get("common_objective_version") == (
+        "normalized-deficit-cost-v1"
+    )
+
+
+def _local_objective_best(
+    state: CrossLayerTaskState,
+    groups: dict[tuple[str, str], tuple[LayerProposal, ...]],
+) -> tuple[LayerProposal, ...]:
+    return tuple(
+        min(
+            groups[key],
+            key=lambda item: (_local_layer_objective(state, item), item.proposal_id),
+        )
+        for key in sorted(groups)
+    )
+
+
+def _local_layer_objective(
+    state: CrossLayerTaskState,
+    proposal: LayerProposal,
+) -> tuple[float, float, float, float]:
+    edge_id = next(iter(proposal.affected_edges))
+    parameters = proposal.parameters
+    required = max(float(proposal.required_bandwidth_mbps), 1e-9)
+    deficit = 0.0
+    if proposal.layer == "transport":
+        send_rate = float(parameters.get("transport_rate_mbps", required))
+        capacity_value = parameters.get(
+            "transport_admissible_capacity_mbps",
+            state.transport[edge_id].admissible_capacity_mbps,
+        )
+        capacity = send_rate if capacity_value is None else float(capacity_value)
+        deficit = max(0.0, required - min(send_rate, capacity)) / required
+    elif proposal.layer == "network":
+        capacity = float(
+            parameters.get(
+                "network_bandwidth_mbps",
+                state.network[edge_id].available_bandwidth_mbps,
+            )
+        )
+        deficit = max(0.0, required - capacity) / required
+    elif proposal.layer == "physical":
+        capacity = float(
+            parameters.get(
+                "physical_capacity_mbps",
+                state.physical[edge_id].available_capacity_mbps,
+            )
+        )
+        deficit = max(0.0, required - capacity) / required
+    action_cost = _action_cost((proposal,))
+    changed = float(not proposal.is_keep)
+    return (4.0 * deficit + action_cost, deficit, action_cost, changed)
+
+
+def _adjacent_common_objective(
+    pair: tuple[LayerProposal, LayerProposal],
+) -> tuple[float, float, float, float]:
+    action_cost = _action_cost(pair)
+    changed = float(sum(not proposal.is_keep for proposal in pair))
+    quality_loss = sum(
+        float(proposal.parameters.get("quality_loss_fraction", 0.0))
+        for proposal in pair
+    )
+    reserved = sum(
+        float(proposal.parameters.get("reserved_increment_fraction", 0.0))
+        for proposal in pair
+    )
+    return (action_cost, changed, quality_loss, reserved)
+
+
+def _action_cost(proposals: tuple[LayerProposal, ...]) -> float:
+    return sum(
+        float(
+            proposal.parameters.get(
+                "normalized_action_cost", proposal.expected_cost
+            )
+        )
+        for proposal in proposals
     )
 
 
@@ -495,6 +645,212 @@ def _declared_interaction_pairs(
     )
 
 
+def _declared_joint_objective(
+    state: CrossLayerTaskState,
+    combination: tuple[LayerProposal, ...],
+) -> tuple[float, float, float, float]:
+    """Score declared cross-layer effects without enforcing hard bounds.
+
+    This is intentionally not a feasibility check: no combination is removed
+    and no boolean hard constraint is evaluated.  It is a continuous, fallible
+    prediction based on the values declared by the four layer Agents.  The
+    stable-state verifier remains the first component that can reject the
+    selected configuration for a hard violation.
+    """
+
+    if _uses_common_objective(state):
+        return _normalized_common_objective(state, combination)
+
+    by_edge_layer = {
+        (edge_id, proposal.layer): proposal
+        for proposal in combination
+        for edge_id in proposal.affected_edges
+    }
+    service_penalty = 0.0
+    resource_penalty = 0.0
+    for edge_id, constraint in state.constraints.items():
+        application = state.application[edge_id]
+        transport = state.transport[edge_id]
+        network = state.network[edge_id]
+        physical = state.physical[edge_id]
+        app_proposal = by_edge_layer.get((edge_id, "application"))
+        transport_proposal = by_edge_layer.get((edge_id, "transport"))
+        network_proposal = by_edge_layer.get((edge_id, "network"))
+        physical_proposal = by_edge_layer.get((edge_id, "physical"))
+        application_rate = float(
+            (app_proposal.parameters if app_proposal else {}).get(
+                "application_rate_mbps", application.required_rate_mbps
+            )
+        )
+        transport_rate = float(
+            (transport_proposal.parameters if transport_proposal else {}).get(
+                "transport_rate_mbps", transport.send_rate_mbps
+            )
+        )
+        transport_capacity_value = (
+            (transport_proposal.parameters if transport_proposal else {}).get(
+                "transport_admissible_capacity_mbps",
+                transport.admissible_capacity_mbps,
+            )
+        )
+        transport_capacity = (
+            transport_rate
+            if transport_capacity_value is None
+            else float(transport_capacity_value)
+        )
+        network_bandwidth = float(
+            (network_proposal.parameters if network_proposal else {}).get(
+                "network_bandwidth_mbps", network.available_bandwidth_mbps
+            )
+        )
+        physical_capacity = float(
+            (physical_proposal.parameters if physical_proposal else {}).get(
+                "physical_capacity_mbps", physical.available_capacity_mbps
+            )
+        )
+        scale = max(application_rate, constraint.desired_rate_mbps, 1e-9)
+        bottleneck = min(
+            transport_rate,
+            transport_capacity,
+            network_bandwidth,
+            physical_capacity,
+        )
+        service_penalty += max(0.0, application_rate - bottleneck) / scale
+        # Declared service above any independently admissible capacity is a
+        # soft resource risk. Capacities are not ordered relative to each other.
+        resource_penalty += max(0.0, transport_rate - transport_capacity) / scale
+        resource_penalty += max(0.0, transport_rate - network_bandwidth) / scale
+        resource_penalty += max(0.0, transport_rate - physical_capacity) / scale
+
+        network_parameters = network_proposal.parameters if network_proposal else {}
+        physical_parameters = physical_proposal.parameters if physical_proposal else {}
+        transport_parameters = transport_proposal.parameters if transport_proposal else {}
+        predicted_latency = (
+            float(transport_parameters.get("transport_rtt_ms", transport.rtt_ms))
+            + float(network_parameters.get("network_latency_ms", network.latency_ms))
+            + float(physical_parameters.get("access_latency_ms", physical.access_latency_ms))
+        )
+        service_penalty += max(
+            0.0,
+            predicted_latency - constraint.max_latency_ms,
+        ) / max(constraint.max_latency_ms, 1e-9)
+        reliability = (
+            float(transport_parameters.get("transport_reliability", transport.reliability))
+            * float(network_parameters.get("network_reliability", network.reliability))
+            * float(physical_parameters.get("physical_reliability", physical.reliability))
+        )
+        service_penalty += max(
+            0.0,
+            constraint.min_reliability - reliability,
+        ) / max(constraint.min_reliability, 1e-9)
+
+    shared_demand = {
+        resource_id: float(
+            state.metadata.get("shared_resource_background_demand_mbps", {}).get(
+                resource_id, 0.0
+            )
+        )
+        for resource_id in state.shared_resource_capacity_mbps
+    }
+    for edge_id, constraint in state.constraints.items():
+        proposal = by_edge_layer.get((edge_id, "application"))
+        rate = float(
+            (proposal.parameters if proposal else {}).get(
+                "application_rate_mbps",
+                state.application[edge_id].required_rate_mbps,
+            )
+        )
+        shared_demand[constraint.shared_resource_id] = (
+            shared_demand.get(constraint.shared_resource_id, 0.0) + rate
+        )
+    for resource_id, demand in shared_demand.items():
+        capacity = state.shared_resource_capacity_mbps.get(resource_id, 0.0)
+        resource_penalty += max(0.0, demand - capacity) / max(capacity, 1e-9)
+
+    declared_utility = sum(proposal.utility for proposal in combination)
+    declared_cost = sum(proposal.expected_cost for proposal in combination)
+    changed = float(sum(not proposal.is_keep for proposal in combination))
+    interaction_risk = float(_declared_interaction_pairs(combination))
+    return (
+        20.0 * service_penalty
+        + 8.0 * resource_penalty
+        + 0.50 * interaction_risk
+        - declared_utility,
+        changed,
+        declared_cost,
+        -declared_utility,
+    )
+
+
+def _normalized_common_objective(
+    state: CrossLayerTaskState,
+    combination: tuple[LayerProposal, ...],
+) -> tuple[float, float, float, float]:
+    """Dimensionless soft objective shared by all v3 selection scopes.
+
+    The global-verification ablation may trade a small predicted deficit for a
+    lower physical action cost, but it never receives method-specific proposal
+    values. Ours applies the same ranking only after the hard feasibility
+    filter. Local and adjacent baselines use the same deficit/cost components
+    restricted to the information they are allowed to observe.
+    """
+
+    projected = project_cross_layer_state(state, combination)
+    penalty = 0.0
+    shared_demand = {
+        resource_id: float(
+            projected.metadata.get(
+                "shared_resource_background_demand_mbps", {}
+            ).get(resource_id, 0.0)
+        )
+        for resource_id in projected.shared_resource_capacity_mbps
+    }
+    route_requirements = projected.metadata.get("route_access_requirements", {})
+    for edge_id, constraint in projected.constraints.items():
+        application = projected.application[edge_id]
+        transport = projected.transport[edge_id]
+        network = projected.network[edge_id]
+        physical = projected.physical[edge_id]
+        transport_capacity = (
+            transport.send_rate_mbps
+            if transport.admissible_capacity_mbps is None
+            else transport.admissible_capacity_mbps
+        )
+        scale = max(application.required_rate_mbps, 1e-9)
+        supported = min(
+            transport.send_rate_mbps,
+            transport_capacity,
+            network.available_bandwidth_mbps,
+            physical.available_capacity_mbps,
+        )
+        penalty += max(0.0, application.required_rate_mbps - supported) / scale
+        penalty += max(
+            0.0,
+            constraint.desired_rate_mbps - application.required_rate_mbps,
+        ) / max(constraint.desired_rate_mbps, 1e-9)
+
+        required_access = route_requirements.get(edge_id, {}).get(
+            network.selected_route
+        )
+        if required_access is not None and physical.access_id != required_access:
+            penalty += 1.0
+        if not network.reachable or not physical.online:
+            penalty += 1.0
+
+        shared_demand[constraint.shared_resource_id] = (
+            shared_demand.get(constraint.shared_resource_id, 0.0)
+            + application.required_rate_mbps
+        )
+
+    for resource_id, demand in shared_demand.items():
+        capacity = projected.shared_resource_capacity_mbps.get(resource_id, 0.0)
+        penalty += max(0.0, demand - capacity) / max(capacity, 1e-9)
+
+    action_cost = _action_cost(combination)
+    changed = float(sum(not proposal.is_keep for proposal in combination))
+    return (4.0 * penalty + action_cost, penalty, action_cost, changed)
+
+
 def _adjacent_pair_result(
     state: CrossLayerTaskState,
     pair: tuple[LayerProposal, LayerProposal],
@@ -502,21 +858,30 @@ def _adjacent_pair_result(
     right_layer: str,
 ) -> CrossLayerFeasibilityResult:
     result = evaluate_cross_layer_combination(state, pair)
+    edge_ids = set(pair[0].affected_edges) & set(pair[1].affected_edges)
+    if len(edge_ids) != 1:
+        raise ValueError("adjacent pair must affect exactly one common edge")
+    edge_id = next(iter(edge_ids))
     prefixes = {
         ("application", "transport"): (
             "application_transport_rate",
+            "application_transport_capacity",
+            "transport_admissible_capacity",
             "application_quality_qos",
             "write_set",
         ),
         ("transport", "network"): (
+            "application_network_capacity",
             "transport_network_rate",
-            "latency_qos",
             "write_set",
         ),
         ("network", "physical"): (
+            "application_physical_capacity",
+            "transport_physical_capacity",
             "network_physical_capacity",
             "network_physical_access",
             "unreachable",
+            "latency_qos",
             "reliability_qos",
             "loss_qos",
             "write_set",
@@ -525,7 +890,8 @@ def _adjacent_pair_result(
     local_violations = tuple(
         violation
         for violation in result.violations
-        if violation.startswith(prefixes)
+        if violation.startswith("write_set:")
+        or (violation.endswith(f":{edge_id}") and violation.startswith(prefixes))
     )
     return replace(
         result,
