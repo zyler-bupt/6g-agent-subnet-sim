@@ -437,19 +437,21 @@ class RegisteredV5ProtocolTests(unittest.TestCase):
             Path(config["experiment"]["output_dir"]),
         )
 
-    def test_v5_formal_config_is_explicitly_unfrozen_before_pilot(self) -> None:
+    def test_v5_formal_config_is_frozen_from_accepted_pilot(self) -> None:
         path = Path("configs/exp2_demand_capacity_ratio_v5.yaml")
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-        self.assertFalse(config["experiment"]["frozen"])
-        self.assertEqual(config["demand_capacity"]["ratios"], [])
-        with self.assertRaisesRegex(ValueError, "formal config is not frozen"):
-            exp2_v5.validate_protocol(
-                config,
-                tuple(exp2_v5.METHOD_TO_ENGINE),
-                tuple(range(100)),
-                Path("results/exp2_demand_capacity_v5"),
-            )
+        self.assertTrue(config["experiment"]["frozen"])
+        self.assertEqual(
+            config["demand_capacity"]["ratios"],
+            [0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.3],
+        )
+        exp2_v5.validate_protocol(
+            config,
+            tuple(exp2_v5.METHOD_TO_ENGINE),
+            tuple(range(100)),
+            Path("results/exp2_demand_capacity_v5"),
+        )
 
     def test_v5_protocol_constants_do_not_reuse_v4_output(self) -> None:
         self.assertEqual(exp2_v5.GENERATOR_VERSION, "wcnc-final-gamma-v5")
@@ -569,23 +571,29 @@ class CompleteExecutionProvenanceTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        with patch.object(
-            exp2_v5,
-            "build_execution_source_manifest",
-            side_effect=ValueError("source dirty"),
-        ), patch.object(
-            exp2_v5.DemandCapacityRatioGenerator,
-            "generate",
-            side_effect=AssertionError("generation happened before provenance"),
-        ) as generate:
-            with self.assertRaisesRegex(ValueError, "source dirty"):
-                exp2_v5.run_ground_truth_pilot(
-                    config,
-                    seeds=tuple(range(9000, 9010)),
-                    output_dir=Path(
-                        "results/wcnc_pilot_v2/exp2_demand_capacity_ratio_v5"
-                    ),
-                )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "pilot"
+            local = copy.deepcopy(config)
+            local["experiment"]["output_dir"] = str(output)
+            with patch.object(
+                exp2_v5,
+                "PILOT_OUTPUT",
+                output,
+            ), patch.object(
+                exp2_v5,
+                "build_execution_source_manifest",
+                side_effect=ValueError("source dirty"),
+            ), patch.object(
+                exp2_v5.DemandCapacityRatioGenerator,
+                "generate",
+                side_effect=AssertionError("generation happened before provenance"),
+            ) as generate:
+                with self.assertRaisesRegex(ValueError, "source dirty"):
+                    exp2_v5.run_ground_truth_pilot(
+                        local,
+                        seeds=tuple(range(9000, 9010)),
+                        output_dir=output,
+                    )
         generate.assert_not_called()
 
     def test_formal_binding_rejects_tampered_pilot_execution_manifest(self) -> None:
@@ -688,13 +696,14 @@ class V5AggregationAuditTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        config["experiment"]["pilot_execution_manifest_sha256"] = "0" * 64
         manifest = {
             "phase": "formal",
             "generator_version": "wcnc-final-gamma-v5",
             "configuration_sha256": exp2_v5.sha256_json(config),
             "methods": [],
             "seeds": [],
-            "ratios": [],
+            "ratios": list(config["demand_capacity"]["ratios"]),
             "output_dir": "results/exp2_demand_capacity_v5",
         }
         with tempfile.TemporaryDirectory() as temporary_directory:
