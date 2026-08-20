@@ -252,7 +252,7 @@ async def run_formation_method(
     return FormationOutcome(
         method_id=method_id,
         trace=trace,
-        formation_latency_ms=trace.total_ms,
+        formation_latency_ms=stable_verify_finished_ms,
         success=success,
         qos_satisfied=success,
         failure_reason=metrics.failure_reason,

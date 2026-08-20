@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import csv
+import tempfile
 import unittest
+from collections import defaultdict
+from pathlib import Path
 
+from experiments.exp1_initial_formation import run_exp1
+from experiments.paper_protocol import EXPERIMENT_METHODS
 from src.controller.formation_strategies import (
     ChurnEvent,
     run_formation_method,
@@ -114,6 +120,12 @@ class FormationStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.rollback_count, 1)
         self.assertTrue(outcome.rollback_succeeded)
         self.assertTrue(outcome.stale_state_detected)
+        self.assertAlmostEqual(
+            outcome.formation_latency_ms,
+            1000.0
+            * (outcome.stable_verify_finished_at - outcome.task_received_at),
+        )
+        self.assertGreater(outcome.trace.total_ms, outcome.formation_latency_ms)
 
     async def test_proposed_latency_scales_with_actual_task_work(self) -> None:
         small = await run_formation_method(
@@ -128,6 +140,80 @@ class FormationStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(large.processed_edge_count, small.processed_edge_count)
         self.assertGreater(large.total_rules, small.total_rules)
         self.assertGreater(large.formation_latency_ms, small.formation_latency_ms)
+
+
+class PaperExp1RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pilot_has_complete_paired_method_grid_and_canonical_raw_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            rows = await run_exp1(
+                "pilot",
+                output_root,
+                task_sizes=(8,),
+                churn_points=(0,),
+            )
+
+            self.assertEqual(len(rows), 5 * 2 * 4 * 2)
+            by_trial: dict[str, list] = defaultdict(list)
+            for row in rows:
+                by_trial[row.trial_id].append(row)
+            self.assertEqual(len(by_trial), 5 * 2 * 2)
+            for paired_rows in by_trial.values():
+                self.assertEqual(
+                    {row.method_id for row in paired_rows},
+                    set(EXPERIMENT_METHODS["exp1"]),
+                )
+                self.assertEqual(
+                    len({row.scenario_fingerprint for row in paired_rows}),
+                    1,
+                )
+                self.assertEqual(len({row.qos_fingerprint for row in paired_rows}), 1)
+                self.assertEqual(len({row.event_fingerprint for row in paired_rows}), 1)
+
+            raw_path = output_root / "raw" / "pilot" / "exp1" / "trials.csv"
+            self.assertTrue(raw_path.exists())
+            with raw_path.open(encoding="utf-8", newline="") as handle:
+                materialized = list(csv.DictReader(handle))
+            self.assertEqual(len(materialized), len(rows))
+            adapted = next(
+                row for row in materialized if row["method_id"] == "a1_agent_embedded"
+            )
+            self.assertEqual(adapted["method_label"], "A1-Agent-Embedded*")
+            self.assertEqual(adapted["method_source"], "A1 Agent")
+            self.assertEqual(adapted["adapted"], "True")
+            self.assertEqual(adapted["reconfiguration_latency_ms"], "")
+
+    async def test_runner_order_and_results_are_reproducible(self) -> None:
+        with tempfile.TemporaryDirectory() as first_directory:
+            first = await run_exp1(
+                "pilot",
+                Path(first_directory),
+                seeds=(1,),
+                task_sizes=(8,),
+                churn_points=(0, 10),
+            )
+        with tempfile.TemporaryDirectory() as second_directory:
+            second = await run_exp1(
+                "pilot",
+                Path(second_directory),
+                seeds=(1,),
+                task_sizes=(8,),
+                churn_points=(0, 10),
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [(row.series, row.state_churn_probability, row.event_id, row.method_id) for row in first],
+            sorted(
+                (
+                    row.series,
+                    row.state_churn_probability,
+                    row.event_id,
+                    row.method_id,
+                )
+                for row in first
+            ),
+        )
 
 
 if __name__ == "__main__":

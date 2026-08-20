@@ -8,12 +8,27 @@ from typing import Any
 
 import yaml
 
+from experiments.paper_protocol import (
+    EXPERIMENT_METHODS,
+    METHODS,
+    RunMode,
+    mode_spec,
+)
+from src.controller.formation_strategies import FormationOutcome, run_formation_method
 from src.metrics.exp1 import Exp1RunMetrics, write_exp1_metrics_csv
+from src.metrics.paper import PaperTrial, write_paper_trials
+from src.simulation.paper_scenarios import (
+    FormationScenarioSnapshot,
+    generate_formation_snapshot,
+)
 from src.simulation.scenario_generator import (
     ElasticScenarioGenerator,
     ScenarioConfig,
     ScenarioSnapshot,
 )
+
+
+PAPER_RESULT_MODE = "discrete_event_transactionally_verified_control_plane_simulation"
 
 
 def _duration_ms(start: float, finish: float) -> float:
@@ -171,6 +186,166 @@ async def run_experiment(
         json.dump(scope, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return rows
+
+
+async def run_exp1(
+    mode: str | RunMode,
+    output_root: Path,
+    *,
+    seeds: tuple[int, ...] | None = None,
+    task_sizes: tuple[int, ...] = (8, 12, 16, 20, 24, 28, 32),
+    churn_points: tuple[int | float, ...] = (0, 5, 10, 15, 20, 30),
+    churn_task_size: int = 24,
+) -> list[PaperTrial]:
+    """Run the canonical paired Exp.1 grid and write trial-level raw data."""
+
+    selected_mode = RunMode(mode)
+    specification = mode_spec(selected_mode)
+    selected_seeds = (
+        tuple(range(specification.topology_seeds))
+        if seeds is None
+        else tuple(sorted(set(seeds)))
+    )
+    if not selected_seeds:
+        raise ValueError("Exp.1 requires at least one topology seed")
+    normalized_sizes = tuple(sorted(set(int(value) for value in task_sizes)))
+    normalized_churn = tuple(sorted(set(float(value) for value in churn_points)))
+    if not normalized_sizes:
+        raise ValueError("Exp.1 requires at least one task size")
+    if not normalized_churn:
+        raise ValueError("Exp.1 requires at least one churn point")
+    if any(value < 0.0 or value > 100.0 for value in normalized_churn):
+        raise ValueError("Exp.1 churn points must be percentages in [0, 100]")
+
+    rows: list[PaperTrial] = []
+    for task_size in normalized_sizes:
+        for seed in selected_seeds:
+            for event_id in range(specification.events_per_seed):
+                snapshot = generate_formation_snapshot(task_size, seed, event_id)
+                trial_id = _exp1_trial_id(
+                    "task_size",
+                    task_size,
+                    seed,
+                    event_id,
+                )
+                for method_id in EXPERIMENT_METHODS["exp1"]:
+                    outcome = await run_formation_method(snapshot, method_id)
+                    rows.append(
+                        _paper_trial_from_formation(
+                            selected_mode,
+                            snapshot,
+                            outcome,
+                            trial_id=trial_id,
+                            series="task_size",
+                            churn_probability=None,
+                        )
+                    )
+
+    for churn_percent in normalized_churn:
+        churn_probability = churn_percent / 100.0
+        for seed in selected_seeds:
+            for event_id in range(specification.rate_events_per_seed):
+                snapshot = generate_formation_snapshot(
+                    churn_task_size,
+                    seed,
+                    event_id,
+                )
+                trial_id = _exp1_trial_id(
+                    "state_churn",
+                    churn_percent,
+                    seed,
+                    event_id,
+                )
+                for method_id in EXPERIMENT_METHODS["exp1"]:
+                    outcome = await run_formation_method(
+                        snapshot,
+                        method_id,
+                        churn_probability=churn_probability,
+                    )
+                    rows.append(
+                        _paper_trial_from_formation(
+                            selected_mode,
+                            snapshot,
+                            outcome,
+                            trial_id=trial_id,
+                            series="state_churn",
+                            churn_probability=churn_probability,
+                        )
+                    )
+
+    rows.sort(
+        key=lambda row: (
+            row.series or "",
+            row.state_churn_probability
+            if row.state_churn_probability is not None
+            else -1.0,
+            row.task_size or 0,
+            row.seed,
+            row.event_id,
+            row.method_id,
+        )
+    )
+    write_paper_trials(
+        output_root / "raw" / selected_mode.value / "exp1" / "trials.csv",
+        rows,
+    )
+    return rows
+
+
+def _paper_trial_from_formation(
+    mode: RunMode,
+    snapshot: FormationScenarioSnapshot,
+    outcome: FormationOutcome,
+    *,
+    trial_id: str,
+    series: str,
+    churn_probability: float | None,
+) -> PaperTrial:
+    method = METHODS[outcome.method_id]
+    return PaperTrial(
+        experiment="exp1",
+        mode=mode.value,
+        trial_id=trial_id,
+        seed=snapshot.seed,
+        event_id=snapshot.event_id,
+        method_id=method.method_id,
+        method_label=method.label,
+        method_source=method.source,
+        adapted=method.adapted,
+        topology_fingerprint=snapshot.topology.fingerprint,
+        scenario_fingerprint=snapshot.fingerprint,
+        qos_fingerprint=snapshot.qos_fingerprint,
+        event_fingerprint=outcome.trace.churn_fingerprint,
+        series=series,
+        result_mode=PAPER_RESULT_MODE,
+        task_received_at=outcome.task_received_at,
+        stable_verify_finished_at=outcome.stable_verify_finished_at,
+        task_size=len(snapshot.task.app_agents),
+        num_dag_edges=len(snapshot.task.biz_edges),
+        num_gateways=len(snapshot.topology.gateway_ids),
+        state_churn_probability=churn_probability,
+        formation_latency_ms=outcome.formation_latency_ms,
+        success=outcome.success,
+        qos_satisfied=outcome.qos_satisfied,
+        failure_reason=outcome.failure_reason or None,
+        total_rules=outcome.total_rules,
+        total_gateways=len(snapshot.topology.gateway_ids),
+        total_flows=outcome.total_flows,
+        control_messages=outcome.control_messages,
+        control_bytes=outcome.control_bytes,
+        rollback_count=outcome.rollback_count,
+        stale_state_detected=outcome.stale_state_detected,
+    )
+
+
+def _exp1_trial_id(
+    series: str,
+    point: int | float,
+    seed: int,
+    event_id: int,
+) -> str:
+    point_label = f"{float(point):g}"
+    return f"exp1:{series}:{point_label}:seed:{seed:04d}:event:{event_id:03d}"
 
 
 def _failed_row(
