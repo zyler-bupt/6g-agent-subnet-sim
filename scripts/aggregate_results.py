@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.paper_protocol import stable_fingerprint
 from scripts.paper_statistics import cluster_bootstrap_interval

@@ -3,10 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable, Mapping, Sequence
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.paper_protocol import EXPERIMENT_METHODS
 from src.metrics.paper import PAPER_TRIAL_FIELDS

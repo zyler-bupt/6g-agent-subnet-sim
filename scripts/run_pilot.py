@@ -4,12 +4,16 @@ import argparse
 import asyncio
 import json
 import shutil
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Sequence
 
 import numpy as np
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.exp1_initial_formation import run_exp1
 from experiments.paper_protocol import METHODS

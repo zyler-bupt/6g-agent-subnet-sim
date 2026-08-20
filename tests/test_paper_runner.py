@@ -1,10 +1,33 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.run_pilot import run_pilot
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PaperCliEntryPointTests(unittest.TestCase):
+    def test_paper_scripts_run_directly_from_the_repository_root(self) -> None:
+        for relative_path in (
+            "scripts/aggregate_results.py",
+            "scripts/sanity_check_results.py",
+            "scripts/plot_final_paper_figures.py",
+            "scripts/run_pilot.py",
+        ):
+            with self.subTest(script=relative_path):
+                completed = subprocess.run(
+                    ["python3", relative_path, "--help"],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
