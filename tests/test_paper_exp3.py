@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import unittest
 from collections import Counter
+import tempfile
 from time import perf_counter
 from unittest.mock import patch
+from pathlib import Path
 
+from experiments.exp3_business_elasticity import run_exp3
+from experiments.paper_protocol import EXPERIMENT_METHODS
 from src.controller.business_reconfiguration import (
     make_business_change_event,
     plan_business_change,
@@ -238,6 +242,78 @@ class BusinessStrategyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(metrics.networking_success, metrics.failure_reason)
         return snapshot, controller, stable
+
+
+class PaperExp3RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pilot_writes_complete_paired_rows_with_exact_scope_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = await run_exp3(
+                "pilot",
+                root,
+                seeds=(0,),
+                buckets=(10,),
+            )
+
+            self.assertEqual(len(rows), 2 * 4)
+            self.assertTrue(
+                (root / "raw" / "pilot" / "exp3" / "trials.csv").exists()
+            )
+            by_trial = {}
+            for row in rows:
+                by_trial.setdefault(row.trial_id, []).append(row)
+                self.assertTrue(row.business_change_type)
+                self.assertIsNotNone(row.affected_scope_ratio)
+                self.assertIsNotNone(row.affected_scope_bucket_percent)
+                self.assertLessEqual(
+                    abs(row.affected_scope_ratio * 100.0 - 10.0),
+                    5.0,
+                )
+                self.assertIsNotNone(row.rule_change_ratio)
+                self.assertIsNotNone(row.gateway_change_ratio)
+                self.assertIsNotNone(row.unaffected_disturbance_ratio)
+                if row.success:
+                    self.assertGreater(row.reconfiguration_latency_ms, 0.0)
+                    self.assertAlmostEqual(
+                        row.reconfiguration_latency_ms,
+                        1000.0
+                        * (row.stable_verify_finished_at - row.event_occurred_at),
+                    )
+                else:
+                    self.assertIsNone(row.reconfiguration_latency_ms)
+                    self.assertIsNone(row.stable_verify_finished_at)
+            self.assertEqual(len(by_trial), 2)
+            self.assertTrue(
+                all(
+                    {row.method_id for row in paired}
+                    == set(EXPERIMENT_METHODS["exp3"])
+                    for paired in by_trial.values()
+                )
+            )
+            for paired in by_trial.values():
+                self.assertEqual(len({row.scenario_fingerprint for row in paired}), 1)
+                self.assertEqual(len({row.event_fingerprint for row in paired}), 1)
+
+    async def test_full_rebuild_has_higher_change_cost_than_proposed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = await run_exp3(
+                "pilot",
+                Path(directory),
+                seeds=(1,),
+                buckets=(20, 50),
+            )
+
+        proposed = [row for row in rows if row.method_id == "proposed"]
+        full = [row for row in rows if row.method_id == "full_rebuild"]
+        self.assertEqual(len(proposed), len(full))
+        self.assertLess(
+            sum(row.rule_change_ratio for row in proposed) / len(proposed),
+            sum(row.rule_change_ratio for row in full) / len(full),
+        )
+        self.assertLess(
+            sum(row.reconfiguration_latency_ms for row in proposed) / len(proposed),
+            sum(row.reconfiguration_latency_ms for row in full) / len(full),
+        )
 
 
 if __name__ == "__main__":

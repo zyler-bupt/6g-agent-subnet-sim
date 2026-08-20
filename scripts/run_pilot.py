@@ -16,9 +16,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.exp1_initial_formation import run_exp1
+from experiments.exp3_business_elasticity import run_exp3
 from experiments.paper_protocol import METHODS
 from scripts.aggregate_results import aggregate_experiment
-from scripts.plot_final_paper_figures import plot_exp1
+from scripts.plot_final_paper_figures import plot_exp1, plot_exp3
 from scripts.sanity_check_results import SanityFinding, check_results
 
 
@@ -39,21 +40,23 @@ async def run_pilot(
     seeds: tuple[int, ...] | None = None,
     exp1_task_sizes: tuple[int, ...] = (8, 12, 16, 20, 24, 28, 32),
     exp1_churn_points: tuple[int | float, ...] = (0, 5, 10, 15, 20, 30),
+    exp3_buckets: tuple[int, ...] = (10, 20, 30, 40, 50),
     bootstrap_iterations: int = 5000,
     replace_existing: bool = False,
 ) -> PilotRunResult:
     selected = tuple(dict.fromkeys(experiments))
-    unsupported = set(selected) - {"exp1"}
+    unsupported = set(selected) - {"exp1", "exp3"}
     if unsupported:
         raise ValueError(
             "pilot orchestration is not implemented yet for: "
             + ", ".join(sorted(unsupported))
         )
-    if selected != ("exp1",):
-        raise ValueError("this Phase-1 pilot checkpoint requires --experiments exp1")
+    if len(selected) != 1:
+        raise ValueError("run one experiment per audited pilot invocation")
+    experiment = selected[0]
 
-    raw_path = output_root / "raw" / "pilot" / "exp1" / "trials.csv"
-    aggregate_dir = output_root / "aggregated" / "pilot" / "exp1"
+    raw_path = output_root / "raw" / "pilot" / experiment / "trials.csv"
+    aggregate_dir = output_root / "aggregated" / "pilot" / experiment
     summary_path = aggregate_dir / "summary.csv"
     figure_dir = output_root / "paper_figures"
     if raw_path.exists() and not replace_existing:
@@ -62,21 +65,29 @@ async def run_pilot(
             "to rerun every method"
         )
     if replace_existing:
-        _clear_exp1_pilot(output_root)
+        _clear_pilot(output_root, experiment)
 
-    rows = await run_exp1(
-        "pilot",
-        output_root,
-        seeds=seeds,
-        task_sizes=exp1_task_sizes,
-        churn_points=exp1_churn_points,
-    )
+    if experiment == "exp1":
+        rows = await run_exp1(
+            "pilot",
+            output_root,
+            seeds=seeds,
+            task_sizes=exp1_task_sizes,
+            churn_points=exp1_churn_points,
+        )
+    else:
+        rows = await run_exp3(
+            "pilot",
+            output_root,
+            seeds=seeds,
+            buckets=exp3_buckets,
+        )
     aggregate_rows = aggregate_experiment(
         raw_path,
         summary_path,
         bootstrap_iterations=bootstrap_iterations,
     )
-    findings = check_results(raw_path, experiment="exp1")
+    findings = check_results(raw_path, experiment=experiment)
     aggregate_dir.mkdir(parents=True, exist_ok=True)
     with (aggregate_dir / "sanity.json").open(
         "w",
@@ -90,8 +101,14 @@ async def run_pilot(
             ensure_ascii=False,
         )
         handle.write("\n")
-    plot_exp1(summary_path, figure_dir)
-    report = _pilot_report(rows, aggregate_rows, findings)
+    if experiment == "exp1":
+        plot_exp1(summary_path, figure_dir)
+        report = _exp1_pilot_report(rows, aggregate_rows, findings)
+        payload = _exp1_pilot_summary_payload(rows, aggregate_rows, findings)
+    else:
+        plot_exp3(summary_path, figure_dir)
+        report = _exp3_pilot_report(rows, aggregate_rows, findings)
+        payload = _exp3_pilot_summary_payload(rows, aggregate_rows, findings)
     (aggregate_dir / "PILOT_SUMMARY.md").write_text(report, encoding="utf-8")
     with (aggregate_dir / "PILOT_SUMMARY.json").open(
         "w",
@@ -99,7 +116,7 @@ async def run_pilot(
         newline="\n",
     ) as handle:
         json.dump(
-            _pilot_summary_payload(rows, aggregate_rows, findings),
+            payload,
             handle,
             indent=2,
             ensure_ascii=False,
@@ -116,8 +133,8 @@ async def run_pilot(
     )
 
 
-def _pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
-    payload = _pilot_summary_payload(rows, aggregate_rows, findings)
+def _exp1_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
+    payload = _exp1_pilot_summary_payload(rows, aggregate_rows, findings)
     lines = [
         "# Exp.1 Pilot Summary",
         "",
@@ -160,7 +177,7 @@ def _pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> st
     return "\n".join(lines)
 
 
-def _pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
+def _exp1_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
     latency_by_method: dict[str, list[float]] = {}
     success_by_method: dict[str, list[bool]] = {}
     for row in rows:
@@ -198,14 +215,116 @@ def _pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
     }
 
 
-def _clear_exp1_pilot(output_root: Path) -> None:
-    raw_dir = output_root / "raw" / "pilot" / "exp1"
-    aggregate_dir = output_root / "aggregated" / "pilot" / "exp1"
+def _exp3_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
+    payload = _exp3_pilot_summary_payload(rows, aggregate_rows, findings)
+    lines = [
+        "# Exp.3 Pilot Summary",
+        "",
+        "> Pilot only — these values are for implementation and stress-range checks, not paper results.",
+        "",
+        f"- Raw trials: {payload['raw_trial_count']}",
+        f"- Topology seeds: {payload['topology_seed_count']}",
+        f"- Sanity errors: {payload['error_count']}",
+        f"- Sanity warnings: {payload['warning_count']}",
+        "",
+        "## Method Ranking and Trade-off",
+        "",
+        "| Method | Mean Successful Latency (ms) | P95 Latency (ms) | Rule Change Ratio (%) | Success Rate (%) | Unaffected Disturbance (%) |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for item in payload["method_tradeoff"]:
+        lines.append(
+            f"| {item['method_label']} | {_format_optional(item['mean_reconfiguration_latency_ms'])} "
+            f"| {_format_optional(item['p95_reconfiguration_latency_ms'])} "
+            f"| {item['mean_rule_change_ratio_percent']:.1f} "
+            f"| {item['success_rate_percent']:.1f} "
+            f"| {item['mean_unaffected_disturbance_percent']:.1f} |"
+        )
+    lines.extend(("", "## Sanity Findings", ""))
+    if findings:
+        lines.extend(
+            f"- [{item.level}] `{item.code}`: {item.message}"
+            for item in findings
+        )
+    else:
+        lines.append("- No findings.")
+    lines.extend(
+        (
+            "",
+            "## Outputs",
+            "",
+            "- Raw CSV: `results/raw/pilot/exp3/trials.csv`",
+            "- Aggregate CSV: `results/aggregated/pilot/exp3/summary.csv`",
+            "- Figure: `results/paper_figures/Fig3_Business_Elasticity.{pdf,png}`",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _exp3_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
+    tradeoff = []
+    for method_id in ("proposed", "netren", "local_only", "full_rebuild"):
+        selected = [row for row in rows if row.method_id == method_id]
+        latencies = [
+            row.reconfiguration_latency_ms
+            for row in selected
+            if row.reconfiguration_latency_ms is not None
+        ]
+        tradeoff.append(
+            {
+                "method_id": method_id,
+                "method_label": METHODS[method_id].label,
+                "mean_reconfiguration_latency_ms": (
+                    mean(latencies) if latencies else None
+                ),
+                "p95_reconfiguration_latency_ms": (
+                    float(np.percentile(latencies, 95.0)) if latencies else None
+                ),
+                "mean_rule_change_ratio_percent": 100.0
+                * mean(row.rule_change_ratio for row in selected),
+                "success_rate_percent": 100.0
+                * sum(bool(row.success) for row in selected)
+                / len(selected),
+                "mean_unaffected_disturbance_percent": 100.0
+                * mean(row.unaffected_disturbance_ratio for row in selected),
+            }
+        )
+    tradeoff.sort(
+        key=lambda item: (
+            -item["success_rate_percent"],
+            item["mean_rule_change_ratio_percent"],
+        )
+    )
+    return {
+        "experiment": "exp3",
+        "mode": "pilot",
+        "raw_trial_count": len(rows),
+        "aggregate_row_count": len(aggregate_rows),
+        "topology_seed_count": len({row.seed for row in rows}),
+        "error_count": sum(item.level == "ERROR" for item in findings),
+        "warning_count": sum(item.level == "WARNING" for item in findings),
+        "method_tradeoff": tradeoff,
+        "findings": [asdict(item) for item in findings],
+    }
+
+
+def _format_optional(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.3f}"
+
+
+def _clear_pilot(output_root: Path, experiment: str) -> None:
+    raw_dir = output_root / "raw" / "pilot" / experiment
+    aggregate_dir = output_root / "aggregated" / "pilot" / experiment
     for directory in (raw_dir, aggregate_dir):
         if directory.exists():
             shutil.rmtree(directory)
+    figure_name = {
+        "exp1": "Fig1_Formation",
+        "exp3": "Fig3_Business_Elasticity",
+    }[experiment]
     for suffix in ("pdf", "png"):
-        figure = output_root / "paper_figures" / f"Fig1_Formation.{suffix}"
+        figure = output_root / "paper_figures" / f"{figure_name}.{suffix}"
         if figure.exists():
             figure.unlink()
 

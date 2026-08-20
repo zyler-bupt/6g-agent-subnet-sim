@@ -35,6 +35,7 @@ class PaperTrial:
     ground_truth_feasible: bool | None = None
     business_change_type: str | None = None
     affected_scope_ratio: float | None = None
+    affected_scope_bucket_percent: float | None = None
     failure_type: str | None = None
     failure_severity: float | None = None
     formation_latency_ms: float | None = None

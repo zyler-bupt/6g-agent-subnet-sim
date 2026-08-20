@@ -59,6 +59,33 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("P95 Formation Latency", report)
             self.assertIn("Method Ranking", report)
 
+    async def test_exp3_pilot_orchestrates_tradeoff_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = await run_pilot(
+                ("exp3",),
+                output_root=root,
+                seeds=(0,),
+                exp3_buckets=(10,),
+                bootstrap_iterations=100,
+            )
+
+            self.assertEqual(result.experiments, ("exp3",))
+            self.assertEqual(result.error_count, 0)
+            expected = (
+                root / "raw" / "pilot" / "exp3" / "trials.csv",
+                root / "aggregated" / "pilot" / "exp3" / "summary.csv",
+                root / "aggregated" / "pilot" / "exp3" / "sanity.json",
+                root / "aggregated" / "pilot" / "exp3" / "PILOT_SUMMARY.md",
+                root / "paper_figures" / "Fig3_Business_Elasticity.pdf",
+                root / "paper_figures" / "Fig3_Business_Elasticity.png",
+            )
+            self.assertTrue(all(path.exists() for path in expected))
+            report = expected[3].read_text(encoding="utf-8")
+            self.assertIn("Pilot only", report)
+            self.assertIn("Rule Change Ratio", report)
+            self.assertIn("Success Rate", report)
+
 
 if __name__ == "__main__":
     unittest.main()

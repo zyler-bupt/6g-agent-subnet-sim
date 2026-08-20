@@ -117,6 +117,57 @@ class PaperAggregationTests(unittest.TestCase):
             self.assertLessEqual(latency.ci_lower, latency.mean)
             self.assertGreaterEqual(latency.ci_upper, latency.mean)
 
+    def test_exp3_aggregation_keeps_latency_conditional_and_rates_unconditional(self) -> None:
+        rows = []
+        for seed in range(3):
+            for event_id in range(2):
+                success = not (seed == 0 and event_id == 0)
+                rows.append(
+                    {
+                        "experiment": "exp3",
+                        "mode": "pilot",
+                        "series": "affected_scope",
+                        "seed": seed,
+                        "event_id": event_id,
+                        "method_id": "local_only",
+                        "method_label": "Local-Only",
+                        "affected_scope_ratio": 0.21,
+                        "affected_scope_bucket_percent": 20,
+                        "reconfiguration_latency_ms": 8.0 if success else "",
+                        "rule_change_ratio": 0.10,
+                        "gateway_change_ratio": 0.08,
+                        "unaffected_disturbance_ratio": 0.05,
+                        "success": success,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            summary = aggregate_experiment(
+                rows,
+                Path(directory) / "summary.csv",
+                bootstrap_iterations=300,
+            )
+
+        self.assertEqual(
+            {row.metric for row in summary},
+            {
+                "reconfiguration_latency_ms",
+                "rule_change_ratio_percent",
+                "gateway_change_ratio_percent",
+                "unaffected_disturbance_ratio_percent",
+                "success_rate_percent",
+            },
+        )
+        latency = next(
+            row for row in summary if row.metric == "reconfiguration_latency_ms"
+        )
+        success = next(row for row in summary if row.metric == "success_rate_percent")
+        self.assertEqual(latency.sample_count, 5)
+        self.assertEqual(success.sample_count, 6)
+        self.assertAlmostEqual(success.mean, 500.0 / 6.0)
+        self.assertEqual(success.x_name, "affected_scope_ratio_percent")
+        self.assertEqual(success.x_value, 20.0)
+
 
 if __name__ == "__main__":
     unittest.main()

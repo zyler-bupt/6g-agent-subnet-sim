@@ -7,7 +7,7 @@ from pathlib import Path
 
 from experiments.paper_protocol import EXPERIMENT_METHODS
 from scripts.paper_style import METHOD_STYLES
-from scripts.plot_final_paper_figures import plot_exp1
+from scripts.plot_final_paper_figures import plot_exp1, plot_exp3
 
 
 class PaperStyleTests(unittest.TestCase):
@@ -64,6 +64,50 @@ class Exp1PlotTests(unittest.TestCase):
             self.assertEqual(outputs, (pdf, png))
             self.assertTrue(pdf.exists())
             self.assertTrue(png.exists())
+            self.assertTrue(pdf.read_bytes().startswith(b"%PDF"))
+            self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))
+            self.assertGreater(pdf.stat().st_size, 2000)
+
+
+class Exp3PlotTests(unittest.TestCase):
+    def test_exp3_plot_writes_latency_and_correctness_modification_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.csv"
+            rows = []
+            for method_index, method_id in enumerate(EXPERIMENT_METHODS["exp3"]):
+                for bucket in (10, 20, 30, 40, 50):
+                    latency = 6.0 + method_index * 4.0 + bucket * 0.2
+                    rule_ratio = min(105.0, bucket + method_index * 12.0)
+                    success = max(0.0, 100.0 - method_index * bucket * 0.35)
+                    for metric, estimate in (
+                        ("reconfiguration_latency_ms", latency),
+                        ("rule_change_ratio_percent", rule_ratio),
+                        ("success_rate_percent", success),
+                    ):
+                        rows.append(
+                            {
+                                **_summary_row(
+                                    method_id,
+                                    "affected_scope",
+                                    "affected_scope_ratio_percent",
+                                    bucket,
+                                    metric,
+                                    estimate,
+                                ),
+                                "experiment": "exp3",
+                            }
+                        )
+            with summary.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            outputs = plot_exp3(summary, root / "figures")
+
+            pdf = root / "figures" / "Fig3_Business_Elasticity.pdf"
+            png = root / "figures" / "Fig3_Business_Elasticity.png"
+            self.assertEqual(outputs, (pdf, png))
             self.assertTrue(pdf.read_bytes().startswith(b"%PDF"))
             self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))
             self.assertGreater(pdf.stat().st_size, 2000)

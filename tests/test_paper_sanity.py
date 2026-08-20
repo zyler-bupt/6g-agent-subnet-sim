@@ -161,6 +161,70 @@ class PaperSanityTests(unittest.TestCase):
         self.assertNotIn("proposed", always_success_methods)
         self.assertIn("cspf", always_success_methods)
 
+    def test_exp3_proposed_rule_changes_follow_affected_scope(self) -> None:
+        rows = []
+        for bucket, changed_rules in ((10, 12), (30, 28), (50, 46)):
+            for method_id in EXPERIMENT_METHODS["exp3"]:
+                method_changed = 105 if method_id == "full_rebuild" else changed_rules
+                rows.append(
+                    _row(
+                        experiment="exp3",
+                        trial_id=f"exp3:affected_scope:{bucket}:seed:0000:event:000",
+                        method_id=method_id,
+                        method_label=method_id,
+                        series="affected_scope",
+                        affected_scope_ratio=bucket / 100.0,
+                        affected_scope_bucket_percent=bucket,
+                        formation_latency_ms="",
+                        reconfiguration_latency_ms=10.0 + bucket,
+                        changed_rules=method_changed,
+                        total_rules=100,
+                        rule_change_ratio=method_changed / 100.0,
+                        success=True,
+                    )
+                )
+
+        findings = check_results(rows, experiment="exp3")
+        codes = {item.code for item in findings}
+
+        self.assertNotIn("IMPOSSIBLE_RATIO", codes)
+        self.assertNotIn("EXP3_PROPOSED_RULES_NOT_INCREASING", codes)
+
+    def test_exp3_warns_if_proposed_rule_changes_fall_as_scope_grows(self) -> None:
+        rows = []
+        for bucket, changed_rules in ((10, 40), (50, 10)):
+            for method_id in EXPERIMENT_METHODS["exp3"]:
+                rows.append(
+                    _row(
+                        experiment="exp3",
+                        trial_id=f"exp3:affected_scope:{bucket}:seed:0000:event:000",
+                        method_id=method_id,
+                        method_label=method_id,
+                        series="affected_scope",
+                        affected_scope_ratio=bucket / 100.0,
+                        affected_scope_bucket_percent=bucket,
+                        formation_latency_ms="",
+                        reconfiguration_latency_ms=10.0 + bucket,
+                        changed_rules=(
+                            changed_rules if method_id == "proposed" else 50
+                        ),
+                        total_rules=100,
+                        rule_change_ratio=(
+                            changed_rules / 100.0
+                            if method_id == "proposed"
+                            else 0.5
+                        ),
+                        success=True,
+                    )
+                )
+
+        findings = check_results(rows, experiment="exp3")
+
+        self.assertIn(
+            "EXP3_PROPOSED_RULES_NOT_INCREASING",
+            {item.code for item in findings},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

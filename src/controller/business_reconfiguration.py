@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from time import perf_counter
 from typing import Iterable
 
+from experiments.paper_protocol import stable_fingerprint
 from src.controller.impact import ImpactScope
 from src.controller.reconfiguration import ReconfigurationPlan, delta_by_gateway
-from src.core.events import RuntimeEvent
+from src.controller.transaction_executor import TransactionExecutor
+from src.core.events import EventStage, RuntimeEvent
 from src.core.models import SessionSpec, TaskSubnet
 from src.core.rules import RuleDelta, compute_rule_delta
 from src.simulation.business_change_generator import (
@@ -25,6 +28,139 @@ class BusinessReconfigurationPlan(ReconfigurationPlan):
     @property
     def changed_rule_ids(self) -> frozenset[str]:
         return frozenset(self.rule_delta.changed_rule_ids)
+
+
+@dataclass(frozen=True)
+class BusinessReconfigurationOutcome:
+    method_id: str
+    success: bool
+    qos_satisfied: bool
+    failure_reason: str
+    reconfiguration_latency_ms: float | None
+    failure_completion_latency_ms: float | None
+    event_occurred_at: float
+    stable_verify_finished_at: float | None
+    total_rules: int
+    changed_rules: int
+    rule_change_ratio: float
+    total_gateways: int
+    changed_gateways: int
+    gateway_change_ratio: float
+    total_flows: int
+    unaffected_flows: int
+    disturbed_unaffected_flows: int
+    unaffected_disturbance_ratio: float
+    control_messages: int
+    control_bytes: int
+    rollback_count: int
+    rollback_succeeded: bool
+    stale_state_detected: bool
+    target_fingerprint: str
+    rule_delta_fingerprint: str
+    scope_policy: str
+    escalation_tier: int
+
+
+async def run_business_reconfiguration_method(
+    snapshot: BusinessChangeSnapshot,
+    method_id: str,
+) -> BusinessReconfigurationOutcome:
+    controller, verifier, _provider = snapshot.instantiate()
+    stable, formation = await controller.build_task_subnet(
+        snapshot.before_task,
+        verifier=verifier,
+        run_id=snapshot.seed * 1000 + snapshot.event_id,
+        seed=snapshot.seed,
+    )
+    if not formation.networking_success:
+        raise RuntimeError(
+            "initial business-change scenario failed to form: "
+            + formation.failure_reason
+        )
+    plan = await plan_business_change(
+        controller,
+        stable,
+        snapshot,
+        method_id,
+    )
+    occurred_at = perf_counter()
+    event = make_business_change_event(snapshot, occurred_at=occurred_at)
+    execution = await TransactionExecutor(
+        controller,
+        verifier=verifier,
+    ).execute(
+        stable,
+        plan,
+        event,
+        run_id=snapshot.seed * 1000 + snapshot.event_id,
+        seed=snapshot.seed,
+        received_at=perf_counter(),
+    )
+    logical_success_ms, logical_failure_ms = _logical_reconfiguration_times(
+        snapshot,
+        plan,
+        execution.success,
+    )
+    disturbed_edge_ids = _disturbed_ground_truth_unaffected_edges(
+        stable,
+        plan,
+        snapshot.affected_edge_ids,
+    )
+    unaffected_flows = max(
+        0,
+        len(snapshot.before_task.biz_edges) - len(snapshot.affected_edge_ids),
+    )
+    changed_rules = len(plan.changed_rule_ids)
+    stable_verify_attempted = any(
+        item.event_stage == EventStage.POST_ACTIVATE_VERIFY_FINISHED.value
+        for item in execution.event_log
+    )
+    return BusinessReconfigurationOutcome(
+        method_id=method_id,
+        success=execution.success,
+        qos_satisfied=execution.success and stable_verify_attempted,
+        failure_reason=execution.failure_reason,
+        reconfiguration_latency_ms=(
+            logical_success_ms if execution.success else None
+        ),
+        failure_completion_latency_ms=(
+            None if execution.success else logical_failure_ms
+        ),
+        event_occurred_at=0.0,
+        stable_verify_finished_at=(
+            logical_success_ms / 1000.0 if execution.success else None
+        ),
+        total_rules=len(stable.rules),
+        changed_rules=changed_rules,
+        rule_change_ratio=(changed_rules / len(stable.rules) if stable.rules else 0.0),
+        total_gateways=len(snapshot.formation_snapshot.topology.gateway_ids),
+        changed_gateways=len(plan.affected_gateways),
+        gateway_change_ratio=(
+            len(plan.affected_gateways)
+            / len(snapshot.formation_snapshot.topology.gateway_ids)
+        ),
+        total_flows=len(snapshot.before_task.biz_edges),
+        unaffected_flows=unaffected_flows,
+        disturbed_unaffected_flows=len(disturbed_edge_ids),
+        unaffected_disturbance_ratio=(
+            len(disturbed_edge_ids) / unaffected_flows if unaffected_flows else 0.0
+        ),
+        control_messages=execution.control_messages,
+        control_bytes=execution.control_bytes,
+        rollback_count=1 if execution.rollback_triggered else 0,
+        rollback_succeeded=execution.rollback_success,
+        stale_state_detected=bool(execution.detected_residual_rule_ids),
+        target_fingerprint=stable_fingerprint(
+            {
+                "task": plan.target_state.task,
+                "sessions": plan.target_state.sessions,
+                "rules": plan.target_state.rules,
+            }
+        ),
+        rule_delta_fingerprint=stable_fingerprint(plan.rule_delta),
+        scope_policy=plan.scope_policy,
+        escalation_tier=plan.escalation_tier,
+    )
 
 
 async def plan_business_change(
@@ -430,3 +566,114 @@ def _impact_scope(
             set(stable.business_edges) - ground_truth
         ),
     )
+
+
+def _disturbed_ground_truth_unaffected_edges(
+    stable: TaskSubnet,
+    plan: BusinessReconfigurationPlan,
+    ground_truth_edge_ids: Iterable[str],
+) -> frozenset[str]:
+    protected = set(ground_truth_edge_ids)
+    old_session_edge = {
+        session.session_id: session.business_edge_id for session in stable.sessions
+    }
+    new_session_edge = {
+        session.session_id: session.business_edge_id
+        for session in plan.target_state.sessions
+    }
+    disturbed = set()
+    for rule in plan.rule_delta.additions + plan.rule_delta.updates:
+        edge_id = new_session_edge.get(rule.session_id)
+        if edge_id in stable.business_edges and edge_id not in protected:
+            disturbed.add(edge_id)
+    for rule in plan.rule_delta.deletions:
+        edge_id = old_session_edge.get(rule.session_id)
+        if edge_id in stable.business_edges and edge_id not in protected:
+            disturbed.add(edge_id)
+    return frozenset(disturbed)
+
+
+def _logical_reconfiguration_times(
+    snapshot: BusinessChangeSnapshot,
+    plan: BusinessReconfigurationPlan,
+    success: bool,
+) -> tuple[float, float]:
+    """Apply one shared primitive model to each method's actual operation set."""
+
+    edge_count = len(snapshot.before_task.biz_edges)
+    selected_edges = len(plan.selected_edge_ids)
+    target_edges = len(snapshot.after_task.biz_edges)
+    changed_rules = len(plan.changed_rule_ids)
+    if plan.method == "local_only":
+        analysis_objects = len(snapshot.change.changed_object_ids) + selected_edges
+    elif plan.method == "proposed":
+        analysis_objects = edge_count + selected_edges
+    elif plan.method == "netren":
+        analysis_objects = edge_count + selected_edges + len(plan.affected_gateways)
+    else:
+        analysis_objects = (
+            len(snapshot.after_task.app_agents) + target_edges + changed_rules
+        )
+    event_dispatch_ms = 0.28
+    analysis_ms = 0.035 * analysis_objects
+    rule_compile_ms = 0.045 * changed_rules
+    version_barrier_ms = 0.035 * len(plan.transaction_gateways)
+
+    incident_delays: dict[str, list[float]] = {
+        gateway_id: []
+        for gateway_id in snapshot.formation_snapshot.topology.gateway_ids
+    }
+    for link in snapshot.formation_snapshot.topology.links:
+        incident_delays[link.source].append(link.delay_ms)
+        incident_delays[link.target].append(link.delay_ms)
+    handshake_ms = {
+        gateway_id: 0.30 + 0.025 * (sum(values) / len(values))
+        for gateway_id, values in incident_delays.items()
+    }
+    rules_per_gateway = {
+        gateway_id: (
+            len(plan.rule_delta_by_gateway.get(gateway_id, RuleDelta()).additions)
+            + len(plan.rule_delta_by_gateway.get(gateway_id, RuleDelta()).updates)
+            + len(plan.rule_delta_by_gateway.get(gateway_id, RuleDelta()).deletions)
+        )
+        for gateway_id in plan.affected_gateways
+    }
+    stage_ms = max(
+        (
+            handshake_ms[gateway_id] + 0.028 * rules_per_gateway[gateway_id]
+            for gateway_id in plan.affected_gateways
+        ),
+        default=0.0,
+    )
+    staged_verify_ms = (
+        0.35
+        + 0.038 * target_edges
+        + 0.055 * len(plan.verification_gateways)
+    )
+    rollback_ms = max(
+        (
+            handshake_ms[gateway_id] + 0.018 * rules_per_gateway[gateway_id]
+            for gateway_id in plan.affected_gateways
+        ),
+        default=0.0,
+    )
+    before_activation_ms = (
+        event_dispatch_ms
+        + analysis_ms
+        + rule_compile_ms
+        + version_barrier_ms
+        + stage_ms
+        + staged_verify_ms
+    )
+    if not success:
+        return before_activation_ms, before_activation_ms + rollback_ms
+    activation_ms = max(
+        (
+            handshake_ms[gateway_id] + 0.016 * rules_per_gateway[gateway_id]
+            for gateway_id in plan.affected_gateways
+        ),
+        default=0.0,
+    )
+    stable_verify_ms = 0.30 + 0.042 * target_edges
+    successful_ms = before_activation_ms + activation_ms + stable_verify_ms
+    return successful_ms, successful_ms

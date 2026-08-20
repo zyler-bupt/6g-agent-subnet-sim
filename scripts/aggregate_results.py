@@ -49,45 +49,37 @@ def aggregate_experiment(
     if not rows:
         raise ValueError("cannot aggregate an empty paper result")
     experiments = {_text(row.get("experiment")) for row in rows}
-    if experiments != {"exp1"}:
+    if len(experiments) != 1 or not experiments <= {"exp1", "exp3"}:
         raise ValueError(
-            "current aggregation checkpoint accepts only canonical Exp.1 rows"
+            "aggregation input must contain one supported canonical experiment"
         )
 
     grouped: dict[tuple[str, str, str, str, float, str], list[dict[str, Any]]] = {}
     for row in rows:
+        experiment = _text(row.get("experiment"))
         series = _text(row.get("series"))
-        if series == "task_size":
-            x_name = "task_size"
-            x_value = _number(row.get("task_size"), "task_size")
-            metric = "formation_latency_ms"
-            value = _number(row.get("formation_latency_ms"), metric)
-        elif series == "state_churn":
-            x_name = "state_churn_probability_percent"
-            x_value = 100.0 * _number(
-                row.get("state_churn_probability"),
-                "state_churn_probability",
-            )
-            metric = "success_rate_percent"
-            value = 100.0 if _boolean(row.get("success")) else 0.0
-        else:
-            raise ValueError(f"unsupported Exp.1 series: {series}")
-        key = (
-            _text(row.get("experiment")),
-            _text(row.get("mode")),
+        x_name, x_value, metric_values = _row_aggregate_values(
+            row,
+            experiment,
             series,
-            _text(row.get("method_id")),
-            x_value,
-            metric,
         )
-        grouped.setdefault(key, []).append(
-            {
-                **row,
-                "_aggregate_value": value,
-                "seed": int(row["seed"]),
-                "_x_name": x_name,
-            }
-        )
+        for metric, value in metric_values:
+            key = (
+                experiment,
+                _text(row.get("mode")),
+                series,
+                _text(row.get("method_id")),
+                x_value,
+                metric,
+            )
+            grouped.setdefault(key, []).append(
+                {
+                    **row,
+                    "_aggregate_value": value,
+                    "seed": int(row["seed"]),
+                    "_x_name": x_name,
+                }
+            )
 
     summary: list[AggregateRow] = []
     for key, group in sorted(grouped.items()):
@@ -140,6 +132,65 @@ def aggregate_experiment(
 
     _write_summary(Path(output_csv), summary)
     return summary
+
+
+def _row_aggregate_values(
+    row: Mapping[str, Any],
+    experiment: str,
+    series: str,
+) -> tuple[str, float, list[tuple[str, float]]]:
+    if experiment == "exp1" and series == "task_size":
+        metric = "formation_latency_ms"
+        return (
+            "task_size",
+            _number(row.get("task_size"), "task_size"),
+            [(metric, _number(row.get(metric), metric))],
+        )
+    if experiment == "exp1" and series == "state_churn":
+        return (
+            "state_churn_probability_percent",
+            100.0
+            * _number(
+                row.get("state_churn_probability"),
+                "state_churn_probability",
+            ),
+            [("success_rate_percent", 100.0 if _boolean(row.get("success")) else 0.0)],
+        )
+    if experiment == "exp3" and series == "affected_scope":
+        x_value = _number(
+            row.get("affected_scope_bucket_percent"),
+            "affected_scope_bucket_percent",
+        )
+        values = [
+            (
+                "rule_change_ratio_percent",
+                100.0 * _number(row.get("rule_change_ratio"), "rule_change_ratio"),
+            ),
+            (
+                "gateway_change_ratio_percent",
+                100.0
+                * _number(row.get("gateway_change_ratio"), "gateway_change_ratio"),
+            ),
+            (
+                "unaffected_disturbance_ratio_percent",
+                100.0
+                * _number(
+                    row.get("unaffected_disturbance_ratio"),
+                    "unaffected_disturbance_ratio",
+                ),
+            ),
+            ("success_rate_percent", 100.0 if _boolean(row.get("success")) else 0.0),
+        ]
+        latency = row.get("reconfiguration_latency_ms")
+        if latency not in (None, ""):
+            values.append(
+                (
+                    "reconfiguration_latency_ms",
+                    _number(latency, "reconfiguration_latency_ms"),
+                )
+            )
+        return "affected_scope_ratio_percent", x_value, values
+    raise ValueError(f"unsupported aggregate series: {experiment}/{series}")
 
 
 def _read_rows(

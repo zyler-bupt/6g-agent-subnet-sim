@@ -115,7 +115,6 @@ def check_results(
         "conflict_density",
         "affected_scope_ratio",
         "failure_severity",
-        "rule_change_ratio",
         "gateway_change_ratio",
         "unaffected_disturbance_ratio",
     )
@@ -137,6 +136,8 @@ def check_results(
     findings.extend(_constant_output_findings(rows, selected_experiment, latency_field))
     if selected_experiment == "exp1":
         findings.extend(_exp1_trend_findings(rows))
+    elif selected_experiment == "exp3":
+        findings.extend(_exp3_trend_findings(rows))
     return _deduplicate(findings)
 
 
@@ -286,6 +287,48 @@ def _exp1_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
     return findings
 
 
+def _exp3_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
+    proposed = [
+        row
+        for row in rows
+        if _text(row.get("series")) == "affected_scope"
+        and _text(row.get("method_id")) == "proposed"
+    ]
+    means = []
+    for bucket, point_rows in _group(
+        proposed,
+        "affected_scope_bucket_percent",
+    ).items():
+        bucket_value = _optional_number(bucket)
+        values = [
+            value
+            for row in point_rows
+            if (value := _optional_number(row.get("changed_rules"))) is not None
+        ]
+        if bucket_value is not None and values:
+            means.append((bucket_value, mean(values)))
+    means.sort()
+    if len(means) < 2:
+        return []
+    nondecreasing = sum(
+        right[1] >= left[1]
+        for left, right in zip(means, means[1:])
+    )
+    comparisons = len(means) - 1
+    if means[-1][1] <= means[0][1] or nondecreasing / comparisons < 0.60:
+        return [
+            SanityFinding(
+                "WARNING",
+                "EXP3_PROPOSED_RULES_NOT_INCREASING",
+                "Proposed changed rules do not generally rise with exact affected scope",
+                "exp3",
+                "affected_scope",
+                "proposed",
+            )
+        ]
+    return []
+
+
 def _read_rows(
     source: str | Path | Sequence[Mapping[str, Any] | object],
 ) -> list[dict[str, Any]]:
@@ -324,11 +367,17 @@ def _group_multi(
 
 def _series_x_value(row: Mapping[str, Any]) -> float | None:
     series = _text(row.get("series"))
+    if series == "affected_scope":
+        bucket = _optional_number(row.get("affected_scope_bucket_percent"))
+        return (
+            bucket
+            if bucket is not None
+            else _optional_number(row.get("affected_scope_ratio"))
+        )
     field = {
         "task_size": "task_size",
         "state_churn": "state_churn_probability",
         "conflict_density": "conflict_density",
-        "affected_scope": "affected_scope_ratio",
         "capacity_stress": "failure_severity",
     }.get(series)
     return _optional_number(row.get(field)) if field is not None else None

@@ -13,6 +13,16 @@ from typing import Any, Iterable
 
 import yaml
 
+from experiments.paper_protocol import (
+    EXPERIMENT_METHODS,
+    METHODS,
+    RunMode,
+    mode_spec,
+)
+from src.controller.business_reconfiguration import (
+    BusinessReconfigurationOutcome,
+    run_business_reconfiguration_method,
+)
 from src.controller.impact import ImpactScopeAnalyzer
 from src.controller.strategies import make_strategy
 from src.controller.transaction_executor import TransactionExecutor
@@ -23,11 +33,16 @@ from src.metrics.exp3 import (
     write_exp3_metrics_csv,
     write_probe_samples_csv,
 )
+from src.metrics.paper import PaperTrial, write_paper_trials
 from src.simulation.continuous_probe import BusinessProbeSample, ContinuousBusinessProbe
 from src.simulation.scenario_generator import (
     ElasticScenarioGenerator,
     ScenarioConfig,
     ScenarioSnapshot,
+)
+from src.simulation.business_change_generator import (
+    BusinessChangeSnapshot,
+    sample_affected_scope_bucket,
 )
 
 
@@ -330,6 +345,128 @@ async def run_experiment(
         json.dump(scenarios, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     return metrics
+
+
+async def run_exp3(
+    mode: str | RunMode,
+    output_root: Path,
+    *,
+    seeds: tuple[int, ...] | None = None,
+    buckets: tuple[int, ...] = (10, 20, 30, 40, 50),
+) -> list[PaperTrial]:
+    """Run the final paired affected-scope Exp.3 grid."""
+
+    selected_mode = RunMode(mode)
+    specification = mode_spec(selected_mode)
+    selected_seeds = (
+        tuple(range(specification.topology_seeds))
+        if seeds is None
+        else tuple(sorted(set(seeds)))
+    )
+    selected_buckets = tuple(sorted(set(int(value) for value in buckets)))
+    if not selected_seeds or not selected_buckets:
+        raise ValueError("Exp.3 requires non-empty seeds and affected-scope buckets")
+    if any(value not in {10, 20, 30, 40, 50} for value in selected_buckets):
+        raise ValueError("unsupported Exp.3 affected-scope bucket")
+
+    event_count = specification.rate_events_per_seed
+    rows: list[PaperTrial] = []
+    for bucket_index, bucket in enumerate(selected_buckets):
+        for seed_position, seed in enumerate(selected_seeds):
+            for event_id in range(event_count):
+                schedule_index = (
+                    bucket_index * len(selected_seeds) * event_count
+                    + seed_position * event_count
+                    + event_id
+                )
+                snapshot = sample_affected_scope_bucket(
+                    bucket,
+                    seed,
+                    event_id,
+                    schedule_index=schedule_index,
+                )
+                trial_id = (
+                    f"exp3:affected_scope:{bucket}:seed:{seed:04d}:"
+                    f"event:{event_id:03d}"
+                )
+                for method_id in EXPERIMENT_METHODS["exp3"]:
+                    outcome = await run_business_reconfiguration_method(
+                        snapshot,
+                        method_id,
+                    )
+                    rows.append(
+                        _paper_trial_from_business_change(
+                            selected_mode,
+                            snapshot,
+                            outcome,
+                            trial_id,
+                        )
+                    )
+    rows.sort(
+        key=lambda row: (
+            row.affected_scope_bucket_percent or 0.0,
+            row.seed,
+            row.event_id,
+            row.method_id,
+        )
+    )
+    write_paper_trials(
+        output_root / "raw" / selected_mode.value / "exp3" / "trials.csv",
+        rows,
+    )
+    return rows
+
+
+def _paper_trial_from_business_change(
+    mode: RunMode,
+    snapshot: BusinessChangeSnapshot,
+    outcome: BusinessReconfigurationOutcome,
+    trial_id: str,
+) -> PaperTrial:
+    method = METHODS[outcome.method_id]
+    return PaperTrial(
+        experiment="exp3",
+        mode=mode.value,
+        trial_id=trial_id,
+        seed=snapshot.seed,
+        event_id=snapshot.event_id,
+        method_id=method.method_id,
+        method_label=method.label,
+        method_source=method.source,
+        adapted=method.adapted,
+        topology_fingerprint=snapshot.formation_snapshot.topology.fingerprint,
+        scenario_fingerprint=snapshot.fingerprint,
+        qos_fingerprint=snapshot.formation_snapshot.qos_fingerprint,
+        event_fingerprint=snapshot.event_fingerprint,
+        series="affected_scope",
+        result_mode="transactionally_verified_business_change_simulation",
+        event_occurred_at=outcome.event_occurred_at,
+        stable_verify_finished_at=outcome.stable_verify_finished_at,
+        task_size=len(snapshot.before_task.app_agents),
+        num_dag_edges=len(snapshot.before_task.biz_edges),
+        num_gateways=len(snapshot.formation_snapshot.topology.gateway_ids),
+        business_change_type=snapshot.change.change_type.value,
+        affected_scope_ratio=snapshot.affected_scope_ratio,
+        affected_scope_bucket_percent=float(snapshot.target_bucket_percent),
+        reconfiguration_latency_ms=outcome.reconfiguration_latency_ms,
+        success=outcome.success,
+        qos_satisfied=outcome.qos_satisfied,
+        failure_reason=outcome.failure_reason or None,
+        total_rules=outcome.total_rules,
+        changed_rules=outcome.changed_rules,
+        rule_change_ratio=outcome.rule_change_ratio,
+        total_gateways=outcome.total_gateways,
+        changed_gateways=outcome.changed_gateways,
+        gateway_change_ratio=outcome.gateway_change_ratio,
+        total_flows=outcome.total_flows,
+        unaffected_flows=outcome.unaffected_flows,
+        disturbed_unaffected_flows=outcome.disturbed_unaffected_flows,
+        unaffected_disturbance_ratio=outcome.unaffected_disturbance_ratio,
+        control_messages=outcome.control_messages,
+        control_bytes=outcome.control_bytes,
+        rollback_count=outcome.rollback_count,
+        stale_state_detected=outcome.stale_state_detected,
+    )
 
 
 def _scenario_points(config: dict[str, Any]) -> Iterable[tuple[str, ScenarioConfig]]:
