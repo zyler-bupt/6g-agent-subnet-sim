@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import heapq
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from experiments.paper_protocol import stable_fingerprint
@@ -25,6 +25,9 @@ from src.sim.topology import (
     support_agent_specs,
 )
 from src.simulation.scenario_generator import replace_physical_capacity
+
+
+PAPER_NETWORK_AGENT_CAPACITY_MBPS = 250.0
 
 
 @dataclass(frozen=True)
@@ -146,7 +149,7 @@ class FormationScenarioSnapshot:
     ) -> tuple[AgentController, SyntheticTaskSubnetVerifier, SyntheticMetricProvider]:
         provider = SyntheticMetricProvider(
             seed=self.seed * 1000 + self.event_id,
-            base_bandwidth_mbps=250.0,
+            base_bandwidth_mbps=PAPER_NETWORK_AGENT_CAPACITY_MBPS,
             base_latency_ms=8.0,
             base_app_rate_mbps=20.0,
         )
@@ -258,7 +261,7 @@ def generate_formation_snapshot(
         for index, agent_id in enumerate(agent_ids)
     )
     support_specs = tuple(
-        replace_physical_capacity(spec, 10000.0)
+        _paper_support_spec(spec)
         for gateway_id in topology.gateway_ids
         for spec in support_agent_specs(gateway_id)
     )
@@ -266,20 +269,34 @@ def generate_formation_snapshot(
         gateways=gateway_specs,
         agents=app_specs + support_specs,
     )
-    edges = tuple(
-        BusinessEdge(
-            source=agent_ids[source],
-            target=agent_ids[target],
-            flow_type=f"task-flow-{index:04d}",
-            data_rate_mbps=5.0 + float(index % 5),
-            latency_budget_ms=120.0,
-            priority=1 + index % 3,
-            edge_id=f"edge-{index:04d}",
-            max_loss_rate=0.02,
-            min_reliability=0.98,
+    link_by_endpoints = {
+        frozenset((link.source, link.target)): link
+        for link in topology.links
+    }
+    edges = []
+    for index, (source, target) in enumerate(sorted(edge_indices)):
+        path = topology.shortest_path(mapping[agent_ids[source]], mapping[agent_ids[target]])
+        path_links = [link_by_endpoints[frozenset(pair)] for pair in zip(path, path[1:])]
+        base_delay_ms = sum(link.delay_ms for link in path_links)
+        reliability = 1.0
+        for link in path_links:
+            reliability *= 1.0 - link.loss_percent / 100.0
+        base_loss_rate = 1.0 - reliability
+        max_loss_rate = min(0.06, max(0.02, base_loss_rate + 0.01))
+        edges.append(
+            BusinessEdge(
+                source=agent_ids[source],
+                target=agent_ids[target],
+                flow_type=f"task-flow-{index:04d}",
+                data_rate_mbps=5.0 + float(index % 5),
+                latency_budget_ms=min(140.0, max(30.0, base_delay_ms * 1.25 + 8.0)),
+                priority=1 + index % 3,
+                edge_id=f"edge-{index:04d}",
+                max_loss_rate=max_loss_rate,
+                min_reliability=1.0 - max_loss_rate,
+            )
         )
-        for index, (source, target) in enumerate(sorted(edge_indices))
-    )
+    edges = tuple(edges)
     task = TaskSpec(
         task_id=f"paper-exp1-size-{task_size:02d}-seed-{seed:04d}",
         goal="form a modular fork-join task communication subnet",
@@ -287,8 +304,8 @@ def generate_formation_snapshot(
         biz_edges=edges,
         qos=QoSRequirements(
             max_latency_ms=150.0,
-            max_loss_rate=0.03,
-            min_reliability=0.98,
+            max_loss_rate=max(edge.max_loss_rate or 0.0 for edge in edges),
+            min_reliability=min(edge.min_reliability or 1.0 for edge in edges),
             min_bandwidth_mbps=10.0,
             data_volume_mb=100.0,
             priority=2,
@@ -310,6 +327,19 @@ def generate_formation_snapshot(
                 "event_type": "formation",
             }
         ),
+    )
+
+
+def _paper_support_spec(spec: AgentSpec) -> AgentSpec:
+    spec = replace_physical_capacity(spec, 10000.0)
+    if spec.layer != AgentLayer.NETWORK:
+        return spec
+    return replace(
+        spec,
+        state_values={
+            **spec.state_values,
+            "available_capacity_mbps": PAPER_NETWORK_AGENT_CAPACITY_MBPS,
+        },
     )
 
 

@@ -92,6 +92,33 @@ class PaperFormationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.agent_gateway_mapping, second_event.agent_gateway_mapping)
         self.assertNotEqual(first.event_fingerprint, second_event.event_fingerprint)
 
+    def test_generated_task_qos_accepts_every_initial_mesh_path(self) -> None:
+        snapshot = generate_formation_snapshot(24, seed=0, event_id=0)
+        links = {
+            frozenset((link.source, link.target)): link
+            for link in snapshot.topology.links
+        }
+
+        for edge in snapshot.task.biz_edges:
+            path = snapshot.topology.shortest_path(
+                snapshot.agent_gateway_mapping[edge.source],
+                snapshot.agent_gateway_mapping[edge.target],
+            )
+            path_links = [links[frozenset(pair)] for pair in zip(path, path[1:])]
+            delay_ms = sum(link.delay_ms for link in path_links)
+            available_mbps = min(
+                (link.bandwidth_mbps for link in path_links),
+                default=float("inf"),
+            )
+            reliability = 1.0
+            for link in path_links:
+                reliability *= 1.0 - link.loss_percent / 100.0
+            loss_rate = 1.0 - reliability
+
+            self.assertLessEqual(delay_ms, edge.latency_budget_ms)
+            self.assertGreaterEqual(available_mbps, edge.data_rate_mbps)
+            self.assertLessEqual(loss_rate, edge.max_loss_rate)
+
     async def test_generated_task_builds_through_existing_transaction_and_verifier(self) -> None:
         snapshot = generate_formation_snapshot(12, seed=3, event_id=0)
         controller, verifier, _provider = snapshot.instantiate()
@@ -106,6 +133,30 @@ class PaperFormationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metrics.networking_success, metrics.failure_reason)
         self.assertEqual(len(subnet.business_edges), len(snapshot.task.biz_edges))
         self.assertEqual(subnet.version, 1)
+
+    async def test_every_pilot_initial_formation_instance_is_feasible(self) -> None:
+        for task_size in (8, 12, 16, 20, 24, 28, 32):
+            for seed in range(5):
+                for event_id in range(2):
+                    with self.subTest(
+                        task_size=task_size,
+                        seed=seed,
+                        event_id=event_id,
+                    ):
+                        snapshot = generate_formation_snapshot(
+                            task_size,
+                            seed=seed,
+                            event_id=event_id,
+                        )
+                        controller, _verifier, _provider = snapshot.instantiate()
+                        compilation = await controller.compile_task_subnet(
+                            snapshot.task,
+                            version=1,
+                        )
+                        self.assertEqual(
+                            len(compilation.subnet.sessions),
+                            len(snapshot.task.biz_edges),
+                        )
 
 
 if __name__ == "__main__":
