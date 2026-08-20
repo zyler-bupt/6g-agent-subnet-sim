@@ -67,6 +67,17 @@ class BusinessChangeGeneratorTests(unittest.TestCase):
         self.assertGreaterEqual(first.formation_snapshot.cross_gateway_edge_ratio, 0.60)
         self.assertLessEqual(first.formation_snapshot.cross_gateway_edge_ratio, 0.70)
 
+    def test_dependency_closure_is_materialized_in_the_target_configuration(self) -> None:
+        snapshot = sample_affected_scope_bucket(30, seed=6, event_id=1)
+        before = {edge.edge_id: edge for edge in snapshot.before_task.biz_edges}
+        after = {edge.edge_id: edge for edge in snapshot.after_task.biz_edges}
+        surviving_closure = snapshot.affected_edge_ids & set(before) & set(after)
+
+        self.assertTrue(surviving_closure)
+        self.assertTrue(
+            all(before[edge_id] != after[edge_id] for edge_id in surviving_closure)
+        )
+
     def test_all_change_types_compile_from_the_same_valid_initial_state(self) -> None:
         for event_id, change_type in enumerate(BusinessChangeType):
             with self.subTest(change_type=change_type.value):
@@ -117,6 +128,20 @@ class BusinessStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.escalation_tier, 1)
         self.assertLessEqual(plan.affected_gateways, plan.verification_gateways)
         self.assertEqual(plan.transaction_gateways, plan.verification_gateways)
+        one_hop_agents = {
+            agent_id
+            for task in (stable.task, plan.target_state.task)
+            for edge in task.biz_edges
+            if edge.edge_id in plan.selected_edge_ids
+            for agent_id in (edge.source, edge.target)
+        }
+        expected_gateways = {
+            state.gateway_id
+            for subnet in (stable, plan.target_state)
+            for agent_id, state in subnet.application_agents.items()
+            if agent_id in one_hop_agents
+        }
+        self.assertEqual(plan.affected_gateways, expected_gateways)
 
     async def test_netren_does_not_read_task_dependency_closure(self) -> None:
         snapshot, controller, stable = await self._stable_snapshot(30, seed=4, event_id=2)

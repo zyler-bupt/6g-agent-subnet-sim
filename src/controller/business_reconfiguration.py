@@ -502,21 +502,21 @@ def _directly_attached_gateways(
     stable: TaskSubnet,
     target: TaskSubnet,
 ) -> frozenset[str]:
-    gateways = set()
-    for agent_id in snapshot.change.anchor_agent_ids:
-        for subnet in (stable, target):
-            state = subnet.application_agents.get(agent_id)
-            if state is not None:
-                gateways.add(state.gateway_id)
-    if not gateways:
-        gateways.update(
-            _gateways_for_edges(
-                stable,
-                target,
-                _directly_changed_edge_ids(snapshot),
-            )
-        )
-    return frozenset(gateways)
+    one_hop_edge_ids = _one_hop_edge_ids(snapshot, stable, target)
+    one_hop_agent_ids = {
+        agent_id
+        for subnet in (stable, target)
+        for edge in subnet.task.biz_edges
+        if edge.edge_id in one_hop_edge_ids
+        for agent_id in (edge.source, edge.target)
+    }
+    one_hop_agent_ids.update(snapshot.change.anchor_agent_ids)
+    return frozenset(
+        state.gateway_id
+        for subnet in (stable, target)
+        for agent_id, state in subnet.application_agents.items()
+        if agent_id in one_hop_agent_ids
+    )
 
 
 def _impact_scope(

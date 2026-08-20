@@ -167,6 +167,11 @@ def generate_business_change(
             dependency_radius,
         )
     closure = exact_dependency_closure(base.task, change)
+    after_task = _materialize_dependency_effect(
+        base.task,
+        after_task,
+        closure,
+    )
     return BusinessChangeSnapshot(
         seed=seed,
         event_id=event_id,
@@ -442,3 +447,26 @@ def _qos_update_change(
 
 def _change_id(seed: int, event_id: int, attempt: int) -> str:
     return f"business-change-{seed:04d}-{event_id:03d}-{attempt:04d}"
+
+
+def _materialize_dependency_effect(
+    before_task: TaskSpec,
+    after_task: TaskSpec,
+    closure: DependencyClosure,
+) -> TaskSpec:
+    """Apply the generated change's propagated policy effect to surviving edges."""
+
+    before = {edge.edge_id: edge for edge in before_task.biz_edges}
+    updated_edges = []
+    for edge in after_task.biz_edges:
+        previous = before.get(edge.edge_id)
+        if previous is None or edge.edge_id not in closure.edge_ids:
+            updated_edges.append(edge)
+            continue
+        updated_edges.append(
+            replace(
+                edge,
+                priority=1 + (previous.priority % 3),
+            )
+        )
+    return replace(after_task, biz_edges=tuple(updated_edges))

@@ -109,8 +109,8 @@ def style_axis(axis, *, horizontal_grid: bool = True) -> None:
 
 def panel_label(axis, label: str) -> None:
     axis.text(
-        -0.13,
-        1.035,
+        -0.02,
+        1.04,
         label,
         transform=axis.transAxes,
         fontsize=9.0,
