@@ -311,7 +311,8 @@ Every trial contains at least:
 ```text
 experiment, mode, trial_id, seed, event_id, method_id, method_label,
 method_source, adapted, topology_fingerprint, scenario_fingerprint,
-qos_fingerprint, event_fingerprint, task_size, num_dag_edges, num_gateways,
+qos_fingerprint, event_fingerprint, task_received_at, event_occurred_at,
+stable_verify_finished_at, task_size, num_dag_edges, num_gateways,
 state_churn_probability, conflict_density, conflict_type,
 ground_truth_feasible, business_change_type, affected_scope_ratio,
 failure_type, failure_severity, formation_latency_ms,
@@ -437,4 +438,3 @@ current `codex/semantic-controller` branch. Git publication includes source,
 configuration, tests, the final report, aggregate CSV, paper figures, and raw
 CSV files that are reasonably sized. It excludes unrelated office documents,
 archives, legacy bulk output, caches, and transient logs.
-
