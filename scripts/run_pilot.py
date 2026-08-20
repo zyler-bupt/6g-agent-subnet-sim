@@ -152,6 +152,9 @@ async def run_pilot(
             ensure_ascii=False,
         )
         handle.write("\n")
+    from scripts.run_paper import write_pilot_manifest
+
+    write_pilot_manifest(output_root, experiment)
 
     return PilotRunResult(
         experiments=selected,

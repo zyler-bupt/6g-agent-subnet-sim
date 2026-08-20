@@ -1,0 +1,38 @@
+{
+  "aggregate_path": "aggregated/pilot/exp4/summary.csv",
+  "aggregate_sha256": "17268712f59b00fb4a580ea3555aa91e72709349ceee65697cd1ffdef36ed64c",
+  "completed_at_utc": "2026-08-20T11:13:59.042885+00:00",
+  "config_path": "configs/paper_experiments.yaml",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "event_ids": [
+    0,
+    1
+  ],
+  "experiment": "exp4",
+  "methods": [
+    "cspf",
+    "full_rebuild",
+    "netkeeper",
+    "proposed"
+  ],
+  "mode": "pilot",
+  "paired_instance_count": 80,
+  "raw_path": "raw/pilot/exp4/trials.csv",
+  "raw_sha256": "4798a062d8bbd8225a3bb6b93d1570cbe8b1cba721edda66dbec16b80e5a385f",
+  "raw_trial_count": 320,
+  "sanity_path": "aggregated/pilot/exp4/sanity.json",
+  "sanity_sha256": "1769234b642e1493cc6cfa541d6433222a793c489c9ce24ab3da62c2905d7f3f",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "warning_count": 2,
+  "warning_explanations": [
+    "full_rebuild succeeds for every sampled capacity_stress trial",
+    "full_rebuild succeeds for every sampled failure_type trial"
+  ]
+}

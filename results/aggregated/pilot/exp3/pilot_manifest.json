@@ -1,0 +1,38 @@
+{
+  "aggregate_path": "aggregated/pilot/exp3/summary.csv",
+  "aggregate_sha256": "fc09436a02ee4ffb59cc7a690466fd8acf297aea588e9d90ecf4d2f1d3df1106",
+  "completed_at_utc": "2026-08-20T11:13:59.038864+00:00",
+  "config_path": "configs/paper_experiments.yaml",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "event_ids": [
+    0,
+    1
+  ],
+  "experiment": "exp3",
+  "methods": [
+    "full_rebuild",
+    "local_only",
+    "netren",
+    "proposed"
+  ],
+  "mode": "pilot",
+  "paired_instance_count": 50,
+  "raw_path": "raw/pilot/exp3/trials.csv",
+  "raw_sha256": "9a2e94f1779ac03f7098c33605424d9b219d36f15d2b2bf8ccbf8a0af1b85106",
+  "raw_trial_count": 200,
+  "sanity_path": "aggregated/pilot/exp3/sanity.json",
+  "sanity_sha256": "8ba55b8bc94d53a6654ca8782313d8d86ed88627cb64c6a49956e584ae2538c3",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "warning_count": 2,
+  "warning_explanations": [
+    "full_rebuild succeeds for every sampled affected_scope trial",
+    "netren succeeds for every sampled affected_scope trial"
+  ]
+}

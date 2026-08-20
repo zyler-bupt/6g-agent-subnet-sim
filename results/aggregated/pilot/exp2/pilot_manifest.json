@@ -1,0 +1,35 @@
+{
+  "aggregate_path": "aggregated/pilot/exp2/summary.csv",
+  "aggregate_sha256": "e10d381f564228750013a7ffdb092ce62ea9c31c825a694515911985cc905e57",
+  "completed_at_utc": "2026-08-20T11:13:59.035795+00:00",
+  "config_path": "configs/paper_experiments.yaml",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "event_ids": [
+    0,
+    1
+  ],
+  "experiment": "exp2",
+  "methods": [
+    "adjacent_layer",
+    "independent",
+    "proposed",
+    "sanet_dw"
+  ],
+  "mode": "pilot",
+  "paired_instance_count": 70,
+  "raw_path": "raw/pilot/exp2/trials.csv",
+  "raw_sha256": "4e607fd51e430816e0694b97ab5b931291b04096551d64e86f238a0f561f7764",
+  "raw_trial_count": 280,
+  "sanity_path": "aggregated/pilot/exp2/sanity.json",
+  "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "warning_count": 0,
+  "warning_explanations": []
+}

@@ -1,0 +1,35 @@
+{
+  "aggregate_path": "aggregated/pilot/exp1/summary.csv",
+  "aggregate_sha256": "e79770be2bf9fa1e9cea7405fc213a5be452f88ca93cb7395215a6a167c05b55",
+  "completed_at_utc": "2026-08-20T11:13:59.031834+00:00",
+  "config_path": "configs/paper_experiments.yaml",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "event_ids": [
+    0,
+    1
+  ],
+  "experiment": "exp1",
+  "methods": [
+    "a1_agent_embedded",
+    "cspf",
+    "proposed",
+    "proposed_without_batch"
+  ],
+  "mode": "pilot",
+  "paired_instance_count": 130,
+  "raw_path": "raw/pilot/exp1/trials.csv",
+  "raw_sha256": "9770ba06c950becde6f73cc27331d4f6ee43e424c5c8f4d5cdbf560e2fb7cbf6",
+  "raw_trial_count": 520,
+  "sanity_path": "aggregated/pilot/exp1/sanity.json",
+  "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "warning_count": 0,
+  "warning_explanations": []
+}

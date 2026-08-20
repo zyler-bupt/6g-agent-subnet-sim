@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from experiments.paper_protocol import EXPERIMENT_METHODS
+from scripts.run_paper import validate_all_pilots, validate_pilot_manifest
 from scripts.run_pilot import run_pilot
 
 
@@ -18,6 +20,7 @@ class PaperCliEntryPointTests(unittest.TestCase):
             "scripts/sanity_check_results.py",
             "scripts/plot_final_paper_figures.py",
             "scripts/run_pilot.py",
+            "scripts/run_paper.py",
         ):
             with self.subTest(script=relative_path):
                 completed = subprocess.run(
@@ -28,6 +31,42 @@ class PaperCliEntryPointTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+class PaperGateTests(unittest.TestCase):
+    def test_paper_runner_refuses_missing_pilots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "pilot gate failed"):
+                validate_all_pilots(
+                    Path(directory),
+                    config_path=ROOT / "configs" / "paper_experiments.yaml",
+                )
+
+    def test_manifest_requires_exact_method_set_and_config_hash(self) -> None:
+        manifest = {
+            "experiment": "exp1",
+            "mode": "pilot",
+            "config_sha256": "current-config",
+            "methods": ["proposed"],
+            "error_count": 0,
+            "raw_sha256": "raw",
+            "aggregate_sha256": "aggregate",
+            "sanity_sha256": "sanity",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "method set"):
+            validate_pilot_manifest(
+                manifest,
+                "exp1",
+                current_config_hash="current-config",
+            )
+        manifest["methods"] = list(EXPERIMENT_METHODS["exp1"])
+        with self.assertRaisesRegex(RuntimeError, "config hash"):
+            validate_pilot_manifest(
+                manifest,
+                "exp1",
+                current_config_hash="different-config",
+            )
 
 
 class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
