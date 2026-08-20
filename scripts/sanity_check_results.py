@@ -136,6 +136,8 @@ def check_results(
     findings.extend(_constant_output_findings(rows, selected_experiment, latency_field))
     if selected_experiment == "exp1":
         findings.extend(_exp1_trend_findings(rows))
+    elif selected_experiment == "exp2":
+        findings.extend(_exp2_trend_findings(rows))
     elif selected_experiment == "exp3":
         findings.extend(_exp3_trend_findings(rows))
     elif selected_experiment == "exp4":
@@ -332,6 +334,65 @@ def _exp3_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
             )
         ]
     return []
+
+
+def _exp2_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
+    findings: list[SanityFinding] = []
+    unique_trials = [paired[0] for paired in _group(rows, "trial_id").values()]
+    truth = [
+        value
+        for row in unique_trials
+        if (value := _optional_boolean(row.get("ground_truth_feasible"))) is not None
+    ]
+    if truth:
+        solvable_rate = sum(truth) / len(truth)
+        if not 0.85 <= solvable_rate <= 0.90:
+            findings.append(
+                SanityFinding(
+                    "WARNING",
+                    "EXP2_TRUTH_MIX_OUTSIDE_TARGET",
+                    f"oracle labels {100.0 * solvable_rate:.1f}% solvable; target is 85--90%",
+                    "exp2",
+                    "conflict_density",
+                )
+            )
+
+    selected_rows = [
+        row
+        for row in rows
+        if _text(row.get("series")) == "conflict_density"
+        and _optional_boolean(row.get("ground_truth_feasible")) is True
+    ]
+    for method_id, method_rows in _group(selected_rows, "method_id").items():
+        means = []
+        for density, point_rows in _group(method_rows, "conflict_density").items():
+            density_value = _optional_number(density)
+            successes = [
+                value
+                for row in point_rows
+                if (value := _optional_boolean(row.get("success"))) is not None
+            ]
+            if density_value is not None and successes:
+                means.append((density_value, sum(successes) / len(successes)))
+        means.sort()
+        if len(means) < 2:
+            continue
+        nonincreasing = sum(
+            right[1] <= left[1] + 1e-9
+            for left, right in zip(means, means[1:])
+        )
+        if means[-1][1] > means[0][1] + 1e-9 or nonincreasing / (len(means) - 1) < 0.60:
+            findings.append(
+                SanityFinding(
+                    "WARNING",
+                    "EXP2_FSR_ANOMALOUSLY_INCREASES",
+                    f"{method_id} feasible-solution rate rises with conflict density",
+                    "exp2",
+                    "conflict_density",
+                    method_id,
+                )
+            )
+    return findings
 
 
 def _exp4_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:

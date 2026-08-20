@@ -31,6 +31,33 @@ class PaperCliEntryPointTests(unittest.TestCase):
 
 
 class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exp2_pilot_orchestrates_conditional_metrics_and_two_panel_figure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = await run_pilot(
+                ("exp2",),
+                output_root=root,
+                seeds=(0,),
+                exp2_event_ids=(0,),
+                exp2_conflict_densities=(0, 40),
+                bootstrap_iterations=100,
+            )
+
+            self.assertEqual(result.experiments, ("exp2",))
+            self.assertEqual(result.error_count, 0)
+            expected = (
+                root / "raw" / "pilot" / "exp2" / "trials.csv",
+                root / "aggregated" / "pilot" / "exp2" / "summary.csv",
+                root / "aggregated" / "pilot" / "exp2" / "sanity.json",
+                root / "aggregated" / "pilot" / "exp2" / "PILOT_SUMMARY.md",
+                root / "paper_figures" / "Fig2_Cross_Layer_Coordination.pdf",
+                root / "paper_figures" / "Fig2_Cross_Layer_Coordination.png",
+            )
+            self.assertTrue(all(path.exists() for path in expected))
+            report = expected[3].read_text(encoding="utf-8")
+            self.assertIn("Feasible Solution Rate", report)
+            self.assertIn("Safe Rejection", report)
+
     async def test_exp1_pilot_orchestrates_raw_aggregate_sanity_plot_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

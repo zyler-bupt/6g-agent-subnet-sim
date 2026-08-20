@@ -34,6 +34,8 @@ class AggregateRow:
     sample_count: int
     cluster_count: int
     bootstrap_iterations: int
+    numerator: int | None
+    denominator: int | None
 
 
 AGGREGATE_FIELDS = tuple(item.name for item in fields(AggregateRow))
@@ -49,7 +51,7 @@ def aggregate_experiment(
     if not rows:
         raise ValueError("cannot aggregate an empty paper result")
     experiments = {_text(row.get("experiment")) for row in rows}
-    if len(experiments) != 1 or not experiments <= {"exp1", "exp3", "exp4"}:
+    if len(experiments) != 1 or not experiments <= {"exp1", "exp2", "exp3", "exp4"}:
         raise ValueError(
             "aggregation input must contain one supported canonical experiment"
         )
@@ -109,6 +111,13 @@ def aggregate_experiment(
             iterations=bootstrap_iterations,
             seed=bootstrap_seed,
         )
+        rate_metric = metric in {
+            "success_rate_percent",
+            "qos_recovery_rate_percent",
+            "feasible_solution_rate_percent",
+            "qos_satisfaction_rate_percent",
+            "safe_rejection_rate_percent",
+        }
         summary.append(
             AggregateRow(
                 experiment=experiment,
@@ -127,6 +136,10 @@ def aggregate_experiment(
                 sample_count=interval.sample_count,
                 cluster_count=interval.cluster_count,
                 bootstrap_iterations=interval.iterations,
+                numerator=(
+                    sum(value > 50.0 for value in values) if rate_metric else None
+                ),
+                denominator=(len(values) if rate_metric else None),
             )
         )
 
@@ -155,6 +168,33 @@ def _row_aggregate_values(
                 "state_churn_probability",
             ),
             [("success_rate_percent", 100.0 if _boolean(row.get("success")) else 0.0)],
+        )
+    if experiment == "exp2" and series == "conflict_density":
+        x_value = 100.0 * _number(row.get("conflict_density"), "conflict_density")
+        if _boolean(row.get("ground_truth_feasible")):
+            return (
+                "conflict_density_percent",
+                x_value,
+                [
+                    (
+                        "feasible_solution_rate_percent",
+                        100.0 if _boolean(row.get("success")) else 0.0,
+                    ),
+                    (
+                        "qos_satisfaction_rate_percent",
+                        100.0 if _boolean(row.get("qos_satisfied")) else 0.0,
+                    ),
+                ],
+            )
+        return (
+            "conflict_density_percent",
+            x_value,
+            [
+                (
+                    "safe_rejection_rate_percent",
+                    100.0 if _boolean(row.get("safe_rejection")) else 0.0,
+                )
+            ],
         )
     if experiment == "exp3" and series == "affected_scope":
         x_value = _number(

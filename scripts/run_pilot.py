@@ -16,11 +16,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.exp1_initial_formation import run_exp1
+from experiments.exp2_conflict import run_exp2
 from experiments.exp3_business_elasticity import run_exp3
 from experiments.exp4_failure import run_exp4
 from experiments.paper_protocol import METHODS
 from scripts.aggregate_results import aggregate_experiment
-from scripts.plot_final_paper_figures import plot_exp1, plot_exp3, plot_exp4
+from scripts.plot_final_paper_figures import plot_exp1, plot_exp2, plot_exp3, plot_exp4
 from scripts.sanity_check_results import SanityFinding, check_results
 
 
@@ -41,6 +42,8 @@ async def run_pilot(
     seeds: tuple[int, ...] | None = None,
     exp1_task_sizes: tuple[int, ...] = (8, 12, 16, 20, 24, 28, 32),
     exp1_churn_points: tuple[int | float, ...] = (0, 5, 10, 15, 20, 30),
+    exp2_event_ids: tuple[int, ...] | None = None,
+    exp2_conflict_densities: tuple[int, ...] = (0, 10, 20, 30, 40, 50, 60),
     exp3_buckets: tuple[int, ...] = (10, 20, 30, 40, 50),
     exp4_event_ids: tuple[int, ...] | None = None,
     exp4_capacity_reductions: tuple[int, ...] = (10, 20, 30, 40, 50),
@@ -48,7 +51,7 @@ async def run_pilot(
     replace_existing: bool = False,
 ) -> PilotRunResult:
     selected = tuple(dict.fromkeys(experiments))
-    unsupported = set(selected) - {"exp1", "exp3", "exp4"}
+    unsupported = set(selected) - {"exp1", "exp2", "exp3", "exp4"}
     if unsupported:
         raise ValueError(
             "pilot orchestration is not implemented yet for: "
@@ -77,6 +80,14 @@ async def run_pilot(
             seeds=seeds,
             task_sizes=exp1_task_sizes,
             churn_points=exp1_churn_points,
+        )
+    elif experiment == "exp2":
+        rows = await run_exp2(
+            "pilot",
+            output_root,
+            seeds=seeds,
+            event_ids=exp2_event_ids,
+            conflict_densities=exp2_conflict_densities,
         )
     elif experiment == "exp3":
         rows = await run_exp3(
@@ -116,6 +127,10 @@ async def run_pilot(
         plot_exp1(summary_path, figure_dir)
         report = _exp1_pilot_report(rows, aggregate_rows, findings)
         payload = _exp1_pilot_summary_payload(rows, aggregate_rows, findings)
+    elif experiment == "exp2":
+        plot_exp2(summary_path, figure_dir)
+        report = _exp2_pilot_report(rows, aggregate_rows, findings)
+        payload = _exp2_pilot_summary_payload(rows, aggregate_rows, findings)
     elif experiment == "exp3":
         plot_exp3(summary_path, figure_dir)
         report = _exp3_pilot_report(rows, aggregate_rows, findings)
@@ -226,6 +241,103 @@ def _exp1_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
         "error_count": sum(item.level == "ERROR" for item in findings),
         "warning_count": sum(item.level == "WARNING" for item in findings),
         "latency_ranking": ranking,
+        "findings": [asdict(item) for item in findings],
+    }
+
+
+def _exp2_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
+    payload = _exp2_pilot_summary_payload(rows, aggregate_rows, findings)
+    lines = [
+        "# Exp.2 Pilot Summary",
+        "",
+        "> Pilot only — these values are for implementation and stress-range checks, not paper results.",
+        "",
+        f"- Raw trials: {payload['raw_trial_count']}",
+        f"- Topology seeds: {payload['topology_seed_count']}",
+        f"- Oracle-solvable instances: {payload['solvable_instance_count']} / {payload['instance_count']} ({payload['solvable_rate_percent']:.1f}%)",
+        f"- Sanity errors: {payload['error_count']}",
+        f"- Sanity warnings: {payload['warning_count']}",
+        "",
+        "## Conditional Coordination Results",
+        "",
+        "| Method | Feasible Solution Rate (%) | QoS Satisfaction Rate (%) | Safe Rejection Rate (%) | P95 Resolution Latency (ms) |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for item in payload["method_results"]:
+        lines.append(
+            f"| {item['method_label']} | {item['feasible_solution_rate_percent']:.1f} "
+            f"| {item['qos_satisfaction_rate_percent']:.1f} "
+            f"| {_format_optional(item['safe_rejection_rate_percent'])} "
+            f"| {item['p95_resolution_latency_ms']:.3f} |"
+        )
+    lines.extend(("", "## Sanity Findings", ""))
+    if findings:
+        lines.extend(
+            f"- [{item.level}] `{item.code}`: {item.message}"
+            for item in findings
+        )
+    else:
+        lines.append("- No findings.")
+    lines.extend(
+        (
+            "",
+            "## Outputs",
+            "",
+            "- Raw CSV: `results/raw/pilot/exp2/trials.csv`",
+            "- Aggregate CSV: `results/aggregated/pilot/exp2/summary.csv`",
+            "- Figure: `results/paper_figures/Fig2_Cross_Layer_Coordination.{pdf,png}`",
+            "- Safe Rejection is retained in CSV/report and omitted from the compact two-panel main figure.",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _exp2_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
+    unique_instances = {}
+    for row in rows:
+        unique_instances.setdefault(row.trial_id, row)
+    method_results = []
+    for method_id in ("proposed", "sanet_dw", "adjacent_layer", "independent"):
+        selected = [row for row in rows if row.method_id == method_id]
+        solvable = [row for row in selected if row.ground_truth_feasible]
+        infeasible = [row for row in selected if not row.ground_truth_feasible]
+        latencies = [row.resolution_latency_ms for row in selected]
+        method_results.append(
+            {
+                "method_id": method_id,
+                "method_label": METHODS[method_id].label,
+                "feasible_solution_rate_percent": 100.0
+                * sum(bool(row.success) for row in solvable)
+                / len(solvable),
+                "qos_satisfaction_rate_percent": 100.0
+                * sum(bool(row.qos_satisfied) for row in solvable)
+                / len(solvable),
+                "safe_rejection_rate_percent": (
+                    100.0
+                    * sum(bool(row.safe_rejection) for row in infeasible)
+                    / len(infeasible)
+                    if infeasible
+                    else None
+                ),
+                "p95_resolution_latency_ms": float(np.percentile(latencies, 95.0)),
+            }
+        )
+    solvable_count = sum(
+        bool(row.ground_truth_feasible) for row in unique_instances.values()
+    )
+    return {
+        "experiment": "exp2",
+        "mode": "pilot",
+        "raw_trial_count": len(rows),
+        "aggregate_row_count": len(aggregate_rows),
+        "topology_seed_count": len({row.seed for row in rows}),
+        "instance_count": len(unique_instances),
+        "solvable_instance_count": solvable_count,
+        "solvable_rate_percent": 100.0 * solvable_count / len(unique_instances),
+        "error_count": sum(item.level == "ERROR" for item in findings),
+        "warning_count": sum(item.level == "WARNING" for item in findings),
+        "method_results": method_results,
         "findings": [asdict(item) for item in findings],
     }
 
@@ -461,6 +573,7 @@ def _clear_pilot(output_root: Path, experiment: str) -> None:
             shutil.rmtree(directory)
     figure_name = {
         "exp1": "Fig1_Formation",
+        "exp2": "Fig2_Cross_Layer_Coordination",
         "exp3": "Fig3_Business_Elasticity",
         "exp4": "Fig4_Failure_Recovery",
     }[experiment]

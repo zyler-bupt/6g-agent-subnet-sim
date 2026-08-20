@@ -100,6 +100,72 @@ def plot_exp1(
     return pdf, png
 
 
+def plot_exp2(
+    summary_csv: str | Path,
+    output_dir: str | Path,
+) -> tuple[Path, Path]:
+    """Render the two main conditional coordination rates for Exp.2."""
+
+    rows = _read_csv(Path(summary_csv))
+    methods = EXPERIMENT_METHODS["exp2"]
+    feasible = _metric_rows_for_series(
+        rows,
+        "exp2",
+        "conflict_density",
+        "feasible_solution_rate_percent",
+    )
+    qos = _metric_rows_for_series(
+        rows,
+        "exp2",
+        "conflict_density",
+        "qos_satisfaction_rate_percent",
+    )
+    _require_complete_methods(feasible, methods, "Exp.2 feasible solution rate")
+    _require_complete_methods(qos, methods, "Exp.2 QoS satisfaction")
+
+    apply_paper_style()
+    figure, axes = plt.subplots(1, 2, figsize=(7.1, 2.25))
+    for axis, selected, ylabel, label in (
+        (axes[0], feasible, "Feasible Solution Rate (%)", "(a)"),
+        (axes[1], qos, "QoS Satisfaction Rate (%)", "(b)"),
+    ):
+        _plot_lines(axis, selected, methods)
+        axis.set_xlabel("Conflict Density (%)")
+        axis.set_ylabel(ylabel)
+        axis.set_ylim(0.0, 105.0)
+        axis.set_yticks((0, 20, 40, 60, 80, 100))
+        axis.set_xticks(sorted({float(row["x_value"]) for row in selected}))
+        style_axis(axis)
+        panel_label(axis, label)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=4,
+        columnspacing=1.1,
+        handlelength=2.2,
+    )
+    figure.subplots_adjust(left=0.083, right=0.992, bottom=0.22, top=0.79, wspace=0.27)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    pdf = destination / "Fig2_Cross_Layer_Coordination.pdf"
+    png = destination / "Fig2_Cross_Layer_Coordination.png"
+    figure.savefig(
+        pdf,
+        format="pdf",
+        metadata={
+            "Title": "Cross-Layer Conflict Resolution",
+            "Subject": "Vector paper figure generated from conditional aggregate CSV",
+        },
+    )
+    figure.savefig(png, format="png", dpi=300)
+    plt.close(figure)
+    return pdf, png
+
+
 def plot_exp3(
     summary_csv: str | Path,
     output_dir: str | Path,
@@ -463,7 +529,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="results/paper_figures")
     parser.add_argument(
         "--experiment",
-        choices=("exp1", "exp3", "exp4"),
+        choices=("exp1", "exp2", "exp3", "exp4"),
         default="exp1",
     )
     return parser
@@ -473,6 +539,7 @@ def main() -> None:
     args = _parser().parse_args()
     plotter = {
         "exp1": plot_exp1,
+        "exp2": plot_exp2,
         "exp3": plot_exp3,
         "exp4": plot_exp4,
     }[args.experiment]
