@@ -1,0 +1,53 @@
+experiment,mode,series,method_id,method_label,x_name,x_value,metric,mean,p50,p95,ci_lower,ci_upper,sample_count,cluster_count,bootstrap_iterations
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,5.0,success_rate_percent,60.0,100.0,100.0,29.750000000000085,90.0,10,5,5000
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,10.0,success_rate_percent,40.0,0.0,100.0,10.0,70.0,10,5,5000
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,15.0,success_rate_percent,20.0,0.0,100.0,0.0,40.0,10,5,5000
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,20.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,10,5,5000
+exp1,pilot,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,30.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,5.0,success_rate_percent,90.0,100.0,100.0,70.0,100.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,10.0,success_rate_percent,90.0,100.0,100.0,70.0,100.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,15.0,success_rate_percent,80.0,100.0,100.0,60.0,100.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,20.0,success_rate_percent,10.0,0.0,54.99999999999989,0.0,30.0,10,5,5000
+exp1,pilot,state_churn,cspf,CSPF,state_churn_probability_percent,30.0,success_rate_percent,20.0,0.0,100.0,0.0,40.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,5.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,10.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,15.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,20.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed,Proposed,state_churn_probability_percent,30.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,5.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,10.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,15.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,20.0,success_rate_percent,60.0,100.0,100.0,20.0,100.0,10,5,5000
+exp1,pilot,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,30.0,success_rate_percent,50.0,50.0,100.0,10.0,90.0,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,8.0,formation_latency_ms,93.23744161306668,86.91984778499997,111.10641349900004,81.49050844833333,104.98437477780001,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,12.0,formation_latency_ms,143.25268990906667,145.021189232,169.20355312499996,129.31889523973334,158.02092453699998,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,16.0,formation_latency_ms,212.05892351820003,208.59703043533335,233.47880067499977,202.65282923866675,223.52609257913318,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,20.0,formation_latency_ms,246.4486372450668,246.65352338933337,263.39021837499996,235.173059035267,256.69554038073335,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,24.0,formation_latency_ms,293.31533657540007,294.23782618833343,337.22993311400006,263.8424754477249,319.8794275613999,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,28.0,formation_latency_ms,350.01819109580026,354.026397157667,421.42462272200083,305.5949641565336,395.93487613406705,10,5,5000
+exp1,pilot,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,32.0,formation_latency_ms,394.71608327406665,383.60049877166654,443.83942037000054,375.91538686193314,421.6765188560668,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,8.0,formation_latency_ms,43.2676940776,41.75725295833333,46.741422744999994,41.25101581366666,45.50606238593333,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,12.0,formation_latency_ms,64.3432186945333,66.065532704,69.98003009166663,60.10219512473329,68.32780072079997,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,16.0,formation_latency_ms,88.54428763833334,87.2227459313334,96.29340873500003,85.12669785246662,92.820184139,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,20.0,formation_latency_ms,106.65058691720003,105.08137116266667,112.73109789500003,104.57723092586669,109.77041636600006,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,24.0,formation_latency_ms,125.25527687700011,127.54219190500012,131.0202704680001,119.80044293660008,129.85077493633344,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,28.0,formation_latency_ms,149.00940380966676,155.50080444766672,161.0689191140001,138.4677995326668,158.50285321313345,10,5,5000
+exp1,pilot,task_size,cspf,CSPF,task_size,32.0,formation_latency_ms,166.6498843306002,165.39695246833355,175.32346048000016,161.65609815220014,171.64367050900023,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,8.0,formation_latency_ms,13.959672520999998,13.923083725000003,14.749021885,13.351503059,14.567841982999997,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,12.0,formation_latency_ms,17.850961875000003,18.112385355000004,18.995401345,17.050705003,18.651218747,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,16.0,formation_latency_ms,21.870656405400005,21.514977202000008,23.30335251000001,21.20869212040001,22.681069735000012,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,20.0,formation_latency_ms,25.092180579266675,25.093508876333345,25.535789550000008,24.846691442000015,25.331829771266676,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,24.0,formation_latency_ms,27.661407887000014,27.623702640000012,28.810690545000014,26.918546594000013,28.40426918000001,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,28.0,formation_latency_ms,31.759574148800017,31.036694979000007,35.22381145500001,30.23561928980002,33.57066607495,10,5,5000
+exp1,pilot,task_size,proposed,Proposed,task_size,32.0,formation_latency_ms,33.88390546380002,32.969620130000024,36.40993909500002,32.51679963560002,35.413694515800024,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,formation_latency_ms,25.475714333666666,25.296998310000003,34.362984569,21.02206787,30.178443498266667,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,formation_latency_ms,35.81798743446667,33.803448335000006,40.155754951666665,33.01005077926668,38.62592408966667,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,formation_latency_ms,46.63262596086666,47.519480096666676,49.878231480666685,44.5275146142,48.58476318560001,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,formation_latency_ms,51.04652641286668,51.44438953400002,54.630610652333345,48.70108948066668,53.39196334506668,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,formation_latency_ms,60.92702586940002,62.410988138333344,65.48357331733334,57.118929553600026,63.966809364600024,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,formation_latency_ms,67.18924340173336,63.280700436333355,78.84393559500002,60.60633699060003,73.91792769346668,10,5,5000
+exp1,pilot,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,formation_latency_ms,74.28892226833337,74.1976311786667,80.73503547000001,70.12246650233335,78.11785930573335,10,5,5000

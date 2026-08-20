@@ -1,0 +1,40 @@
+{
+  "experiment": "exp1",
+  "mode": "pilot",
+  "raw_trial_count": 520,
+  "aggregate_row_count": 52,
+  "topology_seed_count": 5,
+  "error_count": 0,
+  "warning_count": 0,
+  "latency_ranking": [
+    {
+      "method_id": "proposed",
+      "method_label": "Proposed",
+      "mean_formation_latency_ms": 24.582622697180962,
+      "p95_formation_latency_ms": 35.22874364325001,
+      "churn_success_rate_percent": 100.0
+    },
+    {
+      "method_id": "proposed_without_batch",
+      "method_label": "Proposed w/o Batch",
+      "mean_formation_latency_ms": 51.625435097333344,
+      "p95_formation_latency_ms": 77.24049216060001,
+      "churn_success_rate_percent": 85.0
+    },
+    {
+      "method_id": "cspf",
+      "method_label": "CSPF",
+      "mean_formation_latency_ms": 106.24576462070482,
+      "p95_formation_latency_ms": 168.52661036783354,
+      "churn_success_rate_percent": 65.0
+    },
+    {
+      "method_id": "a1_agent_embedded",
+      "method_label": "A1-Agent-Embedded*",
+      "mean_formation_latency_ms": 247.5781861758096,
+      "p95_formation_latency_ms": 410.95206825395024,
+      "churn_success_rate_percent": 36.666666666666664
+    }
+  ],
+  "findings": []
+}
