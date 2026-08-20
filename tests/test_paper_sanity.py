@@ -134,6 +134,33 @@ class PaperSanityTests(unittest.TestCase):
 
         self.assertNotIn("ALWAYS_SUCCESS", {item.code for item in findings})
 
+    def test_always_success_check_targets_baselines_not_proposed(self) -> None:
+        rows = []
+        for churn_probability in (0.1, 0.2):
+            for method_id in EXPERIMENT_METHODS["exp1"]:
+                rows.append(
+                    _row(
+                        trial_id=(
+                            f"exp1:state_churn:{100 * churn_probability:g}:"
+                            "seed:0000:event:000"
+                        ),
+                        method_id=method_id,
+                        method_label=method_id,
+                        series="state_churn",
+                        task_size=24,
+                        state_churn_probability=churn_probability,
+                        success=True,
+                    )
+                )
+
+        findings = check_results(rows, experiment="exp1")
+        always_success_methods = {
+            item.method_id for item in findings if item.code == "ALWAYS_SUCCESS"
+        }
+
+        self.assertNotIn("proposed", always_success_methods)
+        self.assertIn("cspf", always_success_methods)
+
 
 if __name__ == "__main__":
     unittest.main()

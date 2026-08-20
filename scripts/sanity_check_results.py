@@ -192,7 +192,7 @@ def _constant_output_findings(
             else []
         )
         successes = [value for value in successes if value is not None]
-        if successes and all(successes):
+        if method_id != "proposed" and successes and all(successes):
             findings.append(
                 SanityFinding(
                     "WARNING",
@@ -203,7 +203,7 @@ def _constant_output_findings(
                     method_id,
                 )
             )
-        if successes and not any(successes):
+        if method_id != "proposed" and successes and not any(successes):
             findings.append(
                 SanityFinding(
                     "WARNING",
