@@ -1,0 +1,75 @@
+{
+  "composite_figure_count": 4,
+  "config_path": "configs/paper_experiments.yaml",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "experiments": {
+    "exp1": {
+      "aggregate_path": "results/aggregated/paper/exp1/summary.csv",
+      "aggregate_row_count": 52,
+      "aggregate_sha256": "3485d9007d504aed3ac52a92461deb65cab3e3b72524de4bc44a7143a68735f9",
+      "error_count": 0,
+      "raw_path": "results/raw/paper/exp1/trials.csv",
+      "raw_sha256": "6efea732586d9a7bad97a8d9ad15108f7dc6cc817f7a60e1070531ff1b6e8bbd",
+      "raw_trial_count": 4440,
+      "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "warning_count": 0
+    },
+    "exp2": {
+      "aggregate_path": "results/aggregated/paper/exp2/summary.csv",
+      "aggregate_row_count": 80,
+      "aggregate_sha256": "b1e669eb1b94b284b22f3f66a59dc983d89aab4d1dcb88466218c784d5ff4ee7",
+      "error_count": 0,
+      "raw_path": "results/raw/paper/exp2/trials.csv",
+      "raw_sha256": "aac1a2b6776c4b60b2bee05e370d2a5ec20186ef8473b7ee7ec7bdecb90c7848",
+      "raw_trial_count": 4200,
+      "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "warning_count": 0
+    },
+    "exp3": {
+      "aggregate_path": "results/aggregated/paper/exp3/summary.csv",
+      "aggregate_row_count": 100,
+      "aggregate_sha256": "6645fcaaf5d4ca653c6fd12dcc08c809c5f3d4791be55cdaa56e0eaae2c42a11",
+      "error_count": 0,
+      "raw_path": "results/raw/paper/exp3/trials.csv",
+      "raw_sha256": "a59f8a91a7c773d2347185d99b9f0b68a5db56b70f0a5455632929165ae24df4",
+      "raw_trial_count": 3000,
+      "sanity_sha256": "d474c47645e25603c545a7e7d1ecfea751fe264c1c629c792522895fc02020b9",
+      "warning_count": 2
+    },
+    "exp4": {
+      "aggregate_path": "results/aggregated/paper/exp4/summary.csv",
+      "aggregate_row_count": 190,
+      "aggregate_sha256": "23e2746ae5b8e0b33192499979849852772e3b89f19e85d7a5dc07f032b2af21",
+      "error_count": 0,
+      "raw_path": "results/raw/paper/exp4/trials.csv",
+      "raw_sha256": "8cd4d29af461d89969d8c0d294018a541fe7ad7cc25a498c2cff5d4c8d0fac03",
+      "raw_trial_count": 4800,
+      "sanity_sha256": "3aefcd53566d4a0cd4a470f6e949945d0668d9b73818f714a3db4dcffc88f048",
+      "warning_count": 1
+    }
+  },
+  "figures": {
+    "Fig1_Formation": {
+      "pdf_sha256": "276303bdd62936f7c41cae5980675e4bcadd1b33de754e88310a0c028109299c",
+      "png_sha256": "9fd8871465cda0f990ac9506df49a4307cf22c31ce2ffd16ae183d9baaa613bf",
+      "vector_pdf": true
+    },
+    "Fig2_Cross_Layer_Coordination": {
+      "pdf_sha256": "7daf3aaa9f296cff98d3a1c430097f6af071a6b3eba116629d6d1b43d8524116",
+      "png_sha256": "fd9aff61b02a713444580e14ab8f08beda0be41cb7482dd2576605544bf20337",
+      "vector_pdf": true
+    },
+    "Fig3_Business_Elasticity": {
+      "pdf_sha256": "c034793bd8944ed603b3e6dc84a730d537ff6a5f7cad1da3b775fe43a0c114c3",
+      "png_sha256": "5a49c732fdde04b350e8628561c17736bd494478d0b8fbeb221a4892d6666969",
+      "vector_pdf": true
+    },
+    "Fig4_Failure_Recovery": {
+      "pdf_sha256": "8a7f754c7edd437008fbf6133c32b2bce859802c21b4b9da5872f5890463184c",
+      "png_sha256": "e1ebd5d23d3f870587b9281e4ffd4e8a4712be3021e365c7b4586b89d253bf70",
+      "vector_pdf": true
+    }
+  },
+  "main_panel_count": 9,
+  "paper_raw_trial_count": 16440
+}

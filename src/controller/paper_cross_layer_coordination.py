@@ -308,25 +308,29 @@ def _local_layer_loss(state: CrossLayerTaskState, layer: str) -> float:
     edges = tuple(state.metadata.get("paper_conflicted_edge_ids", ()))
     if not edges:
         return 0.0
-    total = 0.0
+    edge_losses = []
     for edge_id in edges:
         if layer == "application":
             application = state.application[edge_id]
             desired = state.constraints[edge_id].desired_rate_mbps
-            total += max(0.0, desired - application.required_rate_mbps) / max(desired, 1e-9)
+            loss = max(0.0, desired - application.required_rate_mbps) / max(desired, 1e-9)
         elif layer == "transport":
             transport = state.transport[edge_id]
             capacity = transport.admissible_capacity_mbps or transport.send_rate_mbps
-            total += max(0.0, transport.send_rate_mbps - capacity) / max(capacity, 1e-9)
+            loss = max(0.0, transport.send_rate_mbps - capacity) / max(capacity, 1e-9)
         elif layer == "network":
             network = state.network[edge_id]
-            total += 2.0 * max(0.0, network.utilization - 0.55)
-            total += network.queue_occupancy
+            loss = 2.0 * max(0.0, network.utilization - 0.55)
+            loss += network.queue_occupancy
         else:
             physical = state.physical[edge_id]
-            total += max(0.0, physical.resource_utilization - 0.50)
-            total += 2.0 * max(0.0, 0.85 - physical.signal_quality)
-    return total / len(edges)
+            loss = max(0.0, physical.resource_utilization - 0.50)
+            loss += 2.0 * max(0.0, 0.85 - physical.signal_quality)
+        edge_losses.append(loss)
+    # Independent optimization is local across layers, not permissive across
+    # flows: each layer protects its worst local flow without seeing another
+    # layer's state or performing cross-layer arbitration.
+    return max(edge_losses)
 
 
 def _pair_loss(state: CrossLayerTaskState, left: str, right: str) -> float:

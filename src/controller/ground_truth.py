@@ -35,20 +35,6 @@ class GroundTruthResult:
         return len(self.evaluated_combinations)
 
 
-@dataclass(frozen=True)
-class PaperFeasibilityOracleResult:
-    """Method-independent exact label for the bounded paper action space."""
-
-    feasible: bool
-    feasible_combinations: tuple[tuple[str, ...], ...]
-    best_feasible_combination: tuple[str, ...]
-    evaluated_combinations: tuple[EvaluatedCombination, ...]
-
-    @property
-    def candidate_combinations(self) -> int:
-        return len(self.evaluated_combinations)
-
-
 class GroundTruthSolver:
     """Exhaustive method-independent oracle for the small proposal pools.
 
@@ -122,59 +108,6 @@ class GroundTruthSolver:
             evaluated_combinations=tuple(evaluated),
             local_proposal_feasibility=local_feasibility,
         )
-
-
-def solve_global_layer_oracle(
-    state: CrossLayerTaskState,
-    proposals: tuple[LayerProposal, ...],
-) -> PaperFeasibilityOracleResult:
-    """Exhaustively label one shared global-action pool.
-
-    Paper Exp.2 deliberately bounds the action space to three global policies
-    per layer.  This oracle has no comparison-method input and is executed
-    before method timing; it is used only for conditional metric labels.
-    """
-
-    groups: dict[str, list[LayerProposal]] = {}
-    for proposal in proposals:
-        groups.setdefault(proposal.layer, []).append(proposal)
-    required = {"application", "transport", "network", "physical"}
-    if set(groups) != required:
-        raise ValueError(
-            f"paper oracle layers are {sorted(groups)}, expected {sorted(required)}"
-        )
-    ordered_groups = tuple(
-        tuple(sorted(groups[layer], key=lambda item: item.proposal_id))
-        for layer in sorted(required)
-    )
-    evaluated: list[EvaluatedCombination] = []
-    feasible_ids: list[tuple[str, ...]] = []
-    for raw_combination in product(*ordered_groups):
-        combination = tuple(raw_combination)
-        result = evaluate_cross_layer_combination(state, combination)
-        ids = tuple(item.proposal_id for item in combination)
-        objective = combination_objective(result, combination)
-        evaluated.append(
-            EvaluatedCombination(
-                proposal_ids=ids,
-                feasible=result.feasible,
-                violations=result.violations,
-                objective=objective,
-            )
-        )
-        if result.feasible:
-            feasible_ids.append(ids)
-    best = min(
-        (item for item in evaluated if item.feasible),
-        key=lambda item: (item.objective, item.proposal_ids),
-        default=None,
-    )
-    return PaperFeasibilityOracleResult(
-        feasible=bool(feasible_ids),
-        feasible_combinations=tuple(feasible_ids),
-        best_feasible_combination=(best.proposal_ids if best is not None else ()),
-        evaluated_combinations=tuple(evaluated),
-    )
 
 
 def proposal_groups(

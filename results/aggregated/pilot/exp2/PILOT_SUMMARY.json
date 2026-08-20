@@ -40,7 +40,7 @@
       "feasible_solution_rate_percent": 58.064516129032256,
       "qos_satisfaction_rate_percent": 58.064516129032256,
       "safe_rejection_rate_percent": 0.0,
-      "p95_resolution_latency_ms": 3.1920000000000006
+      "p95_resolution_latency_ms": 3.3120000000000003
     }
   ],
   "findings": []

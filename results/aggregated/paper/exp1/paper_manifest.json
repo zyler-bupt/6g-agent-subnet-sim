@@ -1,0 +1,20 @@
+{
+  "aggregate_sha256": "3485d9007d504aed3ac52a92461deb65cab3e3b72524de4bc44a7143a68735f9",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "experiment": "exp1",
+  "methods": [
+    "proposed",
+    "proposed_without_batch",
+    "cspf",
+    "a1_agent_embedded"
+  ],
+  "mode": "paper",
+  "paired_instance_count": 1110,
+  "raw_sha256": "6efea732586d9a7bad97a8d9ad15108f7dc6cc817f7a60e1070531ff1b6e8bbd",
+  "raw_trial_count": 4440,
+  "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "topology_seed_count": 30,
+  "warning_count": 0,
+  "warning_explanations": []
+}

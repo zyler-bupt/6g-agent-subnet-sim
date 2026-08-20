@@ -1,0 +1,18 @@
+[
+  {
+    "code": "ALWAYS_SUCCESS",
+    "experiment": "exp3",
+    "level": "WARNING",
+    "message": "full_rebuild succeeds for every sampled affected_scope trial",
+    "method_id": "full_rebuild",
+    "series": "affected_scope"
+  },
+  {
+    "code": "ALWAYS_SUCCESS",
+    "experiment": "exp3",
+    "level": "WARNING",
+    "message": "netren succeeds for every sampled affected_scope trial",
+    "method_id": "netren",
+    "series": "affected_scope"
+  }
+]

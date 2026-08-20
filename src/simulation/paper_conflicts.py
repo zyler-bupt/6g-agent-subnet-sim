@@ -5,12 +5,14 @@ import json
 import random
 from dataclasses import dataclass
 from enum import Enum
+from itertools import product
 from typing import Any
 
-from src.controller.ground_truth import (
-    PaperFeasibilityOracleResult,
-    solve_global_layer_oracle,
+from src.controller.feasibility import (
+    combination_objective,
+    evaluate_cross_layer_combination,
 )
+from src.controller.ground_truth import EvaluatedCombination
 from src.core.cross_layer import (
     ApplicationLayerState,
     CrossLayerTaskState,
@@ -42,6 +44,20 @@ _TYPE_CYCLE = (
     *(PaperConflictType.NETWORK_PHYSICAL for _ in range(4)),
     *(PaperConflictType.CASCADED for _ in range(7)),
 )
+
+
+@dataclass(frozen=True)
+class PaperFeasibilityOracleResult:
+    """Method-independent exact label for the bounded paper action space."""
+
+    feasible: bool
+    feasible_combinations: tuple[tuple[str, ...], ...]
+    best_feasible_combination: tuple[str, ...]
+    evaluated_combinations: tuple[EvaluatedCombination, ...]
+
+    @property
+    def candidate_combinations(self) -> int:
+        return len(self.evaluated_combinations)
 
 
 @dataclass(frozen=True)
@@ -79,7 +95,45 @@ def solve_paper_feasibility_oracle(
 ) -> PaperFeasibilityOracleResult:
     """Return the exact label without accepting or observing a method name."""
 
-    return solve_global_layer_oracle(state, proposals)
+    groups: dict[str, list[LayerProposal]] = {}
+    for proposal in proposals:
+        groups.setdefault(proposal.layer, []).append(proposal)
+    required = {"application", "transport", "network", "physical"}
+    if set(groups) != required:
+        raise ValueError(
+            f"paper oracle layers are {sorted(groups)}, expected {sorted(required)}"
+        )
+    ordered_groups = tuple(
+        tuple(sorted(groups[layer], key=lambda item: item.proposal_id))
+        for layer in sorted(required)
+    )
+    evaluated: list[EvaluatedCombination] = []
+    feasible_ids: list[tuple[str, ...]] = []
+    for raw_combination in product(*ordered_groups):
+        combination = tuple(raw_combination)
+        result = evaluate_cross_layer_combination(state, combination)
+        ids = tuple(item.proposal_id for item in combination)
+        evaluated.append(
+            EvaluatedCombination(
+                proposal_ids=ids,
+                feasible=result.feasible,
+                violations=result.violations,
+                objective=combination_objective(result, combination),
+            )
+        )
+        if result.feasible:
+            feasible_ids.append(ids)
+    best = min(
+        (item for item in evaluated if item.feasible),
+        key=lambda item: (item.objective, item.proposal_ids),
+        default=None,
+    )
+    return PaperFeasibilityOracleResult(
+        feasible=bool(feasible_ids),
+        feasible_combinations=tuple(feasible_ids),
+        best_feasible_combination=(best.proposal_ids if best is not None else ()),
+        evaluated_combinations=tuple(evaluated),
+    )
 
 
 def generate_conflict_snapshot(

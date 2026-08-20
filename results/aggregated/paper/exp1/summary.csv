@@ -1,0 +1,53 @@
+experiment,mode,series,method_id,method_label,x_name,x_value,metric,mean,p50,p95,ci_lower,ci_upper,sample_count,cluster_count,bootstrap_iterations,numerator,denominator
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,5.0,success_rate_percent,68.66666666666667,100.0,100.0,61.333333333333336,76.0,150,30,5000,103,150
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,10.0,success_rate_percent,15.333333333333334,0.0,100.0,10.0,21.333333333333332,150,30,5000,23,150
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,15.0,success_rate_percent,5.333333333333333,0.0,54.999999999998295,2.0,9.333333333333334,150,30,5000,8,150
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,20.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
+exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,30.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,5.0,success_rate_percent,97.33333333333333,100.0,100.0,94.66666666666667,99.33333333333333,150,30,5000,146,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,10.0,success_rate_percent,72.0,100.0,100.0,65.33333333333333,78.66666666666667,150,30,5000,108,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,15.0,success_rate_percent,53.333333333333336,100.0,100.0,44.666666666666664,61.333333333333336,150,30,5000,80,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,20.0,success_rate_percent,26.666666666666668,0.0,100.0,19.333333333333332,34.666666666666664,150,30,5000,40,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,30.0,success_rate_percent,6.0,0.0,100.0,1.983333333333339,11.333333333333334,150,30,5000,9,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,5.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,10.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,15.0,success_rate_percent,98.66666666666667,100.0,100.0,96.66666666666667,100.0,150,30,5000,148,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,20.0,success_rate_percent,96.0,100.0,100.0,92.66666666666667,98.66666666666667,150,30,5000,144,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,30.0,success_rate_percent,94.0,100.0,100.0,88.66666666666667,98.0,150,30,5000,141,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,5.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,10.0,success_rate_percent,96.0,100.0,100.0,92.66666666666667,98.66666666666667,150,30,5000,144,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,15.0,success_rate_percent,92.66666666666667,100.0,100.0,88.66666666666667,96.66666666666667,150,30,5000,139,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,20.0,success_rate_percent,82.0,100.0,100.0,76.66666666666667,87.33333333333333,150,30,5000,123,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,30.0,success_rate_percent,62.666666666666664,100.0,100.0,54.0,71.33333333333333,150,30,5000,94,150
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,8.0,formation_latency_ms,94.98334220594445,94.39652329933334,117.73562947488332,89.68268118094636,100.11178870943027,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,12.0,formation_latency_ms,147.64857958411113,148.13662646850003,184.57023659766676,140.43203054256307,155.0494689769484,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,16.0,formation_latency_ms,203.0900857729556,202.7075494770001,231.8414153413998,195.91287328305114,210.38897590987693,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,20.0,formation_latency_ms,242.35597867932228,246.20597516250012,272.45388416705043,234.4173236333445,250.21423070395343,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,24.0,formation_latency_ms,292.37607043497786,290.89751536316646,334.35324245494985,283.1573039566804,301.5977189164253,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,28.0,formation_latency_ms,341.6511417634668,339.9925138891674,389.6652223398832,330.69817957719624,352.43903187209077,30,30,5000,,
+exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,32.0,formation_latency_ms,396.7277719836889,387.1173062328337,452.24391145788326,384.4750800519704,408.86559688263117,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,8.0,formation_latency_ms,43.588611448166674,42.94563444666669,50.32389209341669,42.28196506933723,44.929573012361956,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,12.0,formation_latency_ms,63.98961873448888,63.63952567616667,70.88913461216666,62.232002320875274,65.75881414587748,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,16.0,formation_latency_ms,87.32149525228893,87.44619341900005,94.14050379853336,85.37961631771779,89.15478753485532,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,20.0,formation_latency_ms,104.78355452525557,104.99371714950004,112.78294733495005,102.8211917558453,106.67086533061364,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,24.0,formation_latency_ms,125.09961589513338,124.49095437916674,138.4497774092334,122.7123428798909,127.59748252943287,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,28.0,formation_latency_ms,146.86353019004454,145.61768353983342,158.08625161020012,144.20925533810228,149.42252206037202,30,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,32.0,formation_latency_ms,168.10640349060014,166.80495623950014,184.2100728701335,165.18489532408626,171.2993583269826,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,8.0,formation_latency_ms,14.297956746766667,14.30772203,15.647922149749997,14.013683203433335,14.582932245323333,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,12.0,formation_latency_ms,18.037850555544445,17.801782128,19.3523923835,17.72970704040167,18.353295201603615,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,16.0,formation_latency_ms,21.9959554829,22.066824737500006,23.357013573500005,21.694721143546673,22.283663083183338,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,20.0,formation_latency_ms,24.622555377277788,24.654765362500015,25.64564045325001,24.304065543730285,24.9366247766389,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,24.0,formation_latency_ms,27.926577759533345,27.86455503500001,29.491379692000006,27.59722327347335,28.262789979857512,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,28.0,formation_latency_ms,30.986269348055576,30.921403244000018,33.17277751450001,30.486734454616123,31.51606894532973,30,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,32.0,formation_latency_ms,34.025325622311136,33.95865022250002,36.36531076125002,33.578458859269745,34.485796540035295,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,formation_latency_ms,25.455554082211105,25.88980193416667,33.689352883699996,23.85806612595222,27.135176446812494,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,formation_latency_ms,36.12207626256667,34.64604059916667,45.416212842816655,34.044357208872505,38.168784656770285,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,formation_latency_ms,43.1880229075,42.162377264666674,50.43639866430001,41.64930431847472,44.77025712723112,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,formation_latency_ms,50.9848818532778,51.161651231833346,58.96873849276667,49.15763129138529,52.77910760595502,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,formation_latency_ms,59.27353034044447,58.58931398083335,65.96575038816667,57.76924353783751,60.78703374574559,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,formation_latency_ms,65.66369550465558,65.57073594866668,73.41466080575,63.86473397555613,67.51491706861114,30,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,formation_latency_ms,73.48385205200002,74.05004196383337,81.58224747435003,71.64672209615976,75.28876256826838,30,30,5000,,

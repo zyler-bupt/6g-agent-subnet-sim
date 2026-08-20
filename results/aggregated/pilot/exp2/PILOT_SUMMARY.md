@@ -15,7 +15,7 @@
 | Proposed | 100.0 | 100.0 | 100.000 | 4.168 |
 | SANet-DW* | 93.5 | 93.5 | 0.000 | 4.204 |
 | Adjacent-Layer | 79.0 | 79.0 | 0.000 | 3.510 |
-| Independent | 58.1 | 58.1 | 0.000 | 3.192 |
+| Independent | 58.1 | 58.1 | 0.000 | 3.312 |
 
 ## Sanity Findings
 

@@ -1,0 +1,23 @@
+{
+  "aggregate_sha256": "6645fcaaf5d4ca653c6fd12dcc08c809c5f3d4791be55cdaa56e0eaae2c42a11",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "experiment": "exp3",
+  "methods": [
+    "proposed",
+    "netren",
+    "local_only",
+    "full_rebuild"
+  ],
+  "mode": "paper",
+  "paired_instance_count": 750,
+  "raw_sha256": "a59f8a91a7c773d2347185d99b9f0b68a5db56b70f0a5455632929165ae24df4",
+  "raw_trial_count": 3000,
+  "sanity_sha256": "d474c47645e25603c545a7e7d1ecfea751fe264c1c629c792522895fc02020b9",
+  "topology_seed_count": 30,
+  "warning_count": 2,
+  "warning_explanations": [
+    "full_rebuild succeeds for every sampled affected_scope trial",
+    "netren succeeds for every sampled affected_scope trial"
+  ]
+}

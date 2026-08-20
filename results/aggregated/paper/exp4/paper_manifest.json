@@ -1,0 +1,22 @@
+{
+  "aggregate_sha256": "23e2746ae5b8e0b33192499979849852772e3b89f19e85d7a5dc07f032b2af21",
+  "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
+  "error_count": 0,
+  "experiment": "exp4",
+  "methods": [
+    "proposed",
+    "netkeeper",
+    "cspf",
+    "full_rebuild"
+  ],
+  "mode": "paper",
+  "paired_instance_count": 1200,
+  "raw_sha256": "8cd4d29af461d89969d8c0d294018a541fe7ad7cc25a498c2cff5d4c8d0fac03",
+  "raw_trial_count": 4800,
+  "sanity_sha256": "3aefcd53566d4a0cd4a470f6e949945d0668d9b73818f714a3db4dcffc88f048",
+  "topology_seed_count": 30,
+  "warning_count": 1,
+  "warning_explanations": [
+    "full_rebuild succeeds for every sampled capacity_stress trial"
+  ]
+}
