@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results"
 FIGURE_STEMS = (
     "Fig1_Formation",
-    "Fig2_Cross_Layer_Coordination",
-    "Fig3_Business_Elasticity",
-    "Fig4_Failure_Recovery",
+    "Fig2_CrossLayer",
+    "Fig3_Elasticity",
+    "Fig4_Recovery",
 )
 
 
@@ -35,7 +35,7 @@ class PaperResultIntegrityTests(unittest.TestCase):
                     self.assertEqual(reproduced.read_bytes(), expected.read_bytes())
 
     def test_every_paper_instance_has_the_complete_method_set(self) -> None:
-        expected_rows = {"exp1": 4440, "exp2": 4200, "exp3": 3000, "exp4": 4800}
+        expected_rows = {"exp1": 7800, "exp2": 4200, "exp3": 3000, "exp4": 4800}
         for experiment, row_count in expected_rows.items():
             with self.subTest(experiment=experiment):
                 raw = RESULTS / "raw" / "paper" / experiment / "trials.csv"
@@ -53,22 +53,24 @@ class PaperResultIntegrityTests(unittest.TestCase):
                     )
                 )
 
-    def test_four_composite_figures_are_vector_pdfs_with_nine_total_panels(self) -> None:
+    def test_four_composite_figures_are_vector_pdfs_with_eight_total_panels(self) -> None:
         expected_panels = {
             "Fig1_Formation": 2,
-            "Fig2_Cross_Layer_Coordination": 2,
-            "Fig3_Business_Elasticity": 2,
-            "Fig4_Failure_Recovery": 3,
+            "Fig2_CrossLayer": 2,
+            "Fig3_Elasticity": 2,
+            "Fig4_Recovery": 2,
         }
-        self.assertEqual(sum(expected_panels.values()), 9)
+        self.assertEqual(sum(expected_panels.values()), 8)
         for stem in FIGURE_STEMS:
             with self.subTest(figure=stem):
-                pdf = RESULTS / "paper_figures" / f"{stem}.pdf"
-                png = RESULTS / "paper_figures" / f"{stem}.png"
+                pdf = RESULTS / "paper_figures_final" / f"{stem}.pdf"
+                png = RESULTS / "paper_figures_final" / f"{stem}.png"
+                source = RESULTS / "paper_figures_final" / f"{stem}.csv"
                 payload = pdf.read_bytes()
                 self.assertTrue(payload.startswith(b"%PDF"))
                 self.assertNotIn(b"/Subtype /Image", payload)
                 self.assertGreater(png.stat().st_size, 10_000)
+                self.assertGreater(source.stat().st_size, 100)
 
 
 if __name__ == "__main__":

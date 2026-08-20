@@ -23,7 +23,7 @@
       "method_label": "SANet-DW*",
       "feasible_solution_rate_percent": 93.54838709677419,
       "qos_satisfaction_rate_percent": 93.54838709677419,
-      "safe_rejection_rate_percent": 0.0,
+      "safe_rejection_rate_percent": 100.0,
       "p95_resolution_latency_ms": 4.203749999999999
     },
     {
@@ -31,7 +31,7 @@
       "method_label": "Adjacent-Layer",
       "feasible_solution_rate_percent": 79.03225806451613,
       "qos_satisfaction_rate_percent": 79.03225806451613,
-      "safe_rejection_rate_percent": 0.0,
+      "safe_rejection_rate_percent": 100.0,
       "p95_resolution_latency_ms": 3.5100000000000002
     },
     {
@@ -39,7 +39,7 @@
       "method_label": "Independent",
       "feasible_solution_rate_percent": 58.064516129032256,
       "qos_satisfaction_rate_percent": 58.064516129032256,
-      "safe_rejection_rate_percent": 0.0,
+      "safe_rejection_rate_percent": 100.0,
       "p95_resolution_latency_ms": 3.3120000000000003
     }
   ],

@@ -1,7 +1,7 @@
 {
   "aggregate_path": "aggregated/pilot/exp4/summary.csv",
-  "aggregate_sha256": "17268712f59b00fb4a580ea3555aa91e72709349ceee65697cd1ffdef36ed64c",
-  "completed_at_utc": "2026-08-20T11:13:59.042885+00:00",
+  "aggregate_sha256": "5fc8199447f734fc93aef90e5f5a70f28de10785aa30ac88038561ea35b71146",
+  "completed_at_utc": "2026-08-20T17:01:26.508882+00:00",
   "config_path": "configs/paper_experiments.yaml",
   "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
   "error_count": 0,
@@ -19,8 +19,51 @@
   "mode": "pilot",
   "paired_instance_count": 80,
   "raw_path": "raw/pilot/exp4/trials.csv",
-  "raw_sha256": "4798a062d8bbd8225a3bb6b93d1570cbe8b1cba721edda66dbec16b80e5a385f",
+  "raw_sha256": "29f1f686a127aebf73daa6617460e176c4ad2d18e9a0f42258986608053b5b2f",
   "raw_trial_count": 320,
+  "runtime_parameters": {
+    "configured_mode_spec": {
+      "events_per_seed": 2,
+      "rate_events_per_seed": 2,
+      "topology_seeds": 5
+    },
+    "event_ids": [
+      0,
+      1
+    ],
+    "experiment": "exp4",
+    "failure_severity_percent": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      100.0
+    ],
+    "failure_types": [
+      "agent_failure",
+      "capacity_degradation",
+      "link_failure"
+    ],
+    "methods": [
+      "cspf",
+      "full_rebuild",
+      "netkeeper",
+      "proposed"
+    ],
+    "mode": "pilot",
+    "series": [
+      "capacity_stress",
+      "failure_type"
+    ],
+    "topology_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
   "sanity_path": "aggregated/pilot/exp4/sanity.json",
   "sanity_sha256": "1769234b642e1493cc6cfa541d6433222a793c489c9ce24ab3da62c2905d7f3f",
   "seeds": [

@@ -9,20 +9,20 @@
 
 ## Failure Type Results
 
-| Failure Type | Method | Mean Successful Latency (ms) | Success Rate (%) | Rule Change Ratio (%) |
+| Failure Type | Method | Mean Successful Latency (ms) | Success Rate (%) | Modification Scope (%) |
 |---|---|---:|---:|---:|
-| agent_failure | Proposed | 7.219 | 100.0 | 27.7 |
-| agent_failure | NetKeeper* | N/A | 0.0 | 0.0 |
-| agent_failure | CSPF | N/A | 0.0 | 0.0 |
-| agent_failure | Full-Rebuild | 17.133 | 100.0 | 115.8 |
-| link_failure | Proposed | 4.909 | 100.0 | 9.0 |
-| link_failure | NetKeeper* | 4.602 | 100.0 | 9.7 |
-| link_failure | CSPF | 4.242 | 100.0 | 9.7 |
-| link_failure | Full-Rebuild | 15.948 | 100.0 | 101.6 |
-| capacity_degradation | Proposed | 6.111 | 100.0 | 17.7 |
-| capacity_degradation | NetKeeper* | 4.580 | 100.0 | 9.2 |
-| capacity_degradation | CSPF | 5.189 | 50.0 | 8.3 |
-| capacity_degradation | Full-Rebuild | 15.923 | 100.0 | 101.3 |
+| agent_failure | Proposed | 7.219 | 100.0 | 20.830 |
+| agent_failure | NetKeeper* | N/A | 0.0 | N/A |
+| agent_failure | CSPF | N/A | 0.0 | N/A |
+| agent_failure | Full-Rebuild | 17.133 | 100.0 | 100.000 |
+| link_failure | Proposed | 4.909 | 100.0 | 7.276 |
+| link_failure | NetKeeper* | 4.602 | 100.0 | 7.135 |
+| link_failure | CSPF | 4.242 | 100.0 | 7.135 |
+| link_failure | Full-Rebuild | 15.948 | 100.0 | 100.000 |
+| capacity_degradation | Proposed | 6.111 | 100.0 | 12.437 |
+| capacity_degradation | NetKeeper* | 4.580 | 100.0 | 6.709 |
+| capacity_degradation | CSPF | 5.189 | 50.0 | 12.109 |
+| capacity_degradation | Full-Rebuild | 15.923 | 100.0 | 100.000 |
 
 ## Capacity Stress
 
@@ -40,4 +40,4 @@
 
 - Raw CSV: `results/raw/pilot/exp4/trials.csv`
 - Aggregate CSV: `results/aggregated/pilot/exp4/summary.csv`
-- Figure: `results/paper_figures/Fig4_Failure_Recovery.{pdf,png}`
+- Figure: `results/paper_figures_final/Fig4_Recovery.{pdf,png,csv}`

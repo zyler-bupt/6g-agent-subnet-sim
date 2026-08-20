@@ -5,71 +5,75 @@
   "experiments": {
     "exp1": {
       "aggregate_path": "results/aggregated/paper/exp1/summary.csv",
-      "aggregate_row_count": 52,
-      "aggregate_sha256": "3485d9007d504aed3ac52a92461deb65cab3e3b72524de4bc44a7143a68735f9",
+      "aggregate_row_count": 108,
+      "aggregate_sha256": "db25e7b31aae5d7231c4dddf9ac54e46a57e59a21d3e20ead2165e16f3d70260",
       "error_count": 0,
       "raw_path": "results/raw/paper/exp1/trials.csv",
-      "raw_sha256": "6efea732586d9a7bad97a8d9ad15108f7dc6cc817f7a60e1070531ff1b6e8bbd",
-      "raw_trial_count": 4440,
+      "raw_sha256": "afc454ca9ab437ffe2903905ccd10299abf49598fa64e34613635c0df129b3b4",
+      "raw_trial_count": 7800,
       "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
       "warning_count": 0
     },
     "exp2": {
       "aggregate_path": "results/aggregated/paper/exp2/summary.csv",
       "aggregate_row_count": 80,
-      "aggregate_sha256": "b1e669eb1b94b284b22f3f66a59dc983d89aab4d1dcb88466218c784d5ff4ee7",
+      "aggregate_sha256": "dfc0e0e58be1a4af97db9e3cb87c156433314385a433f342602685764622db50",
       "error_count": 0,
       "raw_path": "results/raw/paper/exp2/trials.csv",
-      "raw_sha256": "aac1a2b6776c4b60b2bee05e370d2a5ec20186ef8473b7ee7ec7bdecb90c7848",
+      "raw_sha256": "4b21850b37e18e8d6ed7d3357431f44bbbab2eec9a94032eaf9fbec62af5df11",
       "raw_trial_count": 4200,
       "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
       "warning_count": 0
     },
     "exp3": {
       "aggregate_path": "results/aggregated/paper/exp3/summary.csv",
-      "aggregate_row_count": 100,
-      "aggregate_sha256": "6645fcaaf5d4ca653c6fd12dcc08c809c5f3d4791be55cdaa56e0eaae2c42a11",
+      "aggregate_row_count": 298,
+      "aggregate_sha256": "c5d96e5548c37ba278100a431d1bfdedb12602ce0a747b67b4144905c7a6799f",
       "error_count": 0,
       "raw_path": "results/raw/paper/exp3/trials.csv",
-      "raw_sha256": "a59f8a91a7c773d2347185d99b9f0b68a5db56b70f0a5455632929165ae24df4",
+      "raw_sha256": "569c890d5adb935a8b3b51ebbe947d5cd3dad59aa00ae6a6812509264c5cf191",
       "raw_trial_count": 3000,
-      "sanity_sha256": "d474c47645e25603c545a7e7d1ecfea751fe264c1c629c792522895fc02020b9",
+      "sanity_sha256": "6a331eca06f56cb7df90f892a477713cb628bdf26f1c28f8ef9bddb45d5aaff6",
       "warning_count": 2
     },
     "exp4": {
       "aggregate_path": "results/aggregated/paper/exp4/summary.csv",
-      "aggregate_row_count": 190,
-      "aggregate_sha256": "23e2746ae5b8e0b33192499979849852772e3b89f19e85d7a5dc07f032b2af21",
+      "aggregate_row_count": 220,
+      "aggregate_sha256": "0b2e718b0ee98ce894ae24236c424ac5b9331718d841b9f4400ab80bf0faa6b0",
       "error_count": 0,
       "raw_path": "results/raw/paper/exp4/trials.csv",
-      "raw_sha256": "8cd4d29af461d89969d8c0d294018a541fe7ad7cc25a498c2cff5d4c8d0fac03",
+      "raw_sha256": "0e71f274bb6310550e3b6343bb86a241147f833f43b7b39a0c57faae8c3d6f9f",
       "raw_trial_count": 4800,
-      "sanity_sha256": "3aefcd53566d4a0cd4a470f6e949945d0668d9b73818f714a3db4dcffc88f048",
+      "sanity_sha256": "f21613747a8d11ce41f207d34c898d0fcf48c65416a1e8714b9be50262de27a8",
       "warning_count": 1
     }
   },
   "figures": {
     "Fig1_Formation": {
-      "pdf_sha256": "276303bdd62936f7c41cae5980675e4bcadd1b33de754e88310a0c028109299c",
-      "png_sha256": "9fd8871465cda0f990ac9506df49a4307cf22c31ce2ffd16ae183d9baaa613bf",
+      "csv_sha256": "b9bf384b72da1915c878e9a0c8f72a5dc4decb53f11cec6b5272f9ff77811cde",
+      "pdf_sha256": "bbb1fe32246d9b0a59a9d44a68a680b860e0ce03768af5ef88c74259079e3591",
+      "png_sha256": "fdc1b508565cc81acc1bfcce0778f90a61d795355a206685e0cf73cd53cc0313",
       "vector_pdf": true
     },
-    "Fig2_Cross_Layer_Coordination": {
-      "pdf_sha256": "7daf3aaa9f296cff98d3a1c430097f6af071a6b3eba116629d6d1b43d8524116",
-      "png_sha256": "fd9aff61b02a713444580e14ab8f08beda0be41cb7482dd2576605544bf20337",
+    "Fig2_CrossLayer": {
+      "csv_sha256": "2ce38572ff71d578cef7233778a77dc2a742255ec2bd092ce163cbaca4901a85",
+      "pdf_sha256": "30cc5a30afa53d23684b58895314a6fb0a28543c0ee12ef9d6f5331f8b1a11a7",
+      "png_sha256": "fdfaa1de83cd7044fac594ab0fca9d744949d76a1eb0b316e4f591b30e54330f",
       "vector_pdf": true
     },
-    "Fig3_Business_Elasticity": {
-      "pdf_sha256": "c034793bd8944ed603b3e6dc84a730d537ff6a5f7cad1da3b775fe43a0c114c3",
-      "png_sha256": "5a49c732fdde04b350e8628561c17736bd494478d0b8fbeb221a4892d6666969",
+    "Fig3_Elasticity": {
+      "csv_sha256": "a2eb398d7dfa66254d608450f904a23bf6827882d6237c5d05af5ece134199e5",
+      "pdf_sha256": "380a110b60c792bbf9d6d1a71ab8f9142dc232ebeb0ed2acf06751e578bdbba3",
+      "png_sha256": "fda41665354712d51d9e188871210810f5f49b3e0ce3308c61f2e26a061166ed",
       "vector_pdf": true
     },
-    "Fig4_Failure_Recovery": {
-      "pdf_sha256": "8a7f754c7edd437008fbf6133c32b2bce859802c21b4b9da5872f5890463184c",
-      "png_sha256": "e1ebd5d23d3f870587b9281e4ffd4e8a4712be3021e365c7b4586b89d253bf70",
+    "Fig4_Recovery": {
+      "csv_sha256": "69819af2ab377601945f450f4385b3ae583cad0a264825d97f50e1c8afb95931",
+      "pdf_sha256": "5c5bed0779e65c7ffb906b2f059040cf975f968f40b70b4924497e79ff37d473",
+      "png_sha256": "2e956b5e667cd4fac0d81c03b41c53b41200df6187e3a5d892b3a419c1c97d52",
       "vector_pdf": true
     }
   },
-  "main_panel_count": 9,
-  "paper_raw_trial_count": 16440
+  "main_panel_count": 8,
+  "paper_raw_trial_count": 19800
 }

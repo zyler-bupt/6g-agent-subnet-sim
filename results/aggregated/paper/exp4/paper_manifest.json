@@ -1,19 +1,95 @@
 {
-  "aggregate_sha256": "23e2746ae5b8e0b33192499979849852772e3b89f19e85d7a5dc07f032b2af21",
+  "aggregate_path": "aggregated/paper/exp4/summary.csv",
+  "aggregate_sha256": "0b2e718b0ee98ce894ae24236c424ac5b9331718d841b9f4400ab80bf0faa6b0",
+  "completed_at_utc": "2026-08-20T17:12:06.778140+00:00",
+  "config_path": "configs/paper_experiments.yaml",
   "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
   "error_count": 0,
   "experiment": "exp4",
   "methods": [
-    "proposed",
-    "netkeeper",
     "cspf",
-    "full_rebuild"
+    "full_rebuild",
+    "netkeeper",
+    "proposed"
   ],
   "mode": "paper",
   "paired_instance_count": 1200,
-  "raw_sha256": "8cd4d29af461d89969d8c0d294018a541fe7ad7cc25a498c2cff5d4c8d0fac03",
+  "raw_path": "raw/paper/exp4/trials.csv",
+  "raw_sha256": "0e71f274bb6310550e3b6343bb86a241147f833f43b7b39a0c57faae8c3d6f9f",
   "raw_trial_count": 4800,
-  "sanity_sha256": "3aefcd53566d4a0cd4a470f6e949945d0668d9b73818f714a3db4dcffc88f048",
+  "runtime_parameters": {
+    "configured_mode_spec": {
+      "events_per_seed": 1,
+      "rate_events_per_seed": 5,
+      "topology_seeds": 30
+    },
+    "event_ids": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "experiment": "exp4",
+    "failure_severity_percent": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      100.0
+    ],
+    "failure_types": [
+      "agent_failure",
+      "capacity_degradation",
+      "link_failure"
+    ],
+    "methods": [
+      "cspf",
+      "full_rebuild",
+      "netkeeper",
+      "proposed"
+    ],
+    "mode": "paper",
+    "series": [
+      "capacity_stress",
+      "failure_type"
+    ],
+    "topology_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ]
+  },
+  "sanity_path": "aggregated/paper/exp4/sanity.json",
+  "sanity_sha256": "f21613747a8d11ce41f207d34c898d0fcf48c65416a1e8714b9be50262de27a8",
   "topology_seed_count": 30,
   "warning_count": 1,
   "warning_explanations": [

@@ -19,7 +19,11 @@ from experiments.exp1_initial_formation import run_exp1
 from experiments.exp2_conflict import run_exp2
 from experiments.exp3_business_elasticity import run_exp3
 from experiments.exp4_failure import run_exp4
-from experiments.paper_protocol import EXPERIMENT_METHODS
+from experiments.paper_protocol import (
+    EXPERIMENT_METHODS,
+    load_and_validate_paper_config,
+    mode_spec,
+)
 from scripts.aggregate_results import aggregate_experiment
 from scripts.plot_final_paper_figures import plot_exp1, plot_exp2, plot_exp3, plot_exp4
 from scripts.sanity_check_results import check_results
@@ -34,9 +38,9 @@ _PLOTTERS = {
 }
 _FIGURE_STEMS = {
     "exp1": "Fig1_Formation",
-    "exp2": "Fig2_Cross_Layer_Coordination",
-    "exp3": "Fig3_Business_Elasticity",
-    "exp4": "Fig4_Failure_Recovery",
+    "exp2": "Fig2_CrossLayer",
+    "exp3": "Fig3_Elasticity",
+    "exp4": "Fig4_Recovery",
 }
 
 
@@ -64,6 +68,7 @@ def write_pilot_manifest(
     *,
     config_path: Path = Path("configs/paper_experiments.yaml"),
 ) -> Path:
+    load_and_validate_paper_config(config_path)
     raw_path = output_root / "raw" / "pilot" / experiment / "trials.csv"
     aggregate_path = output_root / "aggregated" / "pilot" / experiment / "summary.csv"
     sanity_path = output_root / "aggregated" / "pilot" / experiment / "sanity.json"
@@ -95,6 +100,7 @@ def write_pilot_manifest(
             for item in sanity
             if item.get("level") == "WARNING"
         ],
+        "runtime_parameters": _normalized_runtime_parameters(rows),
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     destination = output_root / "aggregated" / "pilot" / experiment / "pilot_manifest.json"
@@ -119,6 +125,14 @@ def validate_pilot_manifest(
         )
     if manifest.get("config_sha256") != current_config_hash:
         raise RuntimeError(f"pilot gate failed for {experiment}: config hash mismatch")
+    runtime = manifest.get("runtime_parameters")
+    requirements = _full_pilot_runtime_requirements(experiment)
+    if not isinstance(runtime, Mapping) or any(
+        runtime.get(field) != expected for field, expected in requirements.items()
+    ):
+        raise RuntimeError(
+            f"pilot gate failed for {experiment}: incomplete or reduced runtime grid"
+        )
     if int(manifest.get("error_count", -1)) != 0:
         raise RuntimeError(f"pilot gate failed for {experiment}: sanity errors exist")
     for field in ("raw_sha256", "aggregate_sha256", "sanity_sha256"):
@@ -126,11 +140,65 @@ def validate_pilot_manifest(
             raise RuntimeError(f"pilot gate failed for {experiment}: missing {field}")
 
 
+def _full_pilot_runtime_requirements(experiment: str) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "experiment": experiment,
+        "mode": "pilot",
+        "configured_mode_spec": asdict(mode_spec("pilot")),
+        "topology_seeds": [0, 1, 2, 3, 4],
+        "event_ids": [0, 1],
+        "methods": sorted(EXPERIMENT_METHODS[experiment]),
+    }
+    experiment_specific = {
+        "exp1": {
+            "series": ["state_churn", "task_size"],
+            "task_sizes": [8, 12, 16, 20, 24, 28, 32],
+            "background_churn_probability": 0.02,
+            "state_churn_percent": [0.0, 5.0, 10.0, 15.0, 20.0, 30.0],
+        },
+        "exp2": {
+            "series": ["conflict_density"],
+            "conflict_density_percent": [
+                0.0,
+                10.0,
+                20.0,
+                30.0,
+                40.0,
+                50.0,
+                60.0,
+            ],
+        },
+        "exp3": {
+            "series": ["affected_agents"],
+            "affected_scope_bucket_percent": [10, 20, 30, 40, 50],
+        },
+        "exp4": {
+            "series": ["capacity_stress", "failure_type"],
+            "failure_types": [
+                "agent_failure",
+                "capacity_degradation",
+                "link_failure",
+            ],
+            "failure_severity_percent": [
+                10.0,
+                20.0,
+                30.0,
+                40.0,
+                50.0,
+                100.0,
+            ],
+        },
+    }[experiment]
+    base.update(experiment_specific)
+    return base
+
+
 def validate_all_pilots(
     output_root: Path,
     *,
     config_path: Path = Path("configs/paper_experiments.yaml"),
 ) -> dict[str, dict[str, Any]]:
+    load_and_validate_paper_config(config_path)
     current_config_hash = sha256_file(config_path)
     manifests: dict[str, dict[str, Any]] = {}
     for experiment in ("exp1", "exp2", "exp3", "exp4"):
@@ -165,6 +233,7 @@ async def run_paper(
     bootstrap_iterations: int = 5000,
     replace_existing: bool = False,
 ) -> PaperRunResult:
+    load_and_validate_paper_config(config_path)
     selected = tuple(dict.fromkeys(experiments))
     unsupported = set(selected) - set(PAPER_ORDER)
     if unsupported or not selected:
@@ -208,25 +277,8 @@ async def run_paper(
             raise RuntimeError(
                 f"paper sanity failed for {experiment} with {errors} error(s)"
             )
-        _PLOTTERS[experiment](summary_path, output_root / "paper_figures")
-        manifest = {
-            "experiment": experiment,
-            "mode": "paper",
-            "config_sha256": sha256_file(config_path),
-            "raw_sha256": sha256_file(raw_path),
-            "aggregate_sha256": sha256_file(summary_path),
-            "sanity_sha256": sha256_file(sanity_path),
-            "methods": list(EXPERIMENT_METHODS[experiment]),
-            "raw_trial_count": len(rows),
-            "paired_instance_count": len({row.trial_id for row in rows}),
-            "topology_seed_count": len({row.seed for row in rows}),
-            "error_count": errors,
-            "warning_count": warnings,
-            "warning_explanations": [
-                item.message for item in findings if item.level == "WARNING"
-            ],
-        }
-        _write_json(aggregate_dir / "paper_manifest.json", manifest)
+        _PLOTTERS[experiment](summary_path, output_root / "paper_figures_final")
+        write_paper_manifest(output_root, experiment, config_path=config_path)
         total_raw += len(rows)
         total_aggregates += len(aggregates)
         total_errors += errors
@@ -246,6 +298,56 @@ async def run_paper(
     )
 
 
+def write_paper_manifest(
+    output_root: Path,
+    experiment: str,
+    *,
+    config_path: Path = Path("configs/paper_experiments.yaml"),
+) -> Path:
+    """Write a provenance manifest from completed paper artifacts.
+
+    This public helper also permits metadata refresh after a plotting/sanity
+    change that does not alter an experiment's trial-level simulation.
+    """
+
+    load_and_validate_paper_config(config_path)
+    raw_path = output_root / "raw" / "paper" / experiment / "trials.csv"
+    aggregate_path = output_root / "aggregated" / "paper" / experiment / "summary.csv"
+    sanity_path = output_root / "aggregated" / "paper" / experiment / "sanity.json"
+    if not all(path.exists() for path in (raw_path, aggregate_path, sanity_path)):
+        raise RuntimeError(f"cannot manifest incomplete {experiment} paper run")
+    rows = _read_csv(raw_path)
+    sanity = json.loads(sanity_path.read_text(encoding="utf-8"))
+    manifest = {
+        "experiment": experiment,
+        "mode": "paper",
+        "config_path": str(config_path),
+        "config_sha256": sha256_file(config_path),
+        "raw_path": str(raw_path.relative_to(output_root)),
+        "raw_sha256": sha256_file(raw_path),
+        "aggregate_path": str(aggregate_path.relative_to(output_root)),
+        "aggregate_sha256": sha256_file(aggregate_path),
+        "sanity_path": str(sanity_path.relative_to(output_root)),
+        "sanity_sha256": sha256_file(sanity_path),
+        "methods": sorted({row["method_id"] for row in rows}),
+        "raw_trial_count": len(rows),
+        "paired_instance_count": len({row["trial_id"] for row in rows}),
+        "topology_seed_count": len({int(row["seed"]) for row in rows}),
+        "error_count": sum(item.get("level") == "ERROR" for item in sanity),
+        "warning_count": sum(item.get("level") == "WARNING" for item in sanity),
+        "warning_explanations": [
+            item.get("message", "")
+            for item in sanity
+            if item.get("level") == "WARNING"
+        ],
+        "runtime_parameters": _normalized_runtime_parameters(rows),
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    destination = output_root / "aggregated" / "paper" / experiment / "paper_manifest.json"
+    _write_json(destination, manifest)
+    return destination
+
+
 def _clear_paper_experiment(output_root: Path, experiment: str) -> None:
     for directory in (
         output_root / "raw" / "paper" / experiment,
@@ -254,8 +356,8 @@ def _clear_paper_experiment(output_root: Path, experiment: str) -> None:
         if directory.exists():
             shutil.rmtree(directory)
     stem = _FIGURE_STEMS[experiment]
-    for suffix in ("pdf", "png"):
-        figure = output_root / "paper_figures" / f"{stem}.{suffix}"
+    for suffix in ("pdf", "png", "csv"):
+        figure = output_root / "paper_figures_final" / f"{stem}.{suffix}"
         if figure.exists():
             figure.unlink()
 
@@ -263,6 +365,74 @@ def _clear_paper_experiment(output_root: Path, experiment: str) -> None:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _normalized_runtime_parameters(rows: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("cannot derive runtime parameters from empty results")
+    mode = str(rows[0]["mode"])
+    experiment = str(rows[0]["experiment"])
+    specification = mode_spec(mode)
+    payload: dict[str, Any] = {
+        "experiment": experiment,
+        "mode": mode,
+        "configured_mode_spec": asdict(specification),
+        "topology_seeds": sorted({int(row["seed"]) for row in rows}),
+        "event_ids": sorted({int(row["event_id"]) for row in rows}),
+        "methods": sorted({str(row["method_id"]) for row in rows}),
+        "series": sorted({str(row["series"]) for row in rows}),
+    }
+    if experiment == "exp1":
+        task_rows = [row for row in rows if row["series"] == "task_size"]
+        churn_rows = [row for row in rows if row["series"] == "state_churn"]
+        payload.update(
+            {
+                "task_sizes": _unique_numbers(task_rows, "task_size", integer=True),
+                "background_churn_probability": _single_number(
+                    task_rows, "state_churn_probability"
+                ),
+                "state_churn_percent": [
+                    100.0 * item
+                    for item in _unique_numbers(churn_rows, "state_churn_probability")
+                ],
+            }
+        )
+    elif experiment == "exp2":
+        payload["conflict_density_percent"] = [
+            100.0 * item for item in _unique_numbers(rows, "conflict_density")
+        ]
+    elif experiment == "exp3":
+        payload["affected_scope_bucket_percent"] = _unique_numbers(
+            rows, "affected_scope_bucket_percent", integer=True
+        )
+        payload["observed_affected_agent_counts"] = _unique_numbers(
+            rows, "affected_agent_count", integer=True
+        )
+    elif experiment == "exp4":
+        payload["failure_types"] = sorted(
+            {row["failure_type"] for row in rows if row.get("failure_type")}
+        )
+        payload["failure_severity_percent"] = [
+            100.0 * item for item in _unique_numbers(rows, "failure_severity")
+        ]
+    return payload
+
+
+def _unique_numbers(
+    rows: Sequence[Mapping[str, str]],
+    field: str,
+    *,
+    integer: bool = False,
+) -> list[int | float]:
+    values = sorted({float(row[field]) for row in rows if row.get(field) not in (None, "")})
+    return [int(value) for value in values] if integer else values
+
+
+def _single_number(rows: Sequence[Mapping[str, str]], field: str) -> float:
+    values = _unique_numbers(rows, field)
+    if len(values) != 1:
+        raise RuntimeError(f"expected one runtime value for {field}, found {values}")
+    return float(values[0])
 
 
 def _write_json(path: Path, value: Any) -> None:

@@ -29,6 +29,7 @@ from src.simulation.scenario_generator import (
 
 
 PAPER_RESULT_MODE = "discrete_event_transactionally_verified_control_plane_simulation"
+TASK_SIZE_BACKGROUND_CHURN_PROBABILITY = 0.02
 
 
 def _duration_ms(start: float, finish: float) -> float:
@@ -220,7 +221,7 @@ async def run_exp1(
     rows: list[PaperTrial] = []
     for task_size in normalized_sizes:
         for seed in selected_seeds:
-            for event_id in range(specification.events_per_seed):
+            for event_id in range(specification.rate_events_per_seed):
                 snapshot = generate_formation_snapshot(task_size, seed, event_id)
                 trial_id = _exp1_trial_id(
                     "task_size",
@@ -229,7 +230,11 @@ async def run_exp1(
                     event_id,
                 )
                 for method_id in EXPERIMENT_METHODS["exp1"]:
-                    outcome = await run_formation_method(snapshot, method_id)
+                    outcome = await run_formation_method(
+                        snapshot,
+                        method_id,
+                        churn_probability=TASK_SIZE_BACKGROUND_CHURN_PROBABILITY,
+                    )
                     rows.append(
                         _paper_trial_from_formation(
                             selected_mode,
@@ -237,7 +242,7 @@ async def run_exp1(
                             outcome,
                             trial_id=trial_id,
                             series="task_size",
-                            churn_probability=None,
+                            churn_probability=TASK_SIZE_BACKGROUND_CHURN_PROBABILITY,
                         )
                     )
 
@@ -324,6 +329,7 @@ def _paper_trial_from_formation(
         num_dag_edges=len(snapshot.task.biz_edges),
         num_gateways=len(snapshot.topology.gateway_ids),
         state_churn_probability=churn_probability,
+        controller_processing_latency_ms=outcome.controller_processing_latency_ms,
         formation_latency_ms=outcome.formation_latency_ms,
         success=outcome.success,
         qos_satisfied=outcome.qos_satisfied,

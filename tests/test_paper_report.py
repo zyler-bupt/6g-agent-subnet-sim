@@ -14,16 +14,21 @@ class PaperExperimentReportTests(unittest.TestCase):
         report = build_experiment_report(ROOT / "results")
 
         for text in (
-            "A1-Agent-Embedded*",
+            "SRD",
+            "Controller Processing Latency",
+            "End-to-End Formation Latency",
             "SANet-DW*",
             "NetRen*",
             "NetKeeper*",
+            "Number of Affected Agents",
+            "Modification Scope",
             "baseline implementation anomaly",
             "全部 100% / 全失败",
             "stress range",
             "raw CSV",
             "final PDF figures",
             "* denotes an adaptation",
+            "results/paper_figures_final/",
         ):
             self.assertIn(text, report)
         for experiment in ("Exp.1", "Exp.2", "Exp.3", "Exp.4"):

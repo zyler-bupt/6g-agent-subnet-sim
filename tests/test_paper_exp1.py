@@ -4,12 +4,15 @@ import csv
 import tempfile
 import unittest
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 from experiments.exp1_initial_formation import run_exp1
 from experiments.paper_protocol import EXPERIMENT_METHODS
 from src.controller.formation_strategies import (
     ChurnEvent,
+    _edge_paths,
+    _primitive_costs,
     run_formation_method,
 )
 from src.simulation.paper_scenarios import generate_formation_snapshot
@@ -37,21 +40,146 @@ class FormationStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proposed.trace.stage_mode, "parallel_gateway_batch")
         self.assertEqual(no_batch.trace.stage_mode, "sequential_gateway")
         self.assertEqual(
-            len({item.start_ms for item in proposed.trace.operations if item.kind == "gateway_stage"}),
+            len(
+                {
+                    item.start_ms
+                    for item in proposed.trace.operations
+                    if item.kind == "gateway_dispatch_install_ack"
+                }
+            ),
             1,
         )
         sequential_starts = [
             item.start_ms
             for item in no_batch.trace.operations
-            if item.kind == "gateway_stage"
+            if item.kind == "gateway_dispatch_install_ack"
         ]
         self.assertEqual(sequential_starts, sorted(set(sequential_starts)))
         self.assertGreater(no_batch.formation_latency_ms, proposed.formation_latency_ms)
 
-    async def test_cspf_and_a1_process_the_complete_dag_before_stable_success(self) -> None:
+    async def test_t_ctrl_excludes_gateway_communication_and_t_form_includes_it(self) -> None:
+        snapshot = generate_formation_snapshot(20, seed=4, event_id=0)
+
+        outcome = await run_formation_method(snapshot, "proposed")
+
+        self.assertGreater(outcome.controller_processing_latency_ms, 0)
+        self.assertGreater(
+            outcome.formation_latency_ms,
+            outcome.controller_processing_latency_ms,
+        )
+        self.assertTrue(
+            any(
+                operation.kind == "gateway_dispatch_install_ack"
+                for operation in outcome.trace.operations
+            )
+        )
+
+    async def test_all_methods_pay_common_dag_analysis_and_agent_mapping_costs(self) -> None:
+        snapshot = generate_formation_snapshot(20, seed=4, event_id=0)
+
+        outcomes = {
+            method_id: await run_formation_method(snapshot, method_id)
+            for method_id in EXPERIMENT_METHODS["exp1"]
+        }
+
+        for method_id, outcome in outcomes.items():
+            with self.subTest(method_id=method_id):
+                kinds = [operation.kind for operation in outcome.trace.operations]
+                self.assertEqual(kinds.count("dag_analysis"), 1)
+                self.assertEqual(kinds.count("supporting_agent_binding"), 1)
+                common_cost = sum(
+                    operation.duration_ms
+                    for operation in outcome.trace.operations
+                    if operation.kind in {"dag_analysis", "supporting_agent_binding"}
+                )
+                self.assertGreaterEqual(
+                    outcome.controller_processing_latency_ms,
+                    common_cost,
+                )
+
+    async def test_srd_accumulates_shared_gateway_operations(self) -> None:
+        snapshot = generate_formation_snapshot(20, seed=4, event_id=0)
+
+        proposed = await run_formation_method(snapshot, "proposed")
+        srd = await run_formation_method(snapshot, "srd")
+
+        self.assertEqual(
+            proposed.trace.primitive_cost_fingerprint,
+            srd.trace.primitive_cost_fingerprint,
+        )
+        self.assertGreater(srd.formation_latency_ms, proposed.formation_latency_ms)
+
+    async def test_gateway_exchange_includes_fingerprinted_serialization_cost(self) -> None:
+        snapshot = generate_formation_snapshot(20, seed=4, event_id=0)
+        costs = _primitive_costs(snapshot, _edge_paths(snapshot))
+        outcome = await run_formation_method(snapshot, "proposed")
+        dispatch = next(
+            operation
+            for operation in outcome.trace.operations
+            if operation.kind == "gateway_dispatch_install_ack"
+        )
+        edge_ids = {
+            edge.edge_id
+            for edge in snapshot.task.biz_edges
+            if dispatch.gateway_id in _edge_paths(snapshot)[edge.edge_id]
+        }
+
+        self.assertGreater(costs.gateway_serialization_per_rule_ms[dispatch.gateway_id], 0)
+        self.assertGreater(
+            dispatch.duration_ms,
+            costs.gateway_rtt_ms[dispatch.gateway_id]
+            + costs.gateway_processing_ms[dispatch.gateway_id]
+            + sum(costs.rule_stage_ms[edge_id] for edge_id in edge_ids),
+        )
+        self.assertNotEqual(
+            costs.fingerprint,
+            replace(
+                costs,
+                gateway_serialization_per_rule_ms={
+                    gateway_id: 0.0 for gateway_id in costs.gateway_rtt_ms
+                },
+            ).fingerprint,
+        )
+
+    async def test_stable_validation_waits_for_post_activation_gateway_reports(self) -> None:
+        outcome = await run_formation_method(
+            generate_formation_snapshot(20, seed=4, event_id=0),
+            "proposed",
+        )
+        activation_finished = max(
+            operation.finish_ms
+            for operation in outcome.trace.operations
+            if operation.kind == "gateway_activate_ack"
+        )
+        stable_reports = [
+            operation
+            for operation in outcome.trace.operations
+            if operation.kind == "gateway_post_activation_stable_report_ack"
+        ]
+        stable_verify_finished = max(
+            operation.finish_ms
+            for operation in outcome.trace.operations
+            if operation.kind == "stable_verify"
+        )
+
+        self.assertTrue(stable_reports)
+        self.assertTrue(
+            all(operation.start_ms >= activation_finished for operation in stable_reports)
+        )
+        self.assertGreaterEqual(
+            min(
+                operation.start_ms
+                for operation in outcome.trace.operations
+                if operation.kind == "stable_verify"
+            ),
+            max(operation.finish_ms for operation in stable_reports),
+        )
+        self.assertEqual(outcome.formation_latency_ms, stable_verify_finished)
+
+    async def test_cspf_and_srd_process_the_complete_dag_before_stable_success(self) -> None:
         snapshot = generate_formation_snapshot(16, seed=8, event_id=1)
 
-        for method in ("cspf", "a1_agent_embedded"):
+        for method in ("cspf", "srd"):
             with self.subTest(method=method):
                 outcome = await run_formation_method(snapshot, method)
                 self.assertTrue(outcome.success, outcome.failure_reason)
@@ -71,7 +199,7 @@ class FormationStrategyTests(unittest.IsolatedAsyncioTestCase):
                 "proposed",
                 "proposed_without_batch",
                 "cspf",
-                "a1_agent_embedded",
+                "srd",
             )
         ]
 
@@ -143,6 +271,23 @@ class FormationStrategyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PaperExp1RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_task_size_trials_persist_the_background_churn_probability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = await run_exp1(
+                "pilot",
+                Path(directory),
+                seeds=(1,),
+                task_sizes=(8,),
+                churn_points=(0,),
+            )
+
+        task_size_rows = [row for row in rows if row.series == "task_size"]
+        self.assertTrue(task_size_rows)
+        self.assertEqual(
+            {row.state_churn_probability for row in task_size_rows},
+            {0.02},
+        )
+
     async def test_pilot_has_complete_paired_method_grid_and_canonical_raw_csv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_root = Path(directory)
@@ -175,12 +320,10 @@ class PaperExp1RunnerTests(unittest.IsolatedAsyncioTestCase):
             with raw_path.open(encoding="utf-8", newline="") as handle:
                 materialized = list(csv.DictReader(handle))
             self.assertEqual(len(materialized), len(rows))
-            adapted = next(
-                row for row in materialized if row["method_id"] == "a1_agent_embedded"
-            )
-            self.assertEqual(adapted["method_label"], "A1-Agent-Embedded*")
-            self.assertEqual(adapted["method_source"], "A1 Agent")
-            self.assertEqual(adapted["adapted"], "True")
+            adapted = next(row for row in materialized if row["method_id"] == "srd")
+            self.assertEqual(adapted["method_label"], "SRD")
+            self.assertEqual(adapted["method_source"], "Sequential Rule Deployment")
+            self.assertEqual(adapted["adapted"], "False")
             self.assertEqual(adapted["reconfiguration_latency_ms"], "")
 
     async def test_runner_order_and_results_are_reproducible(self) -> None:

@@ -1,7 +1,7 @@
 {
   "aggregate_path": "aggregated/pilot/exp1/summary.csv",
-  "aggregate_sha256": "e79770be2bf9fa1e9cea7405fc213a5be452f88ca93cb7395215a6a167c05b55",
-  "completed_at_utc": "2026-08-20T11:13:59.031834+00:00",
+  "aggregate_sha256": "9d0193361dd62a262a818218ab2ad5ee226c47becd4565047551aaf13088f035",
+  "completed_at_utc": "2026-08-20T17:01:05.766538+00:00",
   "config_path": "configs/paper_experiments.yaml",
   "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
   "error_count": 0,
@@ -11,18 +11,66 @@
   ],
   "experiment": "exp1",
   "methods": [
-    "a1_agent_embedded",
     "cspf",
     "proposed",
-    "proposed_without_batch"
+    "proposed_without_batch",
+    "srd"
   ],
   "mode": "pilot",
   "paired_instance_count": 130,
   "raw_path": "raw/pilot/exp1/trials.csv",
-  "raw_sha256": "9770ba06c950becde6f73cc27331d4f6ee43e424c5c8f4d5cdbf560e2fb7cbf6",
+  "raw_sha256": "1b5d581a9c5062c9c2f7010059ac2558ea8e54f280b720746c71189d77ba1711",
   "raw_trial_count": 520,
+  "runtime_parameters": {
+    "background_churn_probability": 0.02,
+    "configured_mode_spec": {
+      "events_per_seed": 2,
+      "rate_events_per_seed": 2,
+      "topology_seeds": 5
+    },
+    "event_ids": [
+      0,
+      1
+    ],
+    "experiment": "exp1",
+    "methods": [
+      "cspf",
+      "proposed",
+      "proposed_without_batch",
+      "srd"
+    ],
+    "mode": "pilot",
+    "series": [
+      "state_churn",
+      "task_size"
+    ],
+    "state_churn_percent": [
+      0.0,
+      5.0,
+      10.0,
+      15.0,
+      20.0,
+      30.0
+    ],
+    "task_sizes": [
+      8,
+      12,
+      16,
+      20,
+      24,
+      28,
+      32
+    ],
+    "topology_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
   "sanity_path": "aggregated/pilot/exp1/sanity.json",
-  "sanity_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "sanity_sha256": "dea1a0f65086433c594b42c5a6a94f79a54f208c190eedde6985034cce10e15f",
   "seeds": [
     0,
     1,
@@ -30,6 +78,8 @@
     3,
     4
   ],
-  "warning_count": 0,
-  "warning_explanations": []
+  "warning_count": 1,
+  "warning_explanations": [
+    "proposed_without_batch succeeds for every sampled task_size trial"
+  ]
 }

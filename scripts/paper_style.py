@@ -24,22 +24,20 @@ class MethodStyle:
 
 
 METHOD_STYLES = {
-    "proposed": MethodStyle("Proposed", "#1F4E79", "-", "o", ""),
+    "proposed": MethodStyle("Proposed", "#2ca25f", "-", "D", ""),
     "proposed_without_batch": MethodStyle(
-        "Proposed w/o Batch", "#5B9BD5", "--", "o", "//"
+        "Proposed w/o Batch", "#7f7f7f", "--", "o", "//"
     ),
-    "a1_agent_embedded": MethodStyle(
-        "A1-Agent-Embedded*", "#7F7F7F", ":", "^", ".."
-    ),
-    "sanet_dw": MethodStyle("SANet-DW*", "#ED7D31", "-.", "D", "xx"),
+    "srd": MethodStyle("SRD", "#f39c12", ":", "^", ".."),
+    "sanet_dw": MethodStyle("SANet-DW*", "#e74c3c", "--", "s", "xx"),
     "adjacent_layer": MethodStyle(
-        "Adjacent-Layer", "#70ADCF", "--", "^", "//"
+        "Adjacent-Layer", "#f39c12", ":", "^", "//"
     ),
-    "independent": MethodStyle("Independent", "#7F7F7F", ":", "X", ".."),
-    "netren": MethodStyle("NetRen*", "#ED7D31", "-.", "D", "xx"),
-    "local_only": MethodStyle("Local-Only", "#8064A2", "--", "v", "//"),
-    "full_rebuild": MethodStyle("Full-Rebuild", "#A61C2D", ":", "X", "xx"),
-    "netkeeper": MethodStyle("NetKeeper*", "#ED7D31", "-.", "D", "xx"),
+    "independent": MethodStyle("Independent", "#3498db", "-.", "o", ".."),
+    "netren": MethodStyle("NetRen*", "#e74c3c", "--", "s", "xx"),
+    "local_only": MethodStyle("Local-Only", "#f39c12", ":", "^", "//"),
+    "full_rebuild": MethodStyle("Full-Rebuild", "#3498db", "-.", "o", "xx"),
+    "netkeeper": MethodStyle("NetKeeper*", "#f39c12", ":", "^", "//"),
     "ours": MethodStyle("Ours", "#1F4E79", "-", "o", ""),
     "full_reconfiguration": MethodStyle(
         "Full Reconfiguration", "#C55A11", "--", "s", r"\\"
@@ -53,11 +51,11 @@ METHOD_STYLES = {
     "no_global_verification": MethodStyle(
         "w/o Global Verification", "#8064A2", (0, (3.0, 1.5)), "v", "--"
     ),
-    "cspf": MethodStyle("CSPF", "#548235", "-.", "s", "//"),
+    "cspf": MethodStyle("CSPF", "#e74c3c", "--", "s", "//"),
 }
 
-LINEWIDTH = 1.7
-MARKERSIZE = 4.5
+LINEWIDTH = 1.8
+MARKERSIZE = 5.5
 CI_ALPHA = 0.15
 
 
@@ -66,20 +64,20 @@ def apply_paper_style() -> None:
         {
             "font.family": "serif",
             "font.serif": ["Times New Roman", "Liberation Serif", "DejaVu Serif"],
-            "font.size": 8.0,
-            "axes.labelsize": 9.0,
-            "axes.titlesize": 9.0,
+            "font.size": 9.0,
+            "axes.labelsize": 10.0,
+            "axes.titlesize": 10.0,
             "axes.linewidth": 0.85,
             "axes.edgecolor": "#333333",
             "axes.facecolor": "white",
             "figure.facecolor": "white",
-            "xtick.labelsize": 8.0,
-            "ytick.labelsize": 8.0,
+            "xtick.labelsize": 9.0,
+            "ytick.labelsize": 9.0,
             "xtick.major.width": 0.8,
             "ytick.major.width": 0.8,
             "xtick.major.size": 3.0,
             "ytick.major.size": 3.0,
-            "legend.fontsize": 8.0,
+            "legend.fontsize": 8.5,
             "legend.frameon": False,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,

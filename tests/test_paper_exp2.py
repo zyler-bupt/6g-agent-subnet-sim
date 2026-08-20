@@ -104,6 +104,20 @@ class PaperCoordinationTests(unittest.TestCase):
                 self.assertTrue(outcome.safe_rejection)
                 self.assertEqual(outcome.rollback_count, 0)
 
+    def test_common_transaction_verifier_safely_rejects_infeasible_actions(self) -> None:
+        snapshot = next(
+            generate_conflict_snapshot(60, seed=seed, event_id=event_id)
+            for seed in range(10)
+            for event_id in range(5)
+            if not generate_conflict_snapshot(60, seed=seed, event_id=event_id).oracle.feasible
+        )
+
+        for method_id in EXPERIMENT_METHODS["exp2"]:
+            with self.subTest(method_id=method_id):
+                outcome = coordinate_paper(method_id, snapshot)
+                self.assertFalse(outcome.success)
+                self.assertTrue(outcome.safe_rejection)
+
 
 class PaperConflictMetricTests(unittest.TestCase):
     def test_conditional_metrics_use_exact_solvable_and_infeasible_denominators(self) -> None:

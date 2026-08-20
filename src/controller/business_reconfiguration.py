@@ -41,8 +41,14 @@ class BusinessReconfigurationOutcome:
     event_occurred_at: float
     stable_verify_finished_at: float | None
     total_rules: int
+    total_rule_objects: int
     changed_rules: int
     rule_change_ratio: float
+    total_paths: int
+    changed_paths: int
+    total_agents: int
+    changed_agents: int
+    modification_scope_ratio: float
     total_gateways: int
     changed_gateways: int
     gateway_change_ratio: float
@@ -111,6 +117,22 @@ async def run_business_reconfiguration_method(
         len(snapshot.before_task.biz_edges) - len(snapshot.affected_edge_ids),
     )
     changed_rules = len(plan.changed_rule_ids)
+    total_paths, changed_paths = _changed_path_counts(
+        stable,
+        plan.target_state,
+        plan.selected_edge_ids,
+    )
+    total_agents, changed_agents = _changed_agent_counts(
+        stable,
+        plan.target_state,
+        plan.selected_edge_ids,
+        snapshot.change.changed_object_ids,
+    )
+    if plan.method == "full_rebuild":
+        changed_paths = total_paths
+        changed_agents = total_agents
+    total_rule_objects = len(set(stable.rules) | set(plan.target_state.rules))
+    modification_scope_denominator = total_rule_objects + total_paths + total_agents
     stable_verify_attempted = any(
         item.event_stage == EventStage.POST_ACTIVATE_VERIFY_FINISHED.value
         for item in execution.event_log
@@ -131,8 +153,21 @@ async def run_business_reconfiguration_method(
             logical_success_ms / 1000.0 if execution.success else None
         ),
         total_rules=len(stable.rules),
+        total_rule_objects=total_rule_objects,
         changed_rules=changed_rules,
-        rule_change_ratio=(changed_rules / len(stable.rules) if stable.rules else 0.0),
+        rule_change_ratio=(
+            changed_rules / total_rule_objects if total_rule_objects else 0.0
+        ),
+        total_paths=total_paths,
+        changed_paths=changed_paths,
+        total_agents=total_agents,
+        changed_agents=changed_agents,
+        modification_scope_ratio=(
+            (changed_rules + changed_paths + changed_agents)
+            / modification_scope_denominator
+            if modification_scope_denominator
+            else 0.0
+        ),
         total_gateways=len(snapshot.formation_snapshot.topology.gateway_ids),
         changed_gateways=len(plan.affected_gateways),
         gateway_change_ratio=(
@@ -372,6 +407,106 @@ def _directly_changed_edge_ids(snapshot: BusinessChangeSnapshot) -> frozenset[st
         if before[edge_id] != after[edge_id]
     )
     return frozenset(changed)
+
+
+def _changed_path_counts(
+    stable: TaskSubnet,
+    target: TaskSubnet,
+    selected_edge_ids: Iterable[str],
+) -> tuple[int, int]:
+    """Compare one Gateway path object for every business-edge identifier."""
+
+    stable_paths = _paths_by_business_edge(stable)
+    target_paths = _paths_by_business_edge(target)
+    path_ids = set(stable_paths) | set(target_paths)
+    selected = set(selected_edge_ids)
+    return (
+        len(path_ids),
+        sum(
+            edge_id in selected
+            and stable_paths.get(edge_id) != target_paths.get(edge_id)
+            for edge_id in path_ids
+        ),
+    )
+
+
+def _paths_by_business_edge(subnet: TaskSubnet) -> dict[str, tuple[str, ...]]:
+    return {
+        session.business_edge_id: (
+            session.gateway_path
+            or (session.source_gateway, session.target_gateway)
+        )
+        for session in subnet.sessions
+    }
+
+
+def _changed_agent_counts(
+    stable: TaskSubnet,
+    target: TaskSubnet,
+    selected_edge_ids: Iterable[str],
+    changed_object_ids: Iterable[str],
+) -> tuple[int, int]:
+    """Compare Agent identities and their per-layer states/bindings."""
+
+    stable_agents = _agent_states_by_id(stable)
+    target_agents = _agent_states_by_id(target)
+    agent_ids = set(stable_agents) | set(target_agents)
+    selected = set(selected_edge_ids)
+    changed_edge_ids = {
+        edge_id
+        for edge_id in selected
+        if stable.business_edges.get(edge_id) != target.business_edges.get(edge_id)
+        or _paths_by_business_edge(stable).get(edge_id)
+        != _paths_by_business_edge(target).get(edge_id)
+    }
+    relevant_agents = _agent_ids_for_edges(stable, target, changed_edge_ids)
+    business_agents = set(stable.task.app_agents) | set(target.task.app_agents)
+    relevant_agents.update(set(changed_object_ids) & business_agents)
+    return (
+        len(agent_ids),
+        sum(
+            stable_agents.get(agent_id) != target_agents.get(agent_id)
+            for agent_id in agent_ids & relevant_agents
+        ),
+    )
+
+
+def _agent_states_by_id(subnet: TaskSubnet) -> dict[str, tuple[tuple[str, object], ...]]:
+    layer_mappings = (
+        ("application", subnet.application_agents),
+        ("transport", subnet.transport_agents),
+        ("network", subnet.network_agents),
+        ("physical", subnet.physical_agents),
+    )
+    states: dict[str, list[tuple[str, object]]] = {}
+    for layer, mapping in layer_mappings:
+        for agent_id, state in mapping.items():
+            states.setdefault(agent_id, []).append((layer, state))
+    return {
+        agent_id: tuple(layer_states)
+        for agent_id, layer_states in states.items()
+    }
+
+
+def _agent_ids_for_edges(
+    stable: TaskSubnet,
+    target: TaskSubnet,
+    edge_ids: Iterable[str],
+) -> set[str]:
+    selected = set(edge_ids)
+    return {
+        agent_id
+        for subnet in (stable, target)
+        for session in subnet.sessions
+        if session.business_edge_id in selected
+        for agent_id in (
+            session.source,
+            session.target,
+            session.t_agent_id,
+            session.n_agent_id,
+            *session.p_agent_ids,
+        )
+    }
 
 
 def _delta_with_edge_updates(

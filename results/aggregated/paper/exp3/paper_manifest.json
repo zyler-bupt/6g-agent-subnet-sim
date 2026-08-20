@@ -1,23 +1,109 @@
 {
-  "aggregate_sha256": "6645fcaaf5d4ca653c6fd12dcc08c809c5f3d4791be55cdaa56e0eaae2c42a11",
+  "aggregate_path": "aggregated/paper/exp3/summary.csv",
+  "aggregate_sha256": "c5d96e5548c37ba278100a431d1bfdedb12602ce0a747b67b4144905c7a6799f",
+  "completed_at_utc": "2026-08-20T17:12:06.702521+00:00",
+  "config_path": "configs/paper_experiments.yaml",
   "config_sha256": "beebc912e5973297e1921fffc7b450a7cb5dd37cd7547361e65873ddd31bfcc3",
   "error_count": 0,
   "experiment": "exp3",
   "methods": [
-    "proposed",
-    "netren",
+    "full_rebuild",
     "local_only",
-    "full_rebuild"
+    "netren",
+    "proposed"
   ],
   "mode": "paper",
   "paired_instance_count": 750,
-  "raw_sha256": "a59f8a91a7c773d2347185d99b9f0b68a5db56b70f0a5455632929165ae24df4",
+  "raw_path": "raw/paper/exp3/trials.csv",
+  "raw_sha256": "569c890d5adb935a8b3b51ebbe947d5cd3dad59aa00ae6a6812509264c5cf191",
   "raw_trial_count": 3000,
-  "sanity_sha256": "d474c47645e25603c545a7e7d1ecfea751fe264c1c629c792522895fc02020b9",
+  "runtime_parameters": {
+    "affected_scope_bucket_percent": [
+      10,
+      20,
+      30,
+      40,
+      50
+    ],
+    "configured_mode_spec": {
+      "events_per_seed": 1,
+      "rate_events_per_seed": 5,
+      "topology_seeds": 30
+    },
+    "event_ids": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "experiment": "exp3",
+    "methods": [
+      "full_rebuild",
+      "local_only",
+      "netren",
+      "proposed"
+    ],
+    "mode": "paper",
+    "observed_affected_agent_counts": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+    ],
+    "series": [
+      "affected_agents"
+    ],
+    "topology_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ]
+  },
+  "sanity_path": "aggregated/paper/exp3/sanity.json",
+  "sanity_sha256": "6a331eca06f56cb7df90f892a477713cb628bdf26f1c28f8ef9bddb45d5aaff6",
   "topology_seed_count": 30,
   "warning_count": 2,
   "warning_explanations": [
-    "full_rebuild succeeds for every sampled affected_scope trial",
-    "netren succeeds for every sampled affected_scope trial"
+    "full_rebuild succeeds for every sampled affected_agents trial",
+    "netren succeeds for every sampled affected_agents trial"
   ]
 }

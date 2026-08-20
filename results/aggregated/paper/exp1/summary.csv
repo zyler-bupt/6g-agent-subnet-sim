@@ -1,53 +1,109 @@
 experiment,mode,series,method_id,method_label,x_name,x_value,metric,mean,p50,p95,ci_lower,ci_upper,sample_count,cluster_count,bootstrap_iterations,numerator,denominator
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,5.0,success_rate_percent,68.66666666666667,100.0,100.0,61.333333333333336,76.0,150,30,5000,103,150
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,10.0,success_rate_percent,15.333333333333334,0.0,100.0,10.0,21.333333333333332,150,30,5000,23,150
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,15.0,success_rate_percent,5.333333333333333,0.0,54.999999999998295,2.0,9.333333333333334,150,30,5000,8,150
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,20.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
-exp1,paper,state_churn,a1_agent_embedded,A1-Agent-Embedded*,state_churn_probability_percent,30.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
 exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
-exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,5.0,success_rate_percent,97.33333333333333,100.0,100.0,94.66666666666667,99.33333333333333,150,30,5000,146,150
-exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,10.0,success_rate_percent,72.0,100.0,100.0,65.33333333333333,78.66666666666667,150,30,5000,108,150
-exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,15.0,success_rate_percent,53.333333333333336,100.0,100.0,44.666666666666664,61.333333333333336,150,30,5000,80,150
-exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,20.0,success_rate_percent,26.666666666666668,0.0,100.0,19.333333333333332,34.666666666666664,150,30,5000,40,150
-exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,30.0,success_rate_percent,6.0,0.0,100.0,1.983333333333339,11.333333333333334,150,30,5000,9,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,5.0,success_rate_percent,94.0,100.0,100.0,90.66666666666667,97.33333333333333,150,30,5000,141,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,10.0,success_rate_percent,64.66666666666667,100.0,100.0,57.333333333333336,72.0,150,30,5000,97,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,15.0,success_rate_percent,41.333333333333336,0.0,100.0,33.333333333333336,48.666666666666664,150,30,5000,62,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,20.0,success_rate_percent,18.666666666666668,0.0,100.0,12.666666666666666,25.333333333333332,150,30,5000,28,150
+exp1,paper,state_churn,cspf,CSPF,state_churn_probability_percent,30.0,success_rate_percent,2.0,0.0,0.0,0.0,4.666666666666667,150,30,5000,3,150
 exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
 exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,5.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
-exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,10.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
-exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,15.0,success_rate_percent,98.66666666666667,100.0,100.0,96.66666666666667,100.0,150,30,5000,148,150
-exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,20.0,success_rate_percent,96.0,100.0,100.0,92.66666666666667,98.66666666666667,150,30,5000,144,150
-exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,30.0,success_rate_percent,94.0,100.0,100.0,88.66666666666667,98.0,150,30,5000,141,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,10.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,15.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,20.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,proposed,Proposed,state_churn_probability_percent,30.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
 exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
 exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,5.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
-exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,10.0,success_rate_percent,96.0,100.0,100.0,92.66666666666667,98.66666666666667,150,30,5000,144,150
-exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,15.0,success_rate_percent,92.66666666666667,100.0,100.0,88.66666666666667,96.66666666666667,150,30,5000,139,150
-exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,20.0,success_rate_percent,82.0,100.0,100.0,76.66666666666667,87.33333333333333,150,30,5000,123,150
-exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,30.0,success_rate_percent,62.666666666666664,100.0,100.0,54.0,71.33333333333333,150,30,5000,94,150
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,8.0,formation_latency_ms,94.98334220594445,94.39652329933334,117.73562947488332,89.68268118094636,100.11178870943027,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,12.0,formation_latency_ms,147.64857958411113,148.13662646850003,184.57023659766676,140.43203054256307,155.0494689769484,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,16.0,formation_latency_ms,203.0900857729556,202.7075494770001,231.8414153413998,195.91287328305114,210.38897590987693,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,20.0,formation_latency_ms,242.35597867932228,246.20597516250012,272.45388416705043,234.4173236333445,250.21423070395343,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,24.0,formation_latency_ms,292.37607043497786,290.89751536316646,334.35324245494985,283.1573039566804,301.5977189164253,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,28.0,formation_latency_ms,341.6511417634668,339.9925138891674,389.6652223398832,330.69817957719624,352.43903187209077,30,30,5000,,
-exp1,paper,task_size,a1_agent_embedded,A1-Agent-Embedded*,task_size,32.0,formation_latency_ms,396.7277719836889,387.1173062328337,452.24391145788326,384.4750800519704,408.86559688263117,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,8.0,formation_latency_ms,43.588611448166674,42.94563444666669,50.32389209341669,42.28196506933723,44.929573012361956,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,12.0,formation_latency_ms,63.98961873448888,63.63952567616667,70.88913461216666,62.232002320875274,65.75881414587748,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,16.0,formation_latency_ms,87.32149525228893,87.44619341900005,94.14050379853336,85.37961631771779,89.15478753485532,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,20.0,formation_latency_ms,104.78355452525557,104.99371714950004,112.78294733495005,102.8211917558453,106.67086533061364,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,24.0,formation_latency_ms,125.09961589513338,124.49095437916674,138.4497774092334,122.7123428798909,127.59748252943287,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,28.0,formation_latency_ms,146.86353019004454,145.61768353983342,158.08625161020012,144.20925533810228,149.42252206037202,30,30,5000,,
-exp1,paper,task_size,cspf,CSPF,task_size,32.0,formation_latency_ms,168.10640349060014,166.80495623950014,184.2100728701335,165.18489532408626,171.2993583269826,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,8.0,formation_latency_ms,14.297956746766667,14.30772203,15.647922149749997,14.013683203433335,14.582932245323333,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,12.0,formation_latency_ms,18.037850555544445,17.801782128,19.3523923835,17.72970704040167,18.353295201603615,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,16.0,formation_latency_ms,21.9959554829,22.066824737500006,23.357013573500005,21.694721143546673,22.283663083183338,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,20.0,formation_latency_ms,24.622555377277788,24.654765362500015,25.64564045325001,24.304065543730285,24.9366247766389,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,24.0,formation_latency_ms,27.926577759533345,27.86455503500001,29.491379692000006,27.59722327347335,28.262789979857512,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,28.0,formation_latency_ms,30.986269348055576,30.921403244000018,33.17277751450001,30.486734454616123,31.51606894532973,30,30,5000,,
-exp1,paper,task_size,proposed,Proposed,task_size,32.0,formation_latency_ms,34.025325622311136,33.95865022250002,36.36531076125002,33.578458859269745,34.485796540035295,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,formation_latency_ms,25.455554082211105,25.88980193416667,33.689352883699996,23.85806612595222,27.135176446812494,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,formation_latency_ms,36.12207626256667,34.64604059916667,45.416212842816655,34.044357208872505,38.168784656770285,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,formation_latency_ms,43.1880229075,42.162377264666674,50.43639866430001,41.64930431847472,44.77025712723112,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,formation_latency_ms,50.9848818532778,51.161651231833346,58.96873849276667,49.15763129138529,52.77910760595502,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,formation_latency_ms,59.27353034044447,58.58931398083335,65.96575038816667,57.76924353783751,60.78703374574559,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,formation_latency_ms,65.66369550465558,65.57073594866668,73.41466080575,63.86473397555613,67.51491706861114,30,30,5000,,
-exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,formation_latency_ms,73.48385205200002,74.05004196383337,81.58224747435003,71.64672209615976,75.28876256826838,30,30,5000,,
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,10.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,15.0,success_rate_percent,96.66666666666667,100.0,100.0,94.0,99.33333333333333,150,30,5000,145,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,20.0,success_rate_percent,94.66666666666667,100.0,100.0,90.66666666666667,98.0,150,30,5000,142,150
+exp1,paper,state_churn,proposed_without_batch,Proposed w/o Batch,state_churn_probability_percent,30.0,success_rate_percent,88.66666666666667,100.0,100.0,83.33333333333333,93.33333333333333,150,30,5000,133,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,0.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,5.0,success_rate_percent,70.66666666666667,100.0,100.0,62.666666666666664,78.0,150,30,5000,106,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,10.0,success_rate_percent,16.666666666666668,0.0,100.0,10.666666666666666,23.333333333333332,150,30,5000,25,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,15.0,success_rate_percent,5.333333333333333,0.0,54.999999999998295,2.0,9.333333333333334,150,30,5000,8,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,20.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
+exp1,paper,state_churn,srd,SRD,state_churn_probability_percent,30.0,success_rate_percent,0.0,0.0,0.0,0.0,0.0,150,30,5000,0,150
+exp1,paper,task_size,cspf,CSPF,task_size,8.0,controller_processing_latency_ms,13.210333333333336,13.24500000000005,13.804999999999902,13.085000000000003,13.332999999999975,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,8.0,formation_latency_ms,746.9743171775001,755.3814360125002,913.9369725512499,730.2489233154375,762.3000369653124,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,8.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,cspf,CSPF,task_size,12.0,controller_processing_latency_ms,19.249666666666595,19.13499999999967,20.414999999999694,19.049666666666663,19.457733333333245,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,12.0,formation_latency_ms,1093.6085199683332,1095.6966528374996,1283.5696340287498,1078.7313941392083,1107.6430561397708,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,12.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,cspf,CSPF,task_size,16.0,controller_processing_latency_ms,25.97433333333305,25.94499999999983,26.54499999999999,25.79566666666637,26.15566666666648,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,16.0,formation_latency_ms,1468.1924801949997,1484.6981444749993,1757.5712496112492,1439.7002076854785,1495.960269041541,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,16.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,cspf,CSPF,task_size,20.0,controller_processing_latency_ms,31.65899999999973,31.55499999999998,32.99500000000017,31.44566666666644,31.877666666666396,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,20.0,formation_latency_ms,1804.0429017841661,1822.2891489374992,2135.724617329998,1771.4914803820827,1836.7880055842286,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,20.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,cspf,CSPF,task_size,24.0,controller_processing_latency_ms,37.60233333333304,37.48499999999969,38.48499999999899,37.40499999999971,37.807666666666385,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,24.0,formation_latency_ms,2161.6486243333325,2171.6560412,2515.0436731662517,2120.9776704578953,2201.616977072083,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,24.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,cspf,CSPF,task_size,28.0,controller_processing_latency_ms,44.250666666666454,43.99999999999986,45.83999999999837,43.97333333333309,44.541399999999854,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,28.0,formation_latency_ms,2564.7007984633333,2568.5888897375,2969.2496821249993,2531.221613354291,2599.6249535873126,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,28.0,success_rate_percent,96.0,100.0,100.0,92.0,98.66666666666667,150,30,5000,144,150
+exp1,paper,task_size,cspf,CSPF,task_size,32.0,controller_processing_latency_ms,50.26600000000026,50.25000000000041,52.050000000000644,49.9300000000003,50.596666666667005,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,32.0,formation_latency_ms,2889.8399427633335,2905.5117507625027,3352.479030636249,2850.0347587604792,2929.862089227667,150,30,5000,,
+exp1,paper,task_size,cspf,CSPF,task_size,32.0,success_rate_percent,98.0,100.0,100.0,94.66666666666667,100.0,150,30,5000,147,150
+exp1,paper,task_size,proposed,Proposed,task_size,8.0,controller_processing_latency_ms,6.583666666666667,6.614999999999998,7.024999999999998,6.491824999999999,6.674833333333334,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,8.0,formation_latency_ms,93.44510796750001,95.1086434125,108.26783470125001,91.65256075727083,95.14987190439582,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,8.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed,Proposed,task_size,12.0,controller_processing_latency_ms,9.227166666666665,9.165,10.045000000000002,9.086629166666667,9.380679166666667,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,12.0,formation_latency_ms,100.11188111416665,101.30072470000002,111.6668477025,98.95728338775001,101.27918461964585,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,12.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed,Proposed,task_size,16.0,controller_processing_latency_ms,12.061833333333338,12.032500000000004,12.470000000000002,11.936500000000006,12.191837500000004,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,16.0,formation_latency_ms,102.87812062416668,103.47565571250001,115.89323776000002,101.51399425281251,104.29525916897917,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,16.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed,Proposed,task_size,20.0,controller_processing_latency_ms,14.445666666666675,14.365000000000009,15.405000000000001,14.302816666666674,14.604670833333339,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,20.0,formation_latency_ms,107.36826983583335,108.78663403750002,119.77263769000002,105.90735776620835,108.80334173189587,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,20.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed,Proposed,task_size,24.0,controller_processing_latency_ms,17.012333333333338,16.94250000000001,17.630000000000006,16.86899583333334,17.154170833333346,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,24.0,formation_latency_ms,112.36685880833335,113.37246928750002,124.15333597250002,111.06918950577085,113.63529057897917,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,24.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed,Proposed,task_size,28.0,controller_processing_latency_ms,19.77733333333335,19.602500000000017,20.88000000000001,19.585995833333346,19.98600416666668,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,28.0,formation_latency_ms,116.37416423416667,117.16024085000001,128.306716955,115.21405681427085,117.57982196520835,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,28.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed,Proposed,task_size,32.0,controller_processing_latency_ms,22.394333333333353,22.387500000000017,23.650000000000013,22.158979166666686,22.62600416666669,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,32.0,formation_latency_ms,119.29939021000003,120.09033106250003,129.28457729000002,117.95054108112504,120.55110569702086,150,30,5000,,
+exp1,paper,task_size,proposed,Proposed,task_size,32.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,controller_processing_latency_ms,6.583666666666667,6.614999999999998,7.024999999999998,6.490999999999999,6.672999999999999,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,formation_latency_ms,257.20327463416663,247.68805890000004,381.8259755525,233.9380236338125,282.39301471691664,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,8.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,controller_processing_latency_ms,9.227166666666665,9.165,10.045000000000002,9.089333333333336,9.3768375,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,formation_latency_ms,366.2214811141667,363.59283137500006,499.59049134624996,337.7553749562083,394.4189309179583,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,12.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,controller_processing_latency_ms,12.061833333333338,12.032500000000004,12.470000000000002,11.939312500000005,12.191016666666671,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,formation_latency_ms,388.19045395750004,378.3109435,521.5459458437501,362.58751128433335,415.1691276225416,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,16.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,controller_processing_latency_ms,14.445666666666675,14.365000000000009,15.405000000000001,14.29931250000001,14.59100416666667,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,formation_latency_ms,458.4614698358333,448.2099062625,603.0756447012501,431.12456523404165,485.68727909837503,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,20.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,controller_processing_latency_ms,17.012333333333338,16.94250000000001,17.630000000000006,16.87050000000001,17.15033750000001,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,formation_latency_ms,525.5712254750001,522.1445631875,652.9123503975,501.6663886948959,550.0986108510833,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,24.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,controller_processing_latency_ms,19.77733333333335,19.602500000000017,20.88000000000001,19.578666666666685,19.987504166666678,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,formation_latency_ms,549.2458375675001,541.9086363875001,683.1380981,529.8857692042292,569.5591770540208,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,28.0,success_rate_percent,100.0,100.0,100.0,100.0,100.0,150,30,5000,150,150
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,controller_processing_latency_ms,22.394333333333353,22.387500000000017,23.650000000000013,22.165500000000023,22.625333333333348,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,formation_latency_ms,591.4630835433334,599.5312709250002,709.43517018875,571.3822329556042,611.2334808842709,150,30,5000,,
+exp1,paper,task_size,proposed_without_batch,Proposed w/o Batch,task_size,32.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,srd,SRD,task_size,8.0,controller_processing_latency_ms,16.064499999999846,16.109999999999793,16.84499999999946,15.899999999999919,16.23599999999978,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,8.0,formation_latency_ms,1380.7867905108333,1384.2217073375,1811.30535279875,1309.2282577041458,1454.0828131861456,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,8.0,success_rate_percent,99.33333333333333,100.0,100.0,98.0,100.0,150,30,5000,149,150
+exp1,paper,task_size,srd,SRD,task_size,12.0,controller_processing_latency_ms,23.50549999999986,23.354999999999443,25.03500000000006,23.250000000000014,23.77499999999978,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,12.0,formation_latency_ms,2212.390519968333,2210.490727525,2927.2021458700005,2104.589507431729,2330.0610659363538,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,12.0,success_rate_percent,98.0,100.0,100.0,96.0,100.0,150,30,5000,147,150
+exp1,paper,task_size,srd,SRD,task_size,16.0,controller_processing_latency_ms,31.77600000000008,31.737500000000637,32.525000000001526,31.53799999999997,32.024500000000174,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,16.0,formation_latency_ms,2938.528146861667,2936.4806464625008,3730.0610514337513,2812.3194850386876,3071.6347128759794,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,16.0,success_rate_percent,94.66666666666667,100.0,100.0,90.66666666666667,98.0,150,30,5000,142,150
+exp1,paper,task_size,srd,SRD,task_size,20.0,controller_processing_latency_ms,38.751499999999965,38.61499999999979,40.50499999999896,38.48199999999995,39.052499999999895,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,20.0,formation_latency_ms,3560.4412751175005,3535.5351568624997,4481.061496276252,3421.2709591059374,3714.686975137792,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,20.0,success_rate_percent,96.0,100.0,100.0,92.0,99.33333333333333,150,30,5000,144,150
+exp1,paper,task_size,srd,SRD,task_size,24.0,controller_processing_latency_ms,46.06649999999987,45.91250000000055,47.225000000003654,45.80391249999943,46.322000000000294,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,24.0,formation_latency_ms,4325.998084333334,4292.317014512499,5391.124568097497,4166.102179352666,4487.0232131620005,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,24.0,success_rate_percent,96.66666666666667,100.0,100.0,92.66666666666667,99.33333333333333,150,30,5000,145,150
+exp1,paper,task_size,srd,SRD,task_size,28.0,controller_processing_latency_ms,54.25399999999837,53.92499999999825,56.339999999999606,53.886499999998335,54.632087499998946,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,28.0,formation_latency_ms,5074.700598463333,5065.467247887504,6326.743090249993,4910.437707991936,5256.946169800582,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,28.0,success_rate_percent,93.33333333333333,100.0,100.0,88.66666666666667,97.33333333333333,150,30,5000,140,150
+exp1,paper,task_size,srd,SRD,task_size,32.0,controller_processing_latency_ms,61.66349999999755,61.6424999999966,64.00499999999106,61.229499999997614,62.09749999999762,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,32.0,formation_latency_ms,5820.534402763332,5821.632280774993,7007.139924981237,5604.576710961437,6037.644110999394,150,30,5000,,
+exp1,paper,task_size,srd,SRD,task_size,32.0,success_rate_percent,92.0,100.0,100.0,86.66666666666667,96.66666666666667,150,30,5000,138,150

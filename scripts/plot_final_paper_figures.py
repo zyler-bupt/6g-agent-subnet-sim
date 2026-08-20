@@ -9,7 +9,7 @@ from typing import Iterable
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.paper_protocol import EXPERIMENT_METHODS
+from experiments.paper_protocol import EXPERIMENT_METHODS, figure_min_topology_clusters
 from scripts.paper_style import (
     CI_ALPHA,
     METHOD_STYLES,
@@ -27,7 +27,7 @@ import numpy as np
 def plot_exp1(
     summary_csv: str | Path,
     output_dir: str | Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     """Render the final two-panel formation figure from aggregated rows."""
 
     rows = _read_csv(Path(summary_csv))
@@ -42,28 +42,34 @@ def plot_exp1(
         row
         for row in rows
         if row["experiment"] == "exp1"
-        and row["series"] == "state_churn"
+        and row["series"] == "task_size"
         and row["metric"] == "success_rate_percent"
     ]
-    _require_complete_methods(latency, EXPERIMENT_METHODS["exp1"], "Exp.1 latency")
+    methods = ("proposed", "cspf", "srd")
+    latency = [row for row in latency if row["method_id"] in methods]
+    success = [row for row in success if row["method_id"] in methods]
+    _require_complete_methods(latency, methods, "Exp.1 latency")
     _require_complete_methods(
         success,
-        EXPERIMENT_METHODS["exp1"],
-        "Exp.1 churn success",
+        methods,
+        "Exp.1 task-size success",
     )
 
     apply_paper_style()
-    figure, axes = plt.subplots(1, 2, figsize=(7.1, 2.25))
-    _plot_lines(axes[0], latency, EXPERIMENT_METHODS["exp1"])
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 2.5))
+    _plot_lines(axes[0], latency, methods, shade_ci=True)
     axes[0].set_xlabel("Number of Business Agents")
-    axes[0].set_ylabel("Formation Latency (ms)")
-    axes[0].set_ylim(bottom=0.0)
+    axes[0].set_ylabel("Formation Latency (ms, log scale)")
+    axes[0].set_yscale("log")
+    axes[0].set_ylim(70.0, 8000.0)
+    axes[0].set_yticks((100.0, 300.0, 1000.0, 3000.0))
+    axes[0].set_yticklabels(("100", "300", "1000", "3000"))
     axes[0].set_xticks(sorted({float(row["x_value"]) for row in latency}))
     style_axis(axes[0])
     panel_label(axes[0], "(a)")
 
-    _plot_lines(axes[1], success, EXPERIMENT_METHODS["exp1"])
-    axes[1].set_xlabel("State Churn Probability (%)")
+    _plot_lines(axes[1], success, methods, shade_ci=True)
+    axes[1].set_xlabel("Number of Business Agents")
     axes[1].set_ylabel("Formation Success Rate (%)")
     axes[1].set_ylim(0.0, 105.0)
     axes[1].set_yticks((0, 20, 40, 60, 80, 100))
@@ -87,6 +93,8 @@ def plot_exp1(
     destination.mkdir(parents=True, exist_ok=True)
     pdf = destination / "Fig1_Formation.pdf"
     png = destination / "Fig1_Formation.png"
+    source = destination / "Fig1_Formation.csv"
+    _write_figure_data(source, (("a", latency), ("b", success)))
     figure.savefig(
         pdf,
         format="pdf",
@@ -97,148 +105,68 @@ def plot_exp1(
     )
     figure.savefig(png, format="png", dpi=300)
     plt.close(figure)
-    return pdf, png
+    return pdf, png, source
 
 
 def plot_exp2(
     summary_csv: str | Path,
     output_dir: str | Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     """Render the two main conditional coordination rates for Exp.2."""
 
     rows = _read_csv(Path(summary_csv))
     methods = EXPERIMENT_METHODS["exp2"]
-    feasible = _metric_rows_for_series(
-        rows,
-        "exp2",
-        "conflict_density",
-        "feasible_solution_rate_percent",
-    )
     qos = _metric_rows_for_series(
         rows,
         "exp2",
         "conflict_density",
         "qos_satisfaction_rate_percent",
     )
-    _require_complete_methods(feasible, methods, "Exp.2 feasible solution rate")
     _require_complete_methods(qos, methods, "Exp.2 QoS satisfaction")
+    available_density = sorted(
+        {
+            float(row["x_value"])
+            for row in rows
+            if row["experiment"] == "exp2"
+            and row["series"] == "conflict_density"
+        }
+    )
+    bar_density = 50.0 if 50.0 in available_density else max(available_density)
+    high_conflict = [
+        row
+        for row in rows
+        if row["experiment"] == "exp2"
+        and row["series"] == "conflict_density"
+        and float(row["x_value"]) == bar_density
+        and row["metric"]
+        in {"feasible_solution_rate_percent", "safe_rejection_rate_percent"}
+    ]
+    _require_complete_methods(high_conflict, methods, "Exp.2 conditional rates")
+    metric_x = {
+        "feasible_solution_rate_percent": 0.0,
+        "safe_rejection_rate_percent": 1.0,
+    }
+    bar_rows = [
+        {**row, "x_value": str(metric_x[row["metric"]])}
+        for row in high_conflict
+    ]
 
     apply_paper_style()
-    figure, axes = plt.subplots(1, 2, figsize=(7.1, 2.25))
-    for axis, selected, ylabel, label in (
-        (axes[0], feasible, "Feasible Solution Rate (%)", "(a)"),
-        (axes[1], qos, "QoS Satisfaction Rate (%)", "(b)"),
-    ):
-        _plot_lines(axis, selected, methods)
-        axis.set_xlabel("Conflict Density (%)")
-        axis.set_ylabel(ylabel)
-        axis.set_ylim(0.0, 105.0)
-        axis.set_yticks((0, 20, 40, 60, 80, 100))
-        axis.set_xticks(sorted({float(row["x_value"]) for row in selected}))
-        style_axis(axis)
-        panel_label(axis, label)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    figure.legend(
-        handles,
-        labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.02),
-        ncol=4,
-        columnspacing=1.1,
-        handlelength=2.2,
-    )
-    figure.subplots_adjust(left=0.083, right=0.992, bottom=0.22, top=0.79, wspace=0.27)
-    destination = Path(output_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    pdf = destination / "Fig2_Cross_Layer_Coordination.pdf"
-    png = destination / "Fig2_Cross_Layer_Coordination.png"
-    figure.savefig(
-        pdf,
-        format="pdf",
-        metadata={
-            "Title": "Cross-Layer Conflict Resolution",
-            "Subject": "Vector paper figure generated from conditional aggregate CSV",
-        },
-    )
-    figure.savefig(png, format="png", dpi=300)
-    plt.close(figure)
-    return pdf, png
-
-
-def plot_exp3(
-    summary_csv: str | Path,
-    output_dir: str | Path,
-) -> tuple[Path, Path]:
-    """Render latency and the correctness--modification frontier for Exp.3."""
-
-    rows = _read_csv(Path(summary_csv))
-    latency = _metric_rows(rows, "exp3", "reconfiguration_latency_ms")
-    rule_change = _metric_rows(rows, "exp3", "rule_change_ratio_percent")
-    success = _metric_rows(rows, "exp3", "success_rate_percent")
-    methods = EXPERIMENT_METHODS["exp3"]
-    _require_complete_methods(latency, methods, "Exp.3 latency")
-    _require_complete_methods(rule_change, methods, "Exp.3 rule change")
-    _require_complete_methods(success, methods, "Exp.3 success")
-
-    apply_paper_style()
-    figure, axes = plt.subplots(1, 2, figsize=(7.1, 2.25))
-    _plot_lines(axes[0], latency, methods)
-    axes[0].set_xlabel("Affected Scope Ratio (%)")
-    axes[0].set_ylabel("Reconfiguration Latency (ms)")
-    axes[0].set_ylim(bottom=0.0)
-    axes[0].set_xticks(sorted({float(row["x_value"]) for row in latency}))
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 2.5))
+    _plot_lines(axes[0], qos, methods, shade_ci=False)
+    axes[0].set_xlabel("Conflict Density (%)")
+    axes[0].set_ylabel("QoS Satisfaction Rate (%)")
+    axes[0].set_ylim(0.0, 105.0)
+    axes[0].set_yticks((0, 20, 40, 60, 80, 100))
+    axes[0].set_xticks(sorted({float(row["x_value"]) for row in qos}))
     style_axis(axes[0])
     panel_label(axes[0], "(a)")
 
-    rules_by_method = _rows_by_method(rule_change)
-    success_by_method = _rows_by_method(success)
-    for method_id in methods:
-        method_rules = {
-            float(row["x_value"]): row for row in rules_by_method[method_id]
-        }
-        method_success = {
-            float(row["x_value"]): row for row in success_by_method[method_id]
-        }
-        scope_points = sorted(set(method_rules) & set(method_success))
-        x_values = [float(method_rules[scope]["mean"]) for scope in scope_points]
-        y_values = [float(method_success[scope]["mean"]) for scope in scope_points]
-        line = axes[1].plot(
-            x_values,
-            y_values,
-            **method_line_kwargs(method_id),
-        )[0]
-        x_lower = [
-            x - float(method_rules[scope]["ci_lower"])
-            for x, scope in zip(x_values, scope_points)
-        ]
-        x_upper = [
-            float(method_rules[scope]["ci_upper"]) - x
-            for x, scope in zip(x_values, scope_points)
-        ]
-        y_lower = [
-            y - float(method_success[scope]["ci_lower"])
-            for y, scope in zip(y_values, scope_points)
-        ]
-        y_upper = [
-            float(method_success[scope]["ci_upper"]) - y
-            for y, scope in zip(y_values, scope_points)
-        ]
-        axes[1].errorbar(
-            x_values,
-            y_values,
-            xerr=(x_lower, x_upper),
-            yerr=(y_lower, y_upper),
-            fmt="none",
-            ecolor=line.get_color(),
-            elinewidth=0.7,
-            capsize=1.8,
-            alpha=0.45,
-            zorder=2,
-        )
-    axes[1].set_xlabel("Rule Change Ratio (%)")
-    axes[1].set_ylabel("Reconfiguration Success Rate (%)")
-    axes[1].set_xlim(left=0.0)
+    _plot_grouped_bars(axes[1], bar_rows, methods, x_values=(0.0, 1.0))
+    axes[1].set_xticks((0.0, 1.0))
+    axes[1].set_xticklabels(("Feasible\nSolution", "Safe\nRejection"))
+    axes[1].set_xlabel(f"Conditional Metric at {bar_density:g}% Conflict")
+    axes[1].set_ylabel("Rate (%)")
     axes[1].set_ylim(0.0, 105.0)
     axes[1].set_yticks((0, 20, 40, 60, 80, 100))
     style_axis(axes[1])
@@ -257,8 +185,80 @@ def plot_exp3(
     figure.subplots_adjust(left=0.083, right=0.992, bottom=0.22, top=0.79, wspace=0.27)
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    pdf = destination / "Fig3_Business_Elasticity.pdf"
-    png = destination / "Fig3_Business_Elasticity.png"
+    pdf = destination / "Fig2_CrossLayer.pdf"
+    png = destination / "Fig2_CrossLayer.png"
+    source = destination / "Fig2_CrossLayer.csv"
+    _write_figure_data(source, (("a", qos), ("b", high_conflict)))
+    figure.savefig(
+        pdf,
+        format="pdf",
+        metadata={
+            "Title": "Cross-Layer Conflict Resolution",
+            "Subject": "Vector paper figure generated from conditional aggregate CSV",
+        },
+    )
+    figure.savefig(png, format="png", dpi=300)
+    plt.close(figure)
+    return pdf, png, source
+
+
+def plot_exp3(
+    summary_csv: str | Path,
+    output_dir: str | Path,
+) -> tuple[Path, Path, Path]:
+    """Render latency and modification scope over affected Agent count."""
+
+    rows = _read_csv(Path(summary_csv))
+    latency = _metric_rows_for_series(
+        rows, "exp3", "affected_agents", "reconfiguration_latency_ms"
+    )
+    rule_change = _metric_rows_for_series(
+        rows, "exp3", "affected_agents", "rule_change_ratio_percent"
+    )
+    # Exact dependency-closure sizes are observed rather than manufactured.
+    # Consequently, the tail can be sparse.  Keep every value in raw and
+    # aggregate CSVs, but only draw points with enough independent topology
+    # clusters for an interpretable cluster-bootstrap interval.
+    latency = _well_supported_exp3_rows(latency)
+    rule_change = _well_supported_exp3_rows(rule_change)
+    methods = EXPERIMENT_METHODS["exp3"]
+    _require_complete_methods(latency, methods, "Exp.3 latency")
+    _require_complete_methods(rule_change, methods, "Exp.3 rule change")
+
+    apply_paper_style()
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 2.5))
+    _plot_lines(axes[0], latency, methods, shade_ci=True)
+    axes[0].set_xlabel("Number of Affected Agents")
+    axes[0].set_ylabel("Reconfiguration Latency (ms)")
+    axes[0].set_ylim(bottom=0.0)
+    axes[0].set_xticks(sorted({float(row["x_value"]) for row in latency}))
+    style_axis(axes[0])
+    panel_label(axes[0], "(a)")
+
+    _plot_lines(axes[1], rule_change, methods, shade_ci=True)
+    axes[1].set_xlabel("Number of Affected Agents")
+    axes[1].set_ylabel("Changed Rule Ratio (%)")
+    axes[1].set_ylim(bottom=0.0)
+    style_axis(axes[1])
+    panel_label(axes[1], "(b)")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=4,
+        columnspacing=1.1,
+        handlelength=2.2,
+    )
+    figure.subplots_adjust(left=0.083, right=0.992, bottom=0.22, top=0.79, wspace=0.27)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    pdf = destination / "Fig3_Elasticity.pdf"
+    png = destination / "Fig3_Elasticity.png"
+    source = destination / "Fig3_Elasticity.csv"
+    _write_figure_data(source, (("a", latency), ("b", rule_change)))
     figure.savefig(
         pdf,
         format="pdf",
@@ -269,14 +269,25 @@ def plot_exp3(
     )
     figure.savefig(png, format="png", dpi=300)
     plt.close(figure)
-    return pdf, png
+    return pdf, png, source
+
+
+def _well_supported_exp3_rows(
+    rows: Iterable[dict[str, str]],
+) -> list[dict[str, str]]:
+    selected = []
+    for row in rows:
+        threshold = figure_min_topology_clusters(row.get("mode", "paper"))
+        if int(float(row.get("cluster_count", "0") or 0)) >= threshold:
+            selected.append(row)
+    return selected
 
 
 def plot_exp4(
     summary_csv: str | Path,
     output_dir: str | Path,
-) -> tuple[Path, Path]:
-    """Render failure latency/success bars and the capacity-stress curve."""
+) -> tuple[Path, Path, Path]:
+    """Render recovery latency and physical modification-scope bars."""
 
     rows = _read_csv(Path(summary_csv))
     methods = EXPERIMENT_METHODS["exp4"]
@@ -286,23 +297,19 @@ def plot_exp4(
         "failure_type",
         "recovery_latency_ms",
     )
-    success = _metric_rows_for_series(
+    modification_scope = _metric_rows_for_series(
         rows,
         "exp4",
         "failure_type",
-        "success_rate_percent",
+        "modification_scope_ratio_percent",
     )
-    stress = _metric_rows_for_series(
-        rows,
-        "exp4",
-        "capacity_stress",
-        "success_rate_percent",
+    _require_complete_methods(latency, methods, "Exp.4 recovery latency")
+    _require_complete_methods(
+        modification_scope, methods, "Exp.4 modification scope"
     )
-    _require_complete_methods(success, methods, "Exp.4 recovery success")
-    _require_complete_methods(stress, methods, "Exp.4 capacity stress")
 
     apply_paper_style()
-    figure, axes = plt.subplots(1, 3, figsize=(7.1, 2.25))
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 2.5))
     _plot_grouped_bars(
         axes[0],
         latency,
@@ -318,25 +325,16 @@ def plot_exp4(
 
     _plot_grouped_bars(
         axes[1],
-        success,
+        modification_scope,
         methods,
         x_values=(0.0, 1.0, 2.0),
+        missing_label="N/A",
     )
-    axes[1].set_ylabel("Recovery Success Rate (%)")
-    axes[1].set_ylim(0.0, 105.0)
-    axes[1].set_yticks((0, 20, 40, 60, 80, 100))
+    axes[1].set_ylabel("Modification Scope (%)")
+    axes[1].set_ylim(bottom=0.0)
     _failure_type_ticks(axes[1])
     style_axis(axes[1])
     panel_label(axes[1], "(b)")
-
-    _plot_lines(axes[2], stress, methods)
-    axes[2].set_xlabel("Capacity Reduction (%)")
-    axes[2].set_ylabel("Recovery Success Rate (%)")
-    axes[2].set_ylim(0.0, 105.0)
-    axes[2].set_yticks((0, 20, 40, 60, 80, 100))
-    axes[2].set_xticks(sorted({float(row["x_value"]) for row in stress}))
-    style_axis(axes[2])
-    panel_label(axes[2], "(c)")
 
     handles, labels = axes[1].get_legend_handles_labels()
     figure.legend(
@@ -357,8 +355,13 @@ def plot_exp4(
     )
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    pdf = destination / "Fig4_Failure_Recovery.pdf"
-    png = destination / "Fig4_Failure_Recovery.png"
+    pdf = destination / "Fig4_Recovery.pdf"
+    png = destination / "Fig4_Recovery.png"
+    source = destination / "Fig4_Recovery.csv"
+    _write_figure_data(
+        source,
+        (("a", latency), ("b", modification_scope)),
+    )
     figure.savefig(
         pdf,
         format="pdf",
@@ -369,7 +372,7 @@ def plot_exp4(
     )
     figure.savefig(png, format="png", dpi=300)
     plt.close(figure)
-    return pdf, png
+    return pdf, png, source
 
 
 def _plot_grouped_bars(
@@ -439,6 +442,8 @@ def _plot_lines(
     axis,
     rows: Iterable[dict[str, str]],
     method_ids: Iterable[str],
+    *,
+    shade_ci: bool,
 ) -> None:
     by_method: dict[str, list[dict[str, str]]] = {}
     for row in rows:
@@ -453,15 +458,51 @@ def _plot_lines(
         lowers = [float(row["ci_lower"]) for row in selected]
         uppers = [float(row["ci_upper"]) for row in selected]
         line = axis.plot(x_values, means, **method_line_kwargs(method_id))[0]
-        axis.fill_between(
-            x_values,
-            lowers,
-            uppers,
-            color=line.get_color(),
-            alpha=CI_ALPHA,
-            linewidth=0.0,
-            zorder=1,
-        )
+        if shade_ci:
+            axis.fill_between(
+                x_values,
+                lowers,
+                uppers,
+                color=line.get_color(),
+                alpha=CI_ALPHA,
+                linewidth=0.0,
+                zorder=1,
+            )
+        else:
+            axis.errorbar(
+                x_values,
+                means,
+                yerr=(
+                    [mean - lower for mean, lower in zip(means, lowers)],
+                    [upper - mean for mean, upper in zip(means, uppers)],
+                ),
+                fmt="none",
+                ecolor=line.get_color(),
+                elinewidth=0.7,
+                capsize=1.8,
+                alpha=0.55,
+                zorder=2,
+            )
+
+
+def _write_figure_data(
+    path: Path,
+    panels: Iterable[tuple[str, Iterable[dict[str, str]]]],
+) -> None:
+    materialized = [
+        {"panel": panel, **row}
+        for panel, rows in panels
+        for row in rows
+    ]
+    if not materialized:
+        raise ValueError("figure source data must not be empty")
+    fieldnames = ["panel"] + sorted(
+        {key for row in materialized for key in row if key != "panel"}
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(materialized)
 
 
 def _require_complete_methods(

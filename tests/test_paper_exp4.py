@@ -131,6 +131,56 @@ class PaperFailureStrategyTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_agent_recovery_records_changed_agent_and_path_objects(self) -> None:
+        snapshot = generate_paper_failure_snapshot(
+            "agent_failure",
+            1.0,
+            seed=2,
+            event_id=0,
+        )
+
+        proposed = await run_paper_failure_method(snapshot, "proposed")
+
+        self.assertTrue(proposed.success, proposed.failure_reason)
+        self.assertGreaterEqual(proposed.changed_agents, 1)
+        self.assertGreaterEqual(proposed.changed_paths, 1)
+        expected = (
+            proposed.changed_rules
+            + proposed.changed_paths
+            + proposed.changed_agents
+        ) / (
+            proposed.total_rule_objects + proposed.total_paths + proposed.total_agents
+        )
+        self.assertEqual(proposed.modification_scope_ratio, expected)
+
+    async def test_full_rebuild_scope_covers_each_main_failure_recovery(self) -> None:
+        for failure_type, severity in (
+            ("agent_failure", 1.0),
+            ("link_failure", 1.0),
+            ("capacity_degradation", 0.30),
+        ):
+            with self.subTest(failure_type=failure_type):
+                snapshot = generate_paper_failure_snapshot(
+                    failure_type,
+                    severity,
+                    seed=0,
+                    event_id=0,
+                )
+
+                proposed = await run_paper_failure_method(snapshot, "proposed")
+                full = await run_paper_failure_method(snapshot, "full_rebuild")
+
+                self.assertTrue(proposed.success, proposed.failure_reason)
+                self.assertTrue(full.success, full.failure_reason)
+                self.assertEqual(full.changed_paths, full.total_paths)
+                self.assertEqual(full.changed_agents, full.total_agents)
+                self.assertAlmostEqual(full.rule_change_ratio, 1.0)
+                self.assertLessEqual(full.modification_scope_ratio, 1.0)
+                self.assertGreaterEqual(
+                    full.modification_scope_ratio,
+                    proposed.modification_scope_ratio,
+                )
+
     async def test_cross_layer_methods_complete_capacity_scope_escalation(self) -> None:
         for reduction in (0.10, 0.20, 0.30, 0.40, 0.50):
             with self.subTest(reduction=reduction):
@@ -148,6 +198,29 @@ class PaperFailureStrategyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PaperExp4RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rows_carry_failure_modification_scope_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = await run_exp4(
+                "pilot",
+                Path(directory),
+                seeds=(0,),
+                event_ids=(0,),
+                capacity_reductions=(10,),
+            )
+
+        successful_rows = [row for row in rows if row.success]
+        self.assertTrue(successful_rows)
+        self.assertTrue(
+            all(
+                row.total_paths is not None
+                and row.changed_paths is not None
+                and row.total_agents is not None
+                and row.changed_agents is not None
+                and row.modification_scope_ratio is not None
+                for row in successful_rows
+            )
+        )
+
     async def test_small_grid_writes_complete_paired_final_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

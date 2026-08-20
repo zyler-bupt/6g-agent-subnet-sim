@@ -30,8 +30,14 @@ class PaperFailureOutcome:
     event_occurred_at: float
     stable_verify_finished_at: float | None
     total_rules: int
+    total_rule_objects: int
     changed_rules: int
     rule_change_ratio: float
+    total_paths: int
+    changed_paths: int
+    total_agents: int
+    changed_agents: int
+    modification_scope_ratio: float
     total_gateways: int
     changed_gateways: int
     gateway_change_ratio: float
@@ -488,6 +494,19 @@ async def run_paper_failure_method(
     )
     plan = planning.plan
     changed_rules = len(plan.rule_delta.changed_rule_ids)
+    (
+        total_rule_objects,
+        total_paths,
+        changed_paths,
+        total_agents,
+        changed_agents,
+        modification_scope_ratio,
+    ) = _modification_scope(
+        stable,
+        plan.target_state,
+        changed_rules,
+        plan.method,
+    )
     unaffected = set(stable.business_edges) - set(context.affected_edge_ids)
     disturbed = _disturbed_edges(stable, plan.target_state, plan.rule_delta, unaffected)
     stable_verified = any(
@@ -503,8 +522,16 @@ async def run_paper_failure_method(
         event_occurred_at=0.0,
         stable_verify_finished_at=(latency_ms / 1000.0 if execution.success else None),
         total_rules=len(stable.rules),
+        total_rule_objects=total_rule_objects,
         changed_rules=changed_rules,
-        rule_change_ratio=(changed_rules / len(stable.rules) if stable.rules else 0.0),
+        rule_change_ratio=(
+            changed_rules / total_rule_objects if total_rule_objects else 0.0
+        ),
+        total_paths=total_paths,
+        changed_paths=changed_paths,
+        total_agents=total_agents,
+        changed_agents=changed_agents,
+        modification_scope_ratio=modification_scope_ratio,
         total_gateways=len(snapshot.catalog.gateways),
         changed_gateways=len(plan.affected_gateways),
         gateway_change_ratio=len(plan.affected_gateways) / len(snapshot.catalog.gateways),
@@ -931,6 +958,66 @@ def _network_only_rejection(method: str, reason: str) -> RecoveryPlanningResult:
     )
 
 
+def _modification_scope(
+    stable: TaskSubnet,
+    target: TaskSubnet,
+    changed_rules: int,
+    method_id: str,
+) -> tuple[int, int, int, int, int, float]:
+    stable_paths = stable.routes
+    target_paths = target.routes
+    stable_agents = _agent_objects(stable)
+    target_agents = _agent_objects(target)
+    total_paths = len(set(stable_paths) | set(target_paths))
+    changed_paths = (
+        total_paths
+        if method_id == "full_rebuild"
+        else _changed_object_count(stable_paths, target_paths)
+    )
+    total_agents = len(set(stable_agents) | set(target_agents))
+    changed_agents = (
+        total_agents
+        if method_id == "full_rebuild"
+        else _changed_object_count(stable_agents, target_agents)
+    )
+    total_rule_objects = len(set(stable.rules) | set(target.rules))
+    denominator = total_rule_objects + total_paths + total_agents
+    modification_scope_ratio = (
+        (changed_rules + changed_paths + changed_agents) / denominator
+        if denominator
+        else 0.0
+    )
+    return (
+        total_rule_objects,
+        total_paths,
+        changed_paths,
+        total_agents,
+        changed_agents,
+        modification_scope_ratio,
+    )
+
+
+def _agent_objects(subnet: TaskSubnet) -> dict[tuple[str, str], object]:
+    return {
+        (layer, agent_id): agent
+        for layer, agents in (
+            ("application", subnet.application_agents),
+            ("transport", subnet.transport_agents),
+            ("network", subnet.network_agents),
+            ("physical", subnet.physical_agents),
+        )
+        for agent_id, agent in agents.items()
+    }
+
+
+def _changed_object_count(stable: dict, target: dict) -> int:
+    missing = object()
+    return sum(
+        stable.get(object_id, missing) != target.get(object_id, missing)
+        for object_id in set(stable) | set(target)
+    )
+
+
 def _rejected_outcome(
     snapshot: PaperFailureSnapshot,
     stable: TaskSubnet,
@@ -949,8 +1036,14 @@ def _rejected_outcome(
         event_occurred_at=0.0,
         stable_verify_finished_at=None,
         total_rules=len(stable.rules),
+        total_rule_objects=len(stable.rules),
         changed_rules=0,
         rule_change_ratio=0.0,
+        total_paths=len(stable.routes),
+        changed_paths=0,
+        total_agents=len(_agent_objects(stable)),
+        changed_agents=0,
+        modification_scope_ratio=0.0,
         total_gateways=len(snapshot.catalog.gateways),
         changed_gateways=0,
         gateway_change_ratio=0.0,

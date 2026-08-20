@@ -1,10 +1,10 @@
 [
   {
-    "code": "ALWAYS_SUCCESS",
-    "experiment": "exp4",
     "level": "WARNING",
+    "code": "ALWAYS_SUCCESS",
     "message": "full_rebuild succeeds for every sampled capacity_stress trial",
-    "method_id": "full_rebuild",
-    "series": "capacity_stress"
+    "experiment": "exp4",
+    "series": "capacity_stress",
+    "method_id": "full_rebuild"
   }
 ]

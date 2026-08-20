@@ -38,6 +38,7 @@ class PaperTrial:
     affected_scope_bucket_percent: float | None = None
     failure_type: str | None = None
     failure_severity: float | None = None
+    controller_processing_latency_ms: float | None = None
     formation_latency_ms: float | None = None
     resolution_latency_ms: float | None = None
     reconfiguration_latency_ms: float | None = None
@@ -47,8 +48,15 @@ class PaperTrial:
     safe_rejection: bool | None = None
     failure_reason: str | None = None
     total_rules: int | None = None
+    total_rule_objects: int | None = None
     changed_rules: int | None = None
     rule_change_ratio: float | None = None
+    total_paths: int | None = None
+    changed_paths: int | None = None
+    total_agents: int | None = None
+    changed_agents: int | None = None
+    modification_scope_ratio: float | None = None
+    affected_agent_count: int | None = None
     total_gateways: int | None = None
     changed_gateways: int | None = None
     gateway_change_ratio: float | None = None

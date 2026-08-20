@@ -12,7 +12,10 @@ from typing import Any, Iterable, Mapping, Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.paper_protocol import EXPERIMENT_METHODS
+from experiments.paper_protocol import (
+    EXPERIMENT_METHODS,
+    PAPER_FIGURE_MIN_TOPOLOGY_CLUSTERS,
+)
 from src.metrics.paper import PAPER_TRIAL_FIELDS
 
 
@@ -115,6 +118,7 @@ def check_results(
         "conflict_density",
         "affected_scope_ratio",
         "failure_severity",
+        "modification_scope_ratio",
         "gateway_change_ratio",
         "unaffected_disturbance_ratio",
     )
@@ -165,7 +169,7 @@ def _constant_output_findings(
         primary_latency_series = {
             "exp1": {"task_size"},
             "exp2": set(),
-            "exp3": {"affected_scope"},
+            "exp3": {"affected_agents", "affected_scope"},
             "exp4": {"failure_type"},
         }.get(experiment, set())
         if latency_field is not None and series in primary_latency_series:
@@ -189,9 +193,9 @@ def _constant_output_findings(
                     )
                 )
         primary_rate_series = {
-            "exp1": {"state_churn"},
+            "exp1": {"task_size", "state_churn"},
             "exp2": {"conflict_density"},
-            "exp3": {"affected_scope"},
+            "exp3": {"affected_agents", "affected_scope"},
             "exp4": {"failure_type", "capacity_stress"},
         }.get(experiment, set())
         successes = (
@@ -257,6 +261,22 @@ def _exp1_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
                     )
                 )
 
+    task_successes = [
+        value
+        for row in task_rows
+        if (value := _optional_boolean(row.get("success"))) is not None
+    ]
+    if task_successes and all(task_successes):
+        findings.append(
+            SanityFinding(
+                "WARNING",
+                "SCENARIO_MAY_BE_TOO_EASY",
+                "all methods form every sampled task size; the scalability success curve is uninformative",
+                "exp1",
+                "task_size",
+            )
+        )
+
     churn_rows = [row for row in rows if _text(row.get("series")) == "state_churn"]
     for probability, point_rows in _group(churn_rows, "state_churn_probability").items():
         numeric_probability = _optional_number(probability)
@@ -295,16 +315,26 @@ def _exp1_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
 
 
 def _exp3_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
+    primary_series = (
+        "affected_agents"
+        if any(_text(row.get("series")) == "affected_agents" for row in rows)
+        else "affected_scope"
+    )
     proposed = [
         row
         for row in rows
-        if _text(row.get("series")) == "affected_scope"
+        if _text(row.get("series")) == primary_series
         and _text(row.get("method_id")) == "proposed"
     ]
     means = []
+    x_field = (
+        "affected_agent_count"
+        if primary_series == "affected_agents"
+        else "affected_scope_bucket_percent"
+    )
     for bucket, point_rows in _group(
         proposed,
-        "affected_scope_bucket_percent",
+        x_field,
     ).items():
         bucket_value = _optional_number(bucket)
         values = [
@@ -315,25 +345,111 @@ def _exp3_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
         if bucket_value is not None and values:
             means.append((bucket_value, mean(values)))
     means.sort()
+    findings = _exp3_support_findings(rows)
     if len(means) < 2:
-        return []
+        return findings
     nondecreasing = sum(
         right[1] >= left[1]
         for left, right in zip(means, means[1:])
     )
     comparisons = len(means) - 1
     if means[-1][1] <= means[0][1] or nondecreasing / comparisons < 0.60:
-        return [
+        findings.append(
             SanityFinding(
                 "WARNING",
                 "EXP3_PROPOSED_RULES_NOT_INCREASING",
-                "Proposed changed rules do not generally rise with exact affected scope",
+                "Proposed changed rules do not generally rise with affected Agent count",
                 "exp3",
-                "affected_scope",
+                primary_series,
                 "proposed",
             )
-        ]
-    return []
+        )
+    return findings
+
+
+def _exp3_support_findings(
+    rows: Sequence[dict[str, Any]],
+) -> list[SanityFinding]:
+    """Audit exact affected-Agent x values used by paper figures.
+
+    Event generation targets dependency-scope buckets and observes the exact
+    Agent count afterwards.  Sparse tail values remain valid raw observations,
+    but are excluded from formal curves when fewer than ten independent
+    topology seeds contribute.
+    """
+
+    paper_rows = [
+        row
+        for row in rows
+        if _text(row.get("mode")) == "paper"
+        and _text(row.get("series")) == "affected_agents"
+    ]
+    if not paper_rows:
+        return []
+    threshold = PAPER_FIGURE_MIN_TOPOLOGY_CLUSTERS
+    sparse: list[str] = []
+    findings: list[SanityFinding] = []
+    for method_id, method_rows in _group(paper_rows, "method_id").items():
+        supported_all = 0
+        supported_latency = 0
+        for x_value, point_rows in _group(method_rows, "affected_agent_count").items():
+            all_clusters = len({_text(row.get("seed")) for row in point_rows})
+            latency_clusters = len(
+                {
+                    _text(row.get("seed"))
+                    for row in point_rows
+                    if _optional_number(row.get("reconfiguration_latency_ms"))
+                    is not None
+                }
+            )
+            if all_clusters >= threshold:
+                supported_all += 1
+            else:
+                sparse.append(f"{method_id}:x={x_value}:all={all_clusters}")
+            if latency_clusters >= threshold:
+                supported_latency += 1
+            elif latency_clusters != all_clusters:
+                sparse.append(
+                    f"{method_id}:x={x_value}:successful-latency={latency_clusters}"
+                )
+        if supported_all < 3:
+            findings.append(
+                SanityFinding(
+                    "ERROR",
+                    "EXP3_INSUFFICIENT_SUPPORTED_X",
+                    f"{method_id} has only {supported_all} exact affected-Agent "
+                    f"points with at least {threshold} topology clusters",
+                    "exp3",
+                    "affected_agents",
+                    _text(method_id),
+                )
+            )
+        required_latency_points = 1 if method_id == "local_only" else 3
+        if supported_latency < required_latency_points:
+            findings.append(
+                SanityFinding(
+                    "ERROR",
+                    "EXP3_INSUFFICIENT_LATENCY_SUPPORT",
+                    f"{method_id} has only {supported_latency} successful-latency "
+                    f"points with at least {threshold} topology clusters",
+                    "exp3",
+                    "affected_agents",
+                    _text(method_id),
+                )
+            )
+    if sparse:
+        findings.append(
+            SanityFinding(
+                "INFO",
+                "EXP3_SPARSE_X_EXCLUDED",
+                f"formal Exp.3 curves exclude {len(sparse)} method/x metric "
+                f"points below {threshold} independent topology clusters; "
+                "all observations remain in raw and aggregate CSVs",
+                "exp3",
+                "affected_agents",
+            )
+        )
+    return findings
 
 
 def _exp2_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
@@ -478,6 +594,8 @@ def _series_x_value(row: Mapping[str, Any]) -> float | None:
             if bucket is not None
             else _optional_number(row.get("affected_scope_ratio"))
         )
+    if series == "affected_agents":
+        return _optional_number(row.get("affected_agent_count"))
     if series == "failure_type":
         return {
             "agent_failure": 0.0,

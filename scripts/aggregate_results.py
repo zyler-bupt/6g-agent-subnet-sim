@@ -153,11 +153,26 @@ def _row_aggregate_values(
     series: str,
 ) -> tuple[str, float, list[tuple[str, float]]]:
     if experiment == "exp1" and series == "task_size":
-        metric = "formation_latency_ms"
         return (
             "task_size",
             _number(row.get("task_size"), "task_size"),
-            [(metric, _number(row.get(metric), metric))],
+            [
+                (
+                    "controller_processing_latency_ms",
+                    _number(
+                        row.get("controller_processing_latency_ms"),
+                        "controller_processing_latency_ms",
+                    ),
+                ),
+                (
+                    "formation_latency_ms",
+                    _number(row.get("formation_latency_ms"), "formation_latency_ms"),
+                ),
+                (
+                    "success_rate_percent",
+                    100.0 if _boolean(row.get("success")) else 0.0,
+                ),
+            ],
         )
     if experiment == "exp1" and series == "state_churn":
         return (
@@ -196,11 +211,16 @@ def _row_aggregate_values(
                 )
             ],
         )
-    if experiment == "exp3" and series == "affected_scope":
-        x_value = _number(
-            row.get("affected_scope_bucket_percent"),
-            "affected_scope_bucket_percent",
-        )
+    if experiment == "exp3" and series in {"affected_scope", "affected_agents"}:
+        if series == "affected_agents":
+            x_name = "affected_agent_count"
+            x_value = _number(row.get("affected_agent_count"), x_name)
+        else:
+            x_name = "affected_scope_ratio_percent"
+            x_value = _number(
+                row.get("affected_scope_bucket_percent"),
+                "affected_scope_bucket_percent",
+            )
         values = [
             (
                 "rule_change_ratio_percent",
@@ -229,7 +249,7 @@ def _row_aggregate_values(
                     _number(latency, "reconfiguration_latency_ms"),
                 )
             )
-        return "affected_scope_ratio_percent", x_value, values
+        return x_name, x_value, values
     if experiment == "exp4" and series in {"failure_type", "capacity_stress"}:
         if series == "failure_type":
             failure_indices = {
@@ -278,6 +298,18 @@ def _row_aggregate_values(
                 (
                     "recovery_latency_ms",
                     _number(latency, "recovery_latency_ms"),
+                )
+            )
+        modification_scope = row.get("modification_scope_ratio")
+        if _boolean(row.get("success")) and modification_scope not in (None, ""):
+            values.append(
+                (
+                    "modification_scope_ratio_percent",
+                    100.0
+                    * _number(
+                        modification_scope,
+                        "modification_scope_ratio",
+                    ),
                 )
             )
         return x_name, x_value, values

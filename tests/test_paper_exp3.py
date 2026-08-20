@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from collections import Counter
+from copy import deepcopy
+from dataclasses import replace
 import tempfile
 from time import perf_counter
 from unittest.mock import patch
@@ -10,8 +12,11 @@ from pathlib import Path
 from experiments.exp3_business_elasticity import run_exp3
 from experiments.paper_protocol import EXPERIMENT_METHODS
 from src.controller.business_reconfiguration import (
+    _changed_agent_counts,
+    _changed_path_counts,
     make_business_change_event,
     plan_business_change,
+    run_business_reconfiguration_method,
 )
 from src.controller.transaction_executor import TransactionExecutor
 from src.simulation.business_change_generator import (
@@ -114,6 +119,45 @@ class BusinessChangePilotGridTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BusinessStrategyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_scope_excludes_unselected_path_and_agent_differences(self) -> None:
+        snapshot, controller, stable = await self._stable_snapshot(10, seed=0, event_id=0)
+        local = await plan_business_change(controller, stable, snapshot, "local_only")
+        unselected_edge_id = next(
+            edge_id
+            for edge_id in stable.business_edges
+            if edge_id not in local.selected_edge_ids
+        )
+        synthetic_target = deepcopy(stable)
+        session_index = next(
+            index
+            for index, session in enumerate(synthetic_target.sessions)
+            if session.business_edge_id == unselected_edge_id
+        )
+        session = synthetic_target.sessions[session_index]
+        synthetic_target.sessions[session_index] = replace(
+            session,
+            gateway_path=tuple(reversed(session.gateway_path)),
+        )
+        synthetic_target.application_agents[session.source] = replace(
+            synthetic_target.application_agents[session.source],
+            task_stage="reconfigured",
+        )
+
+        _, changed_paths = _changed_path_counts(
+            stable,
+            synthetic_target,
+            local.selected_edge_ids,
+        )
+        _, changed_agents = _changed_agent_counts(
+            stable,
+            synthetic_target,
+            local.selected_edge_ids,
+            snapshot.change.changed_object_ids,
+        )
+
+        self.assertEqual(changed_paths, 0)
+        self.assertEqual(changed_agents, 0)
+
     async def test_local_only_is_one_hop_and_never_escalates(self) -> None:
         snapshot, controller, stable = await self._stable_snapshot(30, seed=2, event_id=1)
 
@@ -270,6 +314,38 @@ class BusinessStrategyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PaperExp3RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_affected_agent_count_is_shared_and_matches_exact_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = await run_exp3(
+                "pilot",
+                Path(directory),
+                seeds=(0,),
+                buckets=(10,),
+            )
+
+        expected_by_event = {
+            event_id: len(
+                sample_affected_scope_bucket(
+                    10,
+                    seed=0,
+                    event_id=event_id,
+                    schedule_index=event_id,
+                ).closure.agent_ids
+            )
+            for event_id in (0, 1)
+        }
+        paired_rows: dict[str, list] = {}
+        for row in rows:
+            paired_rows.setdefault(row.trial_id, []).append(row)
+            self.assertEqual(row.series, "affected_agents")
+            self.assertEqual(row.affected_agent_count, expected_by_event[row.event_id])
+        self.assertTrue(
+            all(
+                len({row.affected_agent_count for row in paired}) == 1
+                for paired in paired_rows.values()
+            )
+        )
+
     async def test_pilot_writes_complete_paired_rows_with_exact_scope_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -339,6 +415,53 @@ class PaperExp3RunnerTests(unittest.IsolatedAsyncioTestCase):
             sum(row.reconfiguration_latency_ms for row in proposed) / len(proposed),
             sum(row.reconfiguration_latency_ms for row in full) / len(full),
         )
+        for proposed_row, full_row in zip(proposed, full):
+            self.assertEqual(proposed_row.trial_id, full_row.trial_id)
+            for row in (proposed_row, full_row):
+                self.assertIsNotNone(row.total_paths)
+                self.assertIsNotNone(row.changed_paths)
+                self.assertIsNotNone(row.total_agents)
+                self.assertIsNotNone(row.changed_agents)
+                self.assertAlmostEqual(
+                    row.modification_scope_ratio,
+                    (
+                        row.changed_rules + row.changed_paths + row.changed_agents
+                    )
+                    / (row.total_rule_objects + row.total_paths + row.total_agents),
+                )
+            self.assertGreaterEqual(full_row.changed_rules, proposed_row.changed_rules)
+            self.assertGreaterEqual(
+                full_row.modification_scope_ratio,
+                proposed_row.modification_scope_ratio,
+            )
+
+    async def test_local_only_does_not_report_more_changed_objects_than_full_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = await run_exp3(
+                "pilot",
+                Path(directory),
+                seeds=(1,),
+                buckets=(20,),
+            )
+
+        by_trial: dict[str, dict[str, object]] = {}
+        for row in rows:
+            by_trial.setdefault(row.trial_id, {})[row.method_id] = row
+        for methods in by_trial.values():
+            local = methods["local_only"]
+            full = methods["full_rebuild"]
+            self.assertLessEqual(local.changed_paths, full.changed_paths)
+            self.assertLessEqual(local.changed_agents, full.changed_agents)
+
+    async def test_full_rebuild_reports_every_path_and_agent_as_redeployed(self) -> None:
+        snapshot = sample_affected_scope_bucket(30, seed=103, event_id=0)
+
+        rebuilt = await run_business_reconfiguration_method(snapshot, "full_rebuild")
+
+        self.assertEqual(rebuilt.changed_paths, rebuilt.total_paths)
+        self.assertEqual(rebuilt.changed_agents, rebuilt.total_agents)
+        self.assertAlmostEqual(rebuilt.rule_change_ratio, 1.0)
+        self.assertLessEqual(rebuilt.modification_scope_ratio, 1.0)
 
 
 if __name__ == "__main__":

@@ -68,6 +68,41 @@ class PaperGateTests(unittest.TestCase):
                 current_config_hash="different-config",
             )
 
+    def test_manifest_rejects_reduced_pilot_runtime_grid(self) -> None:
+        manifest = {
+            "experiment": "exp1",
+            "mode": "pilot",
+            "config_sha256": "current-config",
+            "methods": list(EXPERIMENT_METHODS["exp1"]),
+            "error_count": 0,
+            "raw_sha256": "raw",
+            "aggregate_sha256": "aggregate",
+            "sanity_sha256": "sanity",
+            "runtime_parameters": {
+                "experiment": "exp1",
+                "mode": "pilot",
+                "configured_mode_spec": {
+                    "topology_seeds": 5,
+                    "events_per_seed": 2,
+                    "rate_events_per_seed": 2,
+                },
+                "topology_seeds": [0],
+                "event_ids": [0],
+                "methods": sorted(EXPERIMENT_METHODS["exp1"]),
+                "series": ["state_churn", "task_size"],
+                "task_sizes": [8],
+                "background_churn_probability": 0.02,
+                "state_churn_percent": [0.0],
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "runtime grid"):
+            validate_pilot_manifest(
+                manifest,
+                "exp1",
+                current_config_hash="current-config",
+            )
+
 
 class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_exp2_pilot_orchestrates_conditional_metrics_and_two_panel_figure(self) -> None:
@@ -89,8 +124,9 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
                 root / "aggregated" / "pilot" / "exp2" / "summary.csv",
                 root / "aggregated" / "pilot" / "exp2" / "sanity.json",
                 root / "aggregated" / "pilot" / "exp2" / "PILOT_SUMMARY.md",
-                root / "paper_figures" / "Fig2_Cross_Layer_Coordination.pdf",
-                root / "paper_figures" / "Fig2_Cross_Layer_Coordination.png",
+                root / "paper_figures_final" / "Fig2_CrossLayer.pdf",
+                root / "paper_figures_final" / "Fig2_CrossLayer.png",
+                root / "paper_figures_final" / "Fig2_CrossLayer.csv",
             )
             self.assertTrue(all(path.exists() for path in expected))
             report = expected[3].read_text(encoding="utf-8")
@@ -116,10 +152,16 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
                 root / "aggregated" / "pilot" / "exp1" / "summary.csv",
                 root / "aggregated" / "pilot" / "exp1" / "sanity.json",
                 root / "aggregated" / "pilot" / "exp1" / "PILOT_SUMMARY.md",
-                root / "paper_figures" / "Fig1_Formation.pdf",
-                root / "paper_figures" / "Fig1_Formation.png",
+                root / "paper_figures_final" / "Fig1_Formation.pdf",
+                root / "paper_figures_final" / "Fig1_Formation.png",
+                root / "paper_figures_final" / "Fig1_Formation.csv",
             )
             self.assertTrue(all(path.exists() for path in expected))
+            manifest = (
+                root / "aggregated" / "pilot" / "exp1" / "pilot_manifest.json"
+            ).read_text(encoding="utf-8")
+            self.assertIn('"runtime_parameters"', manifest)
+            self.assertIn('"background_churn_probability": 0.02', manifest)
             report = expected[3].read_text(encoding="utf-8")
             self.assertIn("Pilot only", report)
             self.assertIn("P95 Formation Latency", report)
@@ -143,8 +185,9 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
                 root / "aggregated" / "pilot" / "exp3" / "summary.csv",
                 root / "aggregated" / "pilot" / "exp3" / "sanity.json",
                 root / "aggregated" / "pilot" / "exp3" / "PILOT_SUMMARY.md",
-                root / "paper_figures" / "Fig3_Business_Elasticity.pdf",
-                root / "paper_figures" / "Fig3_Business_Elasticity.png",
+                root / "paper_figures_final" / "Fig3_Elasticity.pdf",
+                root / "paper_figures_final" / "Fig3_Elasticity.png",
+                root / "paper_figures_final" / "Fig3_Elasticity.csv",
             )
             self.assertTrue(all(path.exists() for path in expected))
             report = expected[3].read_text(encoding="utf-8")
@@ -152,7 +195,7 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Rule Change Ratio", report)
             self.assertIn("Success Rate", report)
 
-    async def test_exp4_pilot_orchestrates_three_panel_outputs(self) -> None:
+    async def test_exp4_pilot_orchestrates_two_panel_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             result = await run_pilot(
@@ -171,8 +214,9 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
                 root / "aggregated" / "pilot" / "exp4" / "summary.csv",
                 root / "aggregated" / "pilot" / "exp4" / "sanity.json",
                 root / "aggregated" / "pilot" / "exp4" / "PILOT_SUMMARY.md",
-                root / "paper_figures" / "Fig4_Failure_Recovery.pdf",
-                root / "paper_figures" / "Fig4_Failure_Recovery.png",
+                root / "paper_figures_final" / "Fig4_Recovery.pdf",
+                root / "paper_figures_final" / "Fig4_Recovery.png",
+                root / "paper_figures_final" / "Fig4_Recovery.csv",
             )
             self.assertTrue(all(path.exists() for path in expected))
             report = expected[3].read_text(encoding="utf-8")

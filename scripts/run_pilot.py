@@ -19,7 +19,7 @@ from experiments.exp1_initial_formation import run_exp1
 from experiments.exp2_conflict import run_exp2
 from experiments.exp3_business_elasticity import run_exp3
 from experiments.exp4_failure import run_exp4
-from experiments.paper_protocol import METHODS
+from experiments.paper_protocol import METHODS, load_and_validate_paper_config
 from scripts.aggregate_results import aggregate_experiment
 from scripts.plot_final_paper_figures import plot_exp1, plot_exp2, plot_exp3, plot_exp4
 from scripts.sanity_check_results import SanityFinding, check_results
@@ -39,6 +39,7 @@ async def run_pilot(
     experiments: Sequence[str] = ("exp1",),
     *,
     output_root: Path = Path("results"),
+    config_path: Path = Path("configs/paper_experiments.yaml"),
     seeds: tuple[int, ...] | None = None,
     exp1_task_sizes: tuple[int, ...] = (8, 12, 16, 20, 24, 28, 32),
     exp1_churn_points: tuple[int | float, ...] = (0, 5, 10, 15, 20, 30),
@@ -50,6 +51,7 @@ async def run_pilot(
     bootstrap_iterations: int = 5000,
     replace_existing: bool = False,
 ) -> PilotRunResult:
+    load_and_validate_paper_config(config_path)
     selected = tuple(dict.fromkeys(experiments))
     unsupported = set(selected) - {"exp1", "exp2", "exp3", "exp4"}
     if unsupported:
@@ -64,7 +66,7 @@ async def run_pilot(
     raw_path = output_root / "raw" / "pilot" / experiment / "trials.csv"
     aggregate_dir = output_root / "aggregated" / "pilot" / experiment
     summary_path = aggregate_dir / "summary.csv"
-    figure_dir = output_root / "paper_figures"
+    figure_dir = output_root / "paper_figures_final"
     if raw_path.exists() and not replace_existing:
         raise FileExistsError(
             f"authoritative pilot already exists at {raw_path}; use --replace-pilot "
@@ -154,7 +156,7 @@ async def run_pilot(
         handle.write("\n")
     from scripts.run_paper import write_pilot_manifest
 
-    write_pilot_manifest(output_root, experiment)
+    write_pilot_manifest(output_root, experiment, config_path=config_path)
 
     return PilotRunResult(
         experiments=selected,
@@ -180,13 +182,13 @@ def _exp1_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
         "",
         "## Method Ranking",
         "",
-        "| Latency Rank | Method | Mean Formation Latency (ms) | P95 Formation Latency (ms) | Churn Success Rate (%) |",
+        "| Latency Rank | Method | Mean Formation Latency (ms) | P95 Formation Latency (ms) | Task-Size Success Rate (%) |",
         "|---:|---|---:|---:|---:|",
     ]
     for index, item in enumerate(payload["latency_ranking"], start=1):
         lines.append(
             f"| {index} | {item['method_label']} | {item['mean_formation_latency_ms']:.3f} "
-            f"| {item['p95_formation_latency_ms']:.3f} | {item['churn_success_rate_percent']:.1f} |"
+            f"| {item['p95_formation_latency_ms']:.3f} | {item['task_size_success_rate_percent']:.1f} |"
         )
     lines.extend(("", "## Sanity Findings", ""))
     if findings:
@@ -203,7 +205,7 @@ def _exp1_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
             "",
             "- Raw CSV: `results/raw/pilot/exp1/trials.csv`",
             "- Aggregate CSV: `results/aggregated/pilot/exp1/summary.csv`",
-            "- Figure: `results/paper_figures/Fig1_Formation.{pdf,png}`",
+            "- Figure: `results/paper_figures_final/Fig1_Formation.{pdf,png,csv}`",
             "",
         )
     )
@@ -218,7 +220,7 @@ def _exp1_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
             latency_by_method.setdefault(row.method_id, []).append(
                 row.formation_latency_ms
             )
-        if row.series == "state_churn" and row.success is not None:
+        if row.series == "task_size" and row.success is not None:
             success_by_method.setdefault(row.method_id, []).append(row.success)
     ranking = []
     for method_id, values in latency_by_method.items():
@@ -229,7 +231,7 @@ def _exp1_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
                 "method_label": METHODS[method_id].label,
                 "mean_formation_latency_ms": mean(values),
                 "p95_formation_latency_ms": float(np.percentile(values, 95.0)),
-                "churn_success_rate_percent": (
+                "task_size_success_rate_percent": (
                     100.0 * sum(successes) / len(successes) if successes else 0.0
                 ),
             }
@@ -288,8 +290,8 @@ def _exp2_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
             "",
             "- Raw CSV: `results/raw/pilot/exp2/trials.csv`",
             "- Aggregate CSV: `results/aggregated/pilot/exp2/summary.csv`",
-            "- Figure: `results/paper_figures/Fig2_Cross_Layer_Coordination.{pdf,png}`",
-            "- Safe Rejection is retained in CSV/report and omitted from the compact two-panel main figure.",
+            "- Figure: `results/paper_figures_final/Fig2_CrossLayer.{pdf,png,csv}`",
+            "- Panel (b) reports feasible resolution and safe rejection with separate denominators.",
             "",
         )
     )
@@ -385,7 +387,7 @@ def _exp3_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
             "",
             "- Raw CSV: `results/raw/pilot/exp3/trials.csv`",
             "- Aggregate CSV: `results/aggregated/pilot/exp3/summary.csv`",
-            "- Figure: `results/paper_figures/Fig3_Business_Elasticity.{pdf,png}`",
+            "- Figure: `results/paper_figures_final/Fig3_Elasticity.{pdf,png,csv}`",
             "",
         )
     )
@@ -457,7 +459,7 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
         "",
         "## Failure Type Results",
         "",
-        "| Failure Type | Method | Mean Successful Latency (ms) | Success Rate (%) | Rule Change Ratio (%) |",
+        "| Failure Type | Method | Mean Successful Latency (ms) | Success Rate (%) | Modification Scope (%) |",
         "|---|---|---:|---:|---:|",
     ]
     for item in payload["failure_type_results"]:
@@ -465,7 +467,7 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
             f"| {item['failure_type']} | {item['method_label']} "
             f"| {_format_optional(item['mean_recovery_latency_ms'])} "
             f"| {item['success_rate_percent']:.1f} "
-            f"| {item['rule_change_ratio_percent']:.1f} |"
+            f"| {_format_optional(item['modification_scope_percent'])} |"
         )
     lines.extend(("", "## Capacity Stress", ""))
     for item in payload["capacity_stress"]:
@@ -491,7 +493,7 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
             "",
             "- Raw CSV: `results/raw/pilot/exp4/trials.csv`",
             "- Aggregate CSV: `results/aggregated/pilot/exp4/summary.csv`",
-            "- Figure: `results/paper_figures/Fig4_Failure_Recovery.{pdf,png}`",
+            "- Figure: `results/paper_figures_final/Fig4_Recovery.{pdf,png,csv}`",
             "",
         )
     )
@@ -514,6 +516,7 @@ def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
                 for row in selected
                 if row.recovery_latency_ms is not None
             ]
+            successful = [row for row in selected if row.success]
             failure_results.append(
                 {
                     "failure_type": failure_type,
@@ -527,6 +530,12 @@ def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
                     / len(selected),
                     "rule_change_ratio_percent": 100.0
                     * mean(row.rule_change_ratio for row in selected),
+                    "modification_scope_percent": (
+                        100.0
+                        * mean(row.modification_scope_ratio for row in successful)
+                        if successful
+                        else None
+                    ),
                 }
             )
     stress = []
@@ -576,12 +585,12 @@ def _clear_pilot(output_root: Path, experiment: str) -> None:
             shutil.rmtree(directory)
     figure_name = {
         "exp1": "Fig1_Formation",
-        "exp2": "Fig2_Cross_Layer_Coordination",
-        "exp3": "Fig3_Business_Elasticity",
-        "exp4": "Fig4_Failure_Recovery",
+        "exp2": "Fig2_CrossLayer",
+        "exp3": "Fig3_Elasticity",
+        "exp4": "Fig4_Recovery",
     }[experiment]
-    for suffix in ("pdf", "png"):
-        figure = output_root / "paper_figures" / f"{figure_name}.{suffix}"
+    for suffix in ("pdf", "png", "csv"):
+        figure = output_root / "paper_figures_final" / f"{figure_name}.{suffix}"
         if figure.exists():
             figure.unlink()
 
@@ -590,6 +599,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run canonical paper pilot experiments")
     parser.add_argument("--experiments", nargs="+", default=("exp1",))
     parser.add_argument("--output-root", type=Path, default=Path("results"))
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/paper_experiments.yaml"),
+    )
     parser.add_argument("--bootstrap-iterations", type=int, default=5000)
     parser.add_argument("--replace-pilot", action="store_true")
     return parser
@@ -601,6 +615,7 @@ def main() -> None:
         run_pilot(
             args.experiments,
             output_root=args.output_root,
+            config_path=args.config,
             bootstrap_iterations=args.bootstrap_iterations,
             replace_existing=args.replace_pilot,
         )

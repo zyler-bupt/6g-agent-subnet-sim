@@ -78,23 +78,9 @@ class PaperAggregationTests(unittest.TestCase):
                         "method_label": "Proposed",
                         "task_size": 8,
                         "state_churn_probability": "",
+                        "controller_processing_latency_ms": 3.0 + seed,
                         "formation_latency_ms": 10.0 + seed + event_id,
                         "success": True,
-                    }
-                )
-                rows.append(
-                    {
-                        "experiment": "exp1",
-                        "mode": "pilot",
-                        "series": "state_churn",
-                        "seed": seed,
-                        "event_id": event_id,
-                        "method_id": "proposed",
-                        "method_label": "Proposed",
-                        "task_size": 24,
-                        "state_churn_probability": 0.2,
-                        "formation_latency_ms": 20.0,
-                        "success": seed > 0,
                     }
                 )
 
@@ -103,16 +89,22 @@ class PaperAggregationTests(unittest.TestCase):
             summary = aggregate_experiment(rows, output, bootstrap_iterations=300)
 
             self.assertTrue(output.exists())
-            self.assertEqual(len(summary), 2)
+            self.assertEqual(len(summary), 3)
             latency = next(row for row in summary if row.metric == "formation_latency_ms")
+            controller = next(
+                row
+                for row in summary
+                if row.metric == "controller_processing_latency_ms"
+            )
             success = next(row for row in summary if row.metric == "success_rate_percent")
             self.assertEqual(latency.x_name, "task_size")
             self.assertEqual(latency.x_value, 8.0)
             self.assertEqual(latency.sample_count, 6)
             self.assertEqual(latency.cluster_count, 3)
-            self.assertEqual(success.x_name, "state_churn_probability_percent")
-            self.assertEqual(success.x_value, 20.0)
-            self.assertAlmostEqual(success.mean, 200.0 / 3.0)
+            self.assertEqual(controller.sample_count, 6)
+            self.assertEqual(success.x_name, "task_size")
+            self.assertEqual(success.x_value, 8.0)
+            self.assertAlmostEqual(success.mean, 100.0)
             self.assertGreaterEqual(latency.p95, latency.p50)
             self.assertLessEqual(latency.ci_lower, latency.mean)
             self.assertGreaterEqual(latency.ci_upper, latency.mean)
@@ -126,13 +118,14 @@ class PaperAggregationTests(unittest.TestCase):
                     {
                         "experiment": "exp3",
                         "mode": "pilot",
-                        "series": "affected_scope",
+                        "series": "affected_agents",
                         "seed": seed,
                         "event_id": event_id,
                         "method_id": "local_only",
                         "method_label": "Local-Only",
                         "affected_scope_ratio": 0.21,
                         "affected_scope_bucket_percent": 20,
+                        "affected_agent_count": 7,
                         "reconfiguration_latency_ms": 8.0 if success else "",
                         "rule_change_ratio": 0.10,
                         "gateway_change_ratio": 0.08,
@@ -165,8 +158,8 @@ class PaperAggregationTests(unittest.TestCase):
         self.assertEqual(latency.sample_count, 5)
         self.assertEqual(success.sample_count, 6)
         self.assertAlmostEqual(success.mean, 500.0 / 6.0)
-        self.assertEqual(success.x_name, "affected_scope_ratio_percent")
-        self.assertEqual(success.x_value, 20.0)
+        self.assertEqual(success.x_name, "affected_agent_count")
+        self.assertEqual(success.x_value, 7.0)
 
     def test_exp4_aggregation_supports_failure_bars_and_capacity_stress(self) -> None:
         rows = []
@@ -187,6 +180,7 @@ class PaperAggregationTests(unittest.TestCase):
                         "rule_change_ratio": 0.08,
                         "gateway_change_ratio": 0.20,
                         "unaffected_disturbance_ratio": 0.0,
+                        "modification_scope_ratio": 0.12,
                         "success": True,
                         "qos_satisfied": True,
                     },
@@ -204,6 +198,7 @@ class PaperAggregationTests(unittest.TestCase):
                         "rule_change_ratio": 0.0,
                         "gateway_change_ratio": 0.0,
                         "unaffected_disturbance_ratio": 0.0,
+                        "modification_scope_ratio": "",
                         "success": seed == 2,
                         "qos_satisfied": seed == 2,
                     },
@@ -229,9 +224,16 @@ class PaperAggregationTests(unittest.TestCase):
             if row.series == "capacity_stress"
             and row.metric == "success_rate_percent"
         )
+        modification_scope = next(
+            row
+            for row in summary
+            if row.series == "failure_type"
+            and row.metric == "modification_scope_ratio_percent"
+        )
         self.assertEqual(link_latency.x_name, "failure_type_index")
         self.assertEqual(link_latency.x_value, 1.0)
         self.assertEqual(link_latency.sample_count, 3)
+        self.assertAlmostEqual(modification_scope.mean, 12.0)
         self.assertEqual(stress_success.x_name, "capacity_reduction_percent")
         self.assertEqual(stress_success.x_value, 40.0)
         self.assertAlmostEqual(stress_success.mean, 100.0 / 3.0)

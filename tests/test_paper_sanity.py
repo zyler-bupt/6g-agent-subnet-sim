@@ -115,7 +115,7 @@ class PaperSanityTests(unittest.TestCase):
 
         self.assertNotIn("CONSTANT_LATENCY", {item.code for item in findings})
 
-    def test_latency_series_success_is_not_treated_as_a_rate_anomaly(self) -> None:
+    def test_exp1_warns_when_task_size_success_is_a_meaningless_100_percent_curve(self) -> None:
         rows = []
         for task_size, latency in ((8, 10.0), (32, 30.0)):
             for method_id in EXPERIMENT_METHODS["exp1"]:
@@ -132,7 +132,7 @@ class PaperSanityTests(unittest.TestCase):
 
         findings = check_results(rows, experiment="exp1")
 
-        self.assertNotIn("ALWAYS_SUCCESS", {item.code for item in findings})
+        self.assertIn("SCENARIO_MAY_BE_TOO_EASY", {item.code for item in findings})
 
     def test_always_success_check_targets_baselines_not_proposed(self) -> None:
         rows = []
@@ -224,6 +224,75 @@ class PaperSanityTests(unittest.TestCase):
             "EXP3_PROPOSED_RULES_NOT_INCREASING",
             {item.code for item in findings},
         )
+
+    def test_exp3_affected_agent_series_drives_the_primary_trend_check(self) -> None:
+        rows = []
+        for affected_agents, changed_rules in ((3, 12), (7, 28), (12, 46)):
+            for method_id in EXPERIMENT_METHODS["exp3"]:
+                method_changed = 105 if method_id == "full_rebuild" else changed_rules
+                rows.append(
+                    _row(
+                        experiment="exp3",
+                        trial_id=(
+                            f"exp3:affected_agents:{affected_agents}:"
+                            "seed:0000:event:000"
+                        ),
+                        method_id=method_id,
+                        method_label=method_id,
+                        series="affected_agents",
+                        affected_agent_count=affected_agents,
+                        formation_latency_ms="",
+                        reconfiguration_latency_ms=10.0 + affected_agents,
+                        changed_rules=method_changed,
+                        total_rules=100,
+                        rule_change_ratio=method_changed / 100.0,
+                        modification_scope_ratio=min(1.0, method_changed / 100.0),
+                        success=True,
+                    )
+                )
+
+        findings = check_results(rows, experiment="exp3")
+        codes = {item.code for item in findings}
+
+        self.assertNotIn("IMPOSSIBLE_RATIO", codes)
+        self.assertNotIn("EXP3_PROPOSED_RULES_NOT_INCREASING", codes)
+
+    def test_exp3_paper_sanity_marks_sparse_exact_agent_counts_for_exclusion(self) -> None:
+        rows = []
+        for affected_agents, seeds in (
+            (3, range(10)),
+            (7, range(10)),
+            (11, range(10)),
+            (17, range(1)),
+        ):
+            for seed in seeds:
+                for method_id in EXPERIMENT_METHODS["exp3"]:
+                    rows.append(
+                        _row(
+                            experiment="exp3",
+                            mode="paper",
+                            trial_id=(
+                                f"exp3:affected_agents:{affected_agents}:"
+                                f"seed:{seed:04d}:event:000"
+                            ),
+                            seed=seed,
+                            event_id=0,
+                            method_id=method_id,
+                            method_label=method_id,
+                            series="affected_agents",
+                            affected_agent_count=affected_agents,
+                            formation_latency_ms="",
+                            reconfiguration_latency_ms=10.0 + affected_agents,
+                            changed_rules=affected_agents,
+                            total_rules=100,
+                            rule_change_ratio=affected_agents / 100.0,
+                            success=True,
+                        )
+                    )
+
+        findings = check_results(rows, experiment="exp3")
+
+        self.assertIn("EXP3_SPARSE_X_EXCLUDED", {item.code for item in findings})
 
     def test_exp4_warns_if_network_only_recovery_improves_with_capacity_reduction(self) -> None:
         rows = []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import tempfile
 import unittest
 from dataclasses import fields
@@ -10,6 +11,7 @@ from experiments.paper_protocol import (
     EXPERIMENT_METHODS,
     METHODS,
     mode_spec,
+    load_and_validate_paper_config,
     stable_fingerprint,
 )
 from src.metrics.paper import PaperTrial, write_paper_trials
@@ -30,14 +32,29 @@ class PaperProtocolTests(unittest.TestCase):
         self.assertEqual(paper.rate_events_per_seed, 5)
         self.assertEqual(paper.trials_per_point(rate_metric=True), 150)
 
+    def test_reference_config_is_loaded_and_protocol_drift_is_rejected(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config_path = root / "configs" / "paper_experiments.yaml"
+        loaded = load_and_validate_paper_config(config_path)
+        drifted = copy.deepcopy(loaded)
+        drifted["exp2"]["conflict_density_percent"] = [0, 20, 40]
+
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "paper_experiments.yaml"
+            import yaml
+
+            candidate.write_text(yaml.safe_dump(drifted), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "protocol drift"):
+                load_and_validate_paper_config(candidate)
+
     def test_final_method_sets_and_adaptation_metadata_are_unambiguous(self) -> None:
         self.assertEqual(
             EXPERIMENT_METHODS["exp1"],
-            ("proposed", "proposed_without_batch", "cspf", "a1_agent_embedded"),
+            ("proposed", "proposed_without_batch", "cspf", "srd"),
         )
-        self.assertEqual(METHODS["a1_agent_embedded"].label, "A1-Agent-Embedded*")
-        self.assertEqual(METHODS["a1_agent_embedded"].source, "A1 Agent")
-        self.assertTrue(METHODS["a1_agent_embedded"].adapted)
+        self.assertEqual(METHODS["srd"].label, "SRD")
+        self.assertEqual(METHODS["srd"].source, "Sequential Rule Deployment")
+        self.assertFalse(METHODS["srd"].adapted)
         self.assertEqual(METHODS["sanet_dw"].label, "SANet-DW*")
         self.assertEqual(METHODS["netren"].label, "NetRen*")
         self.assertEqual(METHODS["netkeeper"].label, "NetKeeper*")
@@ -80,6 +97,7 @@ class PaperProtocolTests(unittest.TestCase):
             "affected_scope_ratio",
             "failure_type",
             "failure_severity",
+            "controller_processing_latency_ms",
             "formation_latency_ms",
             "resolution_latency_ms",
             "reconfiguration_latency_ms",
@@ -90,6 +108,12 @@ class PaperProtocolTests(unittest.TestCase):
             "total_rules",
             "changed_rules",
             "rule_change_ratio",
+            "total_paths",
+            "changed_paths",
+            "total_agents",
+            "changed_agents",
+            "modification_scope_ratio",
+            "affected_agent_count",
             "total_gateways",
             "changed_gateways",
             "gateway_change_ratio",

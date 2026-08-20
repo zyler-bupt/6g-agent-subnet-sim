@@ -8,6 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
+import yaml
+
 
 class RunMode(str, Enum):
     PILOT = "pilot"
@@ -39,8 +41,105 @@ _MODE_SPECS = {
 }
 
 
+# Formal figures must not imply a topology-cluster confidence interval when an
+# exact x value was observed in only a handful of topologies.  Pilot figures
+# use a smaller threshold because they contain only five topology seeds.
+PILOT_FIGURE_MIN_TOPOLOGY_CLUSTERS = 1
+PAPER_FIGURE_MIN_TOPOLOGY_CLUSTERS = 10
+
+
+EXPECTED_PAPER_CONFIG: Mapping[str, Any] = {
+    "mode": {
+        "pilot": {"topology_seeds": 5, "events_per_seed": 2},
+        "paper": {
+            "topology_seeds": 30,
+            "continuous_events_per_seed": 1,
+            "rate_events_per_seed": 5,
+        },
+    },
+    "topology": {
+        "link_delay_ms": [5.0, 30.0],
+        "link_bandwidth_mbps": [50.0, 200.0],
+        "link_loss_percent": [0.0, 1.0],
+        "link_jitter_ms": [0.0, 5.0],
+    },
+    "exp1": {
+        "task_sizes": [8, 12, 16, 20, 24, 28, 32],
+        "churn_percent": [0, 5, 10, 15, 20, 30],
+        "churn_task_size": 24,
+        "num_gateways": 12,
+        "average_degree": [3.0, 4.0],
+        "average_out_degree": [1.5, 2.0],
+        "cross_gateway_edge_ratio": [0.60, 0.70],
+    },
+    "exp2": {
+        "num_agents": 20,
+        "num_gateways": 10,
+        "dag_edges": [28, 32],
+        "conflict_density_percent": [0, 10, 20, 30, 40, 50, 60],
+        "conflict_type_weights": {
+            "application_network": 0.25,
+            "transport_network": 0.20,
+            "network_physical": 0.20,
+            "cascaded_multi_layer": 0.35,
+        },
+        "target_solvable_ratio": [0.85, 0.90],
+    },
+    "exp3": {
+        "num_agents": 24,
+        "num_gateways": 12,
+        "target_dag_edges": 36,
+        "affected_scope_percent": [10, 20, 30, 40, 50],
+        "business_change_types": [
+            "agent_add",
+            "agent_remove",
+            "dag_edge_change",
+            "qos_update",
+        ],
+    },
+    "exp4": {
+        "num_agents": 24,
+        "num_gateways": 12,
+        "target_dag_edges": 36,
+        "fixed_capacity_reduction_percent": 30,
+        "capacity_reduction_percent": [10, 20, 30, 40, 50],
+        "replacement_candidates": [1, 3],
+    },
+}
+
+
 def mode_spec(mode: str | RunMode) -> ModeSpec:
     return _MODE_SPECS[RunMode(mode)]
+
+
+def figure_min_topology_clusters(mode: str | RunMode) -> int:
+    return (
+        PILOT_FIGURE_MIN_TOPOLOGY_CLUSTERS
+        if RunMode(mode) is RunMode.PILOT
+        else PAPER_FIGURE_MIN_TOPOLOGY_CLUSTERS
+    )
+
+
+def load_and_validate_paper_config(
+    path: str | Path = Path("configs/paper_experiments.yaml"),
+) -> dict[str, Any]:
+    """Load the protocol reference and reject silent config/code drift.
+
+    Runners still permit explicit reduced grids for unit tests, but an
+    authoritative pilot/paper invocation must be tied to this reviewed
+    protocol.  Actual runtime grids are additionally recorded in manifests.
+    """
+
+    config_path = Path(path)
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise RuntimeError("paper protocol drift: configuration is not a mapping")
+    if stable_fingerprint(loaded) != stable_fingerprint(EXPECTED_PAPER_CONFIG):
+        raise RuntimeError(
+            "paper protocol drift: configs/paper_experiments.yaml no longer "
+            "matches the implemented and reviewed experiment protocol"
+        )
+    return loaded
 
 
 @dataclass(frozen=True)
@@ -69,11 +168,10 @@ METHODS: Mapping[str, MethodMetadata] = {
         "This work",
     ),
     "cspf": _method("cspf", "CSPF", "CSPF"),
-    "a1_agent_embedded": _method(
-        "a1_agent_embedded",
-        "A1-Agent-Embedded*",
-        "A1 Agent",
-        adapted=True,
+    "srd": _method(
+        "srd",
+        "SRD",
+        "Sequential Rule Deployment",
     ),
     "sanet_dw": _method("sanet_dw", "SANet-DW*", "SANet", adapted=True),
     "adjacent_layer": _method(
@@ -107,7 +205,7 @@ EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
         "proposed",
         "proposed_without_batch",
         "cspf",
-        "a1_agent_embedded",
+        "srd",
     ),
     "exp2": ("proposed", "sanet_dw", "adjacent_layer", "independent"),
     "exp3": ("proposed", "netren", "local_only", "full_rebuild"),

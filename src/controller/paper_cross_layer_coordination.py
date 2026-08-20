@@ -120,7 +120,11 @@ def coordinate_paper(
         qos_satisfied = verification.feasible and all(
             metric.qos_satisfied for metric in verification.edge_metrics.values()
         )
-        safe_rejection = False
+        # The common transaction verifier runs before commit.  Rejecting an
+        # infeasible selected combination (and rolling back its staged state)
+        # is therefore a safe rejection even when the selection policy itself
+        # did not perform Proposed's explicit hard-feasibility arbitration.
+        safe_rejection = not verification.feasible
         failure_reason = (
             "" if success else ";".join(verification.violations[:6])
         )

@@ -56,6 +56,7 @@ class FormationTrace:
 class FormationOutcome:
     method_id: str
     trace: FormationTrace
+    controller_processing_latency_ms: float
     formation_latency_ms: float
     success: bool
     qos_satisfied: bool
@@ -87,7 +88,9 @@ class FormationPrimitiveCosts:
     path_computation_ms: Mapping[str, float]
     rule_generation_ms: Mapping[str, float]
     edge_verification_ms: Mapping[str, float]
-    gateway_handshake_ms: Mapping[str, float]
+    gateway_rtt_ms: Mapping[str, float]
+    gateway_processing_ms: Mapping[str, float]
+    gateway_serialization_per_rule_ms: Mapping[str, float]
     rule_stage_ms: Mapping[str, float]
     rule_verify_ms: Mapping[str, float]
     rule_activate_ms: Mapping[str, float]
@@ -252,6 +255,7 @@ async def run_formation_method(
     return FormationOutcome(
         method_id=method_id,
         trace=trace,
+        controller_processing_latency_ms=_controller_critical_work_ms(trace),
         formation_latency_ms=stable_verify_finished_ms,
         success=success,
         qos_satisfied=success,
@@ -283,12 +287,6 @@ def _primitive_costs(
     paths: Mapping[str, tuple[str, ...]],
 ) -> FormationPrimitiveCosts:
     link_by_pair = _link_by_pair(snapshot)
-    incident_delays: dict[str, list[float]] = {
-        gateway_id: [] for gateway_id in snapshot.topology.gateway_ids
-    }
-    for link in snapshot.topology.links:
-        incident_delays[link.source].append(link.delay_ms)
-        incident_delays[link.target].append(link.delay_ms)
     endpoint_resolution_ms: dict[str, float] = {}
     path_computation_ms: dict[str, float] = {}
     rule_generation_ms: dict[str, float] = {}
@@ -310,10 +308,20 @@ def _primitive_costs(
         rule_stage_ms[edge.edge_id] = 0.08 + 0.012 * len(path)
         rule_verify_ms[edge.edge_id] = 0.07 + 0.008 * len(path)
         rule_activate_ms[edge.edge_id] = 0.05 + 0.006 * len(path)
-    gateway_handshake_ms = {
-        gateway_id: 0.40 + 0.04 * (sum(delays) / len(delays))
-        for gateway_id, delays in incident_delays.items()
-    }
+    gateway_rtt_ms: dict[str, float] = {}
+    gateway_processing_ms: dict[str, float] = {}
+    gateway_serialization_per_rule_ms: dict[str, float] = {}
+    for gateway_id in snapshot.topology.gateway_ids:
+        gateway_seed = stable_fingerprint(
+            {"snapshot_event": snapshot.event_fingerprint, "gateway": gateway_id}
+        )
+        gateway_rtt_ms[gateway_id] = 5.0 + (int(gateway_seed[:16], 16) % 15001) / 1000.0
+        gateway_processing_ms[gateway_id] = (
+            1.0 + (int(gateway_seed[16:32], 16) % 4001) / 1000.0
+        )
+        gateway_serialization_per_rule_ms[gateway_id] = (
+            0.02 + (int(gateway_seed[32:48], 16) % 61) / 1000.0
+        )
     edge_count = len(snapshot.task.biz_edges)
     return FormationPrimitiveCosts(
         graph_analysis_ms=0.50 + 0.08 * len(snapshot.task.app_agents) + 0.06 * edge_count,
@@ -322,7 +330,9 @@ def _primitive_costs(
         path_computation_ms=path_computation_ms,
         rule_generation_ms=rule_generation_ms,
         edge_verification_ms=edge_verification_ms,
-        gateway_handshake_ms=gateway_handshake_ms,
+        gateway_rtt_ms=gateway_rtt_ms,
+        gateway_processing_ms=gateway_processing_ms,
+        gateway_serialization_per_rule_ms=gateway_serialization_per_rule_ms,
         rule_stage_ms=rule_stage_ms,
         rule_verify_ms=rule_verify_ms,
         rule_activate_ms=rule_activate_ms,
@@ -339,14 +349,17 @@ def _build_schedule(
     builder = _ScheduleBuilder()
     edges = tuple(snapshot.task.biz_edges)
     gateway_edges = _gateway_edges(edges, paths)
+    # Every formation method receives the same Task DAG and Agent placement.
+    # Parsing the DAG and resolving the supporting-Agent mapping are therefore
+    # common controller costs, not Proposed-only work.
+    builder.serial("dag_analysis", snapshot.task.task_id, costs.graph_analysis_ms)
+    builder.serial(
+        "supporting_agent_binding",
+        snapshot.task.task_id,
+        costs.supporting_binding_ms,
+        control_messages=2 * len(snapshot.task.app_agents),
+    )
     if method_id in {"proposed", "proposed_without_batch"}:
-        builder.serial("dag_analysis", snapshot.task.task_id, costs.graph_analysis_ms)
-        builder.serial(
-            "supporting_agent_binding",
-            snapshot.task.task_id,
-            costs.supporting_binding_ms,
-            control_messages=2 * len(snapshot.task.app_agents),
-        )
         builder.parallel(
             (
                 "path_compute",
@@ -367,9 +380,9 @@ def _build_schedule(
             )
         stage_items = [
             (
-                "gateway_stage",
+                "gateway_dispatch_install_ack",
                 gateway_id,
-                _gateway_batch_cost(costs, gateway_id, edge_ids, "stage"),
+                _gateway_exchange_cost(costs, gateway_id, edge_ids, "stage"),
                 "",
                 gateway_id,
                 2,
@@ -384,21 +397,32 @@ def _build_schedule(
                     item[0], item[1], item[2], gateway_id=item[4], control_messages=item[5]
                 )
         builder.parallel(
-            (
-                "gateway_verify",
-                gateway_id,
-                _gateway_batch_cost(costs, gateway_id, edge_ids, "verify"),
-                "",
-                gateway_id,
-                2,
+            () if method_id == "proposed_without_batch" else (
+                (
+                    "gateway_verification_report_ack",
+                    gateway_id,
+                    _gateway_exchange_cost(costs, gateway_id, edge_ids, "verify"),
+                    "",
+                    gateway_id,
+                    2,
+                )
+                for gateway_id, edge_ids in sorted(gateway_edges.items())
             )
-            for gateway_id, edge_ids in sorted(gateway_edges.items())
         )
+        if method_id == "proposed_without_batch":
+            for gateway_id, edge_ids in sorted(gateway_edges.items()):
+                builder.serial(
+                    "gateway_verification_report_ack",
+                    gateway_id,
+                    _gateway_exchange_cost(costs, gateway_id, edge_ids, "verify"),
+                    gateway_id=gateway_id,
+                    control_messages=2,
+                )
         activation_items = [
             (
-                "gateway_activate",
+                "gateway_activate_ack",
                 gateway_id,
-                _gateway_batch_cost(costs, gateway_id, edge_ids, "activate"),
+                _gateway_exchange_cost(costs, gateway_id, edge_ids, "activate"),
                 "",
                 gateway_id,
                 2,
@@ -430,10 +454,20 @@ def _build_schedule(
             )
             builder.parallel(
                 (
-                    "edge_deploy",
+                    "gateway_dispatch_install_ack",
                     f"{edge.edge_id}:{gateway_id}",
-                    costs.gateway_handshake_ms[gateway_id]
-                    + costs.rule_stage_ms[edge.edge_id],
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "stage"),
+                    edge.edge_id,
+                    gateway_id,
+                    2,
+                )
+                for gateway_id in paths[edge.edge_id]
+            )
+            builder.parallel(
+                (
+                    "gateway_verification_report_ack",
+                    f"{edge.edge_id}:{gateway_id}",
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "verify"),
                     edge.edge_id,
                     gateway_id,
                     2,
@@ -447,17 +481,17 @@ def _build_schedule(
                 edge_id=edge.edge_id,
                 control_messages=2,
             )
-        builder.parallel(
-            (
-                "gateway_activate",
-                gateway_id,
-                _gateway_batch_cost(costs, gateway_id, edge_ids, "activate"),
-                "",
-                gateway_id,
-                2,
+            builder.parallel(
+                (
+                    "gateway_activate_ack",
+                    f"{edge.edge_id}:{gateway_id}",
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "activate"),
+                    edge.edge_id,
+                    gateway_id,
+                    2,
+                )
+                for gateway_id in paths[edge.edge_id]
             )
-            for gateway_id, edge_ids in sorted(gateway_edges.items())
-        )
         stage_mode = "per_edge_cspf"
     else:
         for edge in edges:
@@ -482,10 +516,18 @@ def _build_schedule(
             )
             for gateway_id in paths[edge.edge_id]:
                 builder.serial(
-                    "edge_deploy",
+                    "gateway_dispatch_install_ack",
                     f"{edge.edge_id}:{gateway_id}",
-                    costs.gateway_handshake_ms[gateway_id]
-                    + costs.rule_stage_ms[edge.edge_id],
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "stage"),
+                    edge_id=edge.edge_id,
+                    gateway_id=gateway_id,
+                    control_messages=2,
+                )
+            for gateway_id in paths[edge.edge_id]:
+                builder.serial(
+                    "gateway_verification_report_ack",
+                    f"{edge.edge_id}:{gateway_id}",
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "verify"),
                     edge_id=edge.edge_id,
                     gateway_id=gateway_id,
                     control_messages=2,
@@ -499,16 +541,26 @@ def _build_schedule(
             )
             for gateway_id in paths[edge.edge_id]:
                 builder.serial(
-                    "edge_activate",
+                    "gateway_activate_ack",
                     f"{edge.edge_id}:{gateway_id}",
-                    costs.gateway_handshake_ms[gateway_id]
-                    + costs.rule_activate_ms[edge.edge_id],
+                    _gateway_exchange_cost(costs, gateway_id, (edge.edge_id,), "activate"),
                     edge_id=edge.edge_id,
                     gateway_id=gateway_id,
                     control_messages=2,
                 )
         stage_mode = "sequential_agent_procedure"
 
+    builder.parallel(
+        (
+            "gateway_post_activation_stable_report_ack",
+            gateway_id,
+            _gateway_exchange_cost(costs, gateway_id, edge_ids, "stable_report"),
+            "",
+            gateway_id,
+            2,
+        )
+        for gateway_id, edge_ids in sorted(gateway_edges.items())
+    )
     builder.parallel(
         (
             "stable_verify",
@@ -548,7 +600,8 @@ def _append_rollback(
         (
             "gateway_rollback",
             gateway_id,
-            costs.gateway_handshake_ms[gateway_id]
+            costs.gateway_rtt_ms[gateway_id]
+            + costs.gateway_processing_ms[gateway_id]
             + 0.04 * len(edge_ids),
             "",
             gateway_id,
@@ -620,9 +673,18 @@ def _churn_horizon(
             + costs.edge_verification_ms[edge.edge_id]
         )
         for gateway_id in paths[edge.edge_id]:
-            total += 2.0 * costs.gateway_handshake_ms[gateway_id]
-            total += costs.rule_stage_ms[edge.edge_id]
-            total += costs.rule_activate_ms[edge.edge_id]
+            total += 3.0 * (
+                costs.gateway_rtt_ms[gateway_id]
+                + costs.gateway_processing_ms[gateway_id]
+                + costs.gateway_serialization_per_rule_ms[gateway_id]
+            )
+            total += (
+                costs.rule_stage_ms[edge.edge_id]
+                + costs.rule_verify_ms[edge.edge_id]
+                + costs.rule_activate_ms[edge.edge_id]
+            )
+    for gateway_id, edge_ids in _gateway_edges(snapshot.task.biz_edges, paths).items():
+        total += _gateway_exchange_cost(costs, gateway_id, edge_ids, "stable_report")
     total += max(costs.edge_verification_ms.values(), default=0.0)
     return total
 
@@ -722,7 +784,7 @@ def _gateway_edges(
     }
 
 
-def _gateway_batch_cost(
+def _gateway_exchange_cost(
     costs: FormationPrimitiveCosts,
     gateway_id: str,
     edge_ids: Sequence[str],
@@ -732,10 +794,33 @@ def _gateway_batch_cost(
         "stage": costs.rule_stage_ms,
         "verify": costs.rule_verify_ms,
         "activate": costs.rule_activate_ms,
+        "stable_report": costs.rule_verify_ms,
     }[phase]
-    return costs.gateway_handshake_ms[gateway_id] + sum(
-        per_rule[edge_id] for edge_id in edge_ids
+    return (
+        costs.gateway_rtt_ms[gateway_id]
+        + costs.gateway_processing_ms[gateway_id]
+        + costs.gateway_serialization_per_rule_ms[gateway_id] * len(edge_ids)
+        + sum(per_rule[edge_id] for edge_id in edge_ids)
     )
+
+
+def _controller_critical_work_ms(trace: FormationTrace) -> float:
+    controller_kinds = {
+        "dag_analysis",
+        "supporting_agent_binding",
+        "endpoint_resolution",
+        "path_compute",
+        "rule_generate",
+    }
+    parallel_stages: dict[float, float] = {}
+    for operation in trace.operations:
+        if operation.kind not in controller_kinds:
+            continue
+        parallel_stages[operation.start_ms] = max(
+            parallel_stages.get(operation.start_ms, 0.0),
+            operation.duration_ms,
+        )
+    return sum(parallel_stages.values())
 
 
 def _link_by_pair(
