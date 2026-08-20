@@ -359,28 +359,29 @@ scenario recalibration and complete rerun.
 
 ## 13. Figures and Style
 
-The authoritative figure directory is `results/paper_figures/`. Each figure is
-written as vector PDF and PNG preview:
+The authoritative figure directory is `results/paper_figures/`. The conference
+paper uses four composite figure blocks rather than twelve separate files:
 
-- `Fig1a_Formation_Latency`
-- `Fig1b_Formation_Success`
-- `Fig2a_Feasible_Solution_Rate`
-- `Fig2b_QoS_Satisfaction`
-- `Fig2c_Safe_Rejection`
-- `Fig3a_Reconfiguration_Latency`
-- `Fig3b_Rule_Change_Ratio`
-- `Fig3c_Reconfiguration_Success`
-- `Fig4a_Recovery_Latency`
-- `Fig4b_Recovery_Success`
-- `Fig4c_Rule_Change_Ratio`
-- `Fig4d_Capacity_Stress`
+- `Fig1_Formation`: (a) formation latency and (b) churn success;
+- `Fig2_Cross_Layer_Coordination`: (a) feasible solution rate and (b) QoS
+  satisfaction;
+- `Fig3_Business_Elasticity`: (a) reconfiguration latency and (b) a
+  correctness--modification frontier combining success and rule-change ratio;
+- `Fig4_Failure_Recovery`: (a) recovery latency by failure type, (b) recovery
+  success by failure type, and (c) capacity-stress recovery success.
+
+This yields four PDF/PNG pairs and nine readable panels. Safe Rejection Rate
+and Exp.4 Rule Change Ratio remain mandatory raw/aggregated metrics and are
+reported numerically in `EXPERIMENT_REPORT.md`; they are not default main-paper
+panels. A later appendix can plot them directly from the retained aggregates
+without rerunning experiments.
 
 The shared Matplotlib style uses Times New Roman or a metrically compatible
 Times fallback, approximately 8.5--9 pt axis labels, 8 pt ticks, 7.5--8 pt
 legends, 1.5--1.8 line width, 4--5 marker size, light 0.12--0.18 confidence
-bands, white background, and horizontal dashed grids only. Single-column
-figures target 3.45 by 2.45 inches. Multi-panel layouts target approximately
-7.1 by 2.25 inches.
+bands, white background, and horizontal dashed grids only. The composite
+figures target approximately 7.1 inches in width and 2.25--2.55 inches in
+height, adjusted only when required for readable three-panel labels.
 
 Method color, marker, and line style live in one registry and remain stable
 across figures. Proposed is dark blue/circle/solid; the no-batch ablation is a

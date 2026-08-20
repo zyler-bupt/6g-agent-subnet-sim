@@ -410,9 +410,9 @@ def test_method_style_registry_has_canonical_cross_figure_entries(self):
 
 def test_exp1_plot_writes_vector_pdf_and_png(self):
     paths = plot_exp1(fixture_summary_path, output_dir)
-    self.assertTrue((output_dir / "Fig1a_Formation_Latency.pdf").exists())
-    self.assertTrue((output_dir / "Fig1b_Formation_Success.png").exists())
-    self.assertTrue((output_dir / "Fig1a_Formation_Latency.pdf").read_bytes().startswith(b"%PDF"))
+    self.assertTrue((output_dir / "Fig1_Formation.pdf").exists())
+    self.assertTrue((output_dir / "Fig1_Formation.png").exists())
+    self.assertTrue((output_dir / "Fig1_Formation.pdf").read_bytes().startswith(b"%PDF"))
 ```
 
 - [ ] **Step 2: Run plotting tests and confirm failure**
@@ -430,9 +430,10 @@ registry for every later figure.
 
 - [ ] **Step 4: Implement Fig.1 and pilot orchestration**
 
-Fig.1a reads latency mean/lower/upper rows by task size. Fig.1b reads formation
-success rows by churn percentage. Both use 0--100% for rates unless an explicit
-axis range remains clear. `run_pilot.py --experiments exp1` runs Exp.1, writes
+The two-panel `Fig1_Formation` reads latency mean/lower/upper rows by task size
+in panel (a) and formation success by churn percentage in panel (b). Rates use
+0--100% unless an explicit axis range remains clear. `run_pilot.py
+--experiments exp1` runs Exp.1, writes
 canonical raw data, aggregates, checks sanity, plots, and writes
 `results/aggregated/pilot/exp1/PILOT_SUMMARY.md`; it exits nonzero on errors.
 
@@ -455,8 +456,7 @@ git commit -m "Add Exp1 pilot aggregation and paper plots"
 - Generate: `results/raw/pilot/exp1/trials.csv`
 - Generate: `results/aggregated/pilot/exp1/summary.csv`
 - Generate: `results/aggregated/pilot/exp1/PILOT_SUMMARY.md`
-- Generate: `results/paper_figures/Fig1a_Formation_Latency.{pdf,png}`
-- Generate: `results/paper_figures/Fig1b_Formation_Success.{pdf,png}`
+- Generate: `results/paper_figures/Fig1_Formation.{pdf,png}`
 
 **Interfaces:**
 - Consumes: the complete Phase 1 implementation.
@@ -489,7 +489,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit and push the audited Exp.1 pilot**
 
 ```bash
-git add -- configs/paper_experiments.yaml results/raw/pilot/exp1/trials.csv results/aggregated/pilot/exp1 results/paper_figures/Fig1a_Formation_Latency.pdf results/paper_figures/Fig1a_Formation_Latency.png results/paper_figures/Fig1b_Formation_Success.pdf results/paper_figures/Fig1b_Formation_Success.png
+git add -- configs/paper_experiments.yaml results/raw/pilot/exp1/trials.csv results/aggregated/pilot/exp1 results/paper_figures/Fig1_Formation.pdf results/paper_figures/Fig1_Formation.png
 git commit -m "Run and audit final Exp1 pilot"
 git push origin codex/semantic-controller
 ```

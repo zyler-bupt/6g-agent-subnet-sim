@@ -14,7 +14,7 @@
 
 - Paper mode must not begin unless Exp.1, Exp.3, Exp.4, and Exp.2 pilots have no sanity errors.
 - Continuous metrics use at least 30 topology seeds; rate metrics use 30 seeds times 5 events.
-- All 12 named figures are regenerated from `results/raw/paper` through aggregated CSV.
+- Four composite figures containing nine main-paper panels are regenerated from `results/raw/paper` through aggregated CSV.
 - Final reporting must describe observed results, including mechanisms that do not match expectations.
 - Only confirmed experiment artifacts are staged; unrelated office files, archives, legacy results, and user changes remain untouched.
 
@@ -126,7 +126,7 @@ Run: `python3 scripts/aggregate_results.py --input-root results/raw/paper --outp
 
 Run: `python3 scripts/plot_paper_figures.py --input-root results/aggregated/paper --output-dir results/paper_figures --all`
 
-Expected: byte-stable CSV values for the same environment/config and all 12 PDF/PNG pairs.
+Expected: byte-stable CSV values for the same environment/config and all four composite PDF/PNG pairs.
 
 - [ ] **Step 5: Run integrity tests**
 
