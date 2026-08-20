@@ -49,7 +49,7 @@ def aggregate_experiment(
     if not rows:
         raise ValueError("cannot aggregate an empty paper result")
     experiments = {_text(row.get("experiment")) for row in rows}
-    if len(experiments) != 1 or not experiments <= {"exp1", "exp3"}:
+    if len(experiments) != 1 or not experiments <= {"exp1", "exp3", "exp4"}:
         raise ValueError(
             "aggregation input must contain one supported canonical experiment"
         )
@@ -190,6 +190,57 @@ def _row_aggregate_values(
                 )
             )
         return "affected_scope_ratio_percent", x_value, values
+    if experiment == "exp4" and series in {"failure_type", "capacity_stress"}:
+        if series == "failure_type":
+            failure_indices = {
+                "agent_failure": 0.0,
+                "link_failure": 1.0,
+                "capacity_degradation": 2.0,
+            }
+            failure_type = _text(row.get("failure_type"))
+            if failure_type not in failure_indices:
+                raise ValueError(f"unsupported Exp.4 failure type: {failure_type}")
+            x_name = "failure_type_index"
+            x_value = failure_indices[failure_type]
+        else:
+            x_name = "capacity_reduction_percent"
+            x_value = 100.0 * _number(
+                row.get("failure_severity"),
+                "failure_severity",
+            )
+        values = [
+            ("success_rate_percent", 100.0 if _boolean(row.get("success")) else 0.0),
+            (
+                "qos_recovery_rate_percent",
+                100.0 if _boolean(row.get("qos_satisfied")) else 0.0,
+            ),
+            (
+                "rule_change_ratio_percent",
+                100.0 * _number(row.get("rule_change_ratio"), "rule_change_ratio"),
+            ),
+            (
+                "gateway_change_ratio_percent",
+                100.0
+                * _number(row.get("gateway_change_ratio"), "gateway_change_ratio"),
+            ),
+            (
+                "unaffected_disturbance_ratio_percent",
+                100.0
+                * _number(
+                    row.get("unaffected_disturbance_ratio"),
+                    "unaffected_disturbance_ratio",
+                ),
+            ),
+        ]
+        latency = row.get("recovery_latency_ms")
+        if latency not in (None, ""):
+            values.append(
+                (
+                    "recovery_latency_ms",
+                    _number(latency, "recovery_latency_ms"),
+                )
+            )
+        return x_name, x_value, values
     raise ValueError(f"unsupported aggregate series: {experiment}/{series}")
 
 

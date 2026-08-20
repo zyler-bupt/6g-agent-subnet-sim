@@ -14,12 +14,14 @@ from scripts.paper_style import (
     CI_ALPHA,
     METHOD_STYLES,
     apply_paper_style,
+    method_bar_kwargs,
     method_line_kwargs,
     panel_label,
     style_axis,
 )
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def plot_exp1(
@@ -204,6 +206,169 @@ def plot_exp3(
     return pdf, png
 
 
+def plot_exp4(
+    summary_csv: str | Path,
+    output_dir: str | Path,
+) -> tuple[Path, Path]:
+    """Render failure latency/success bars and the capacity-stress curve."""
+
+    rows = _read_csv(Path(summary_csv))
+    methods = EXPERIMENT_METHODS["exp4"]
+    latency = _metric_rows_for_series(
+        rows,
+        "exp4",
+        "failure_type",
+        "recovery_latency_ms",
+    )
+    success = _metric_rows_for_series(
+        rows,
+        "exp4",
+        "failure_type",
+        "success_rate_percent",
+    )
+    stress = _metric_rows_for_series(
+        rows,
+        "exp4",
+        "capacity_stress",
+        "success_rate_percent",
+    )
+    _require_complete_methods(success, methods, "Exp.4 recovery success")
+    _require_complete_methods(stress, methods, "Exp.4 capacity stress")
+
+    apply_paper_style()
+    figure, axes = plt.subplots(1, 3, figsize=(7.1, 2.25))
+    _plot_grouped_bars(
+        axes[0],
+        latency,
+        methods,
+        x_values=(0.0, 1.0, 2.0),
+        missing_label="N/A",
+    )
+    axes[0].set_ylabel("Recovery Latency (ms)")
+    axes[0].set_ylim(bottom=0.0)
+    _failure_type_ticks(axes[0])
+    style_axis(axes[0])
+    panel_label(axes[0], "(a)")
+
+    _plot_grouped_bars(
+        axes[1],
+        success,
+        methods,
+        x_values=(0.0, 1.0, 2.0),
+    )
+    axes[1].set_ylabel("Recovery Success Rate (%)")
+    axes[1].set_ylim(0.0, 105.0)
+    axes[1].set_yticks((0, 20, 40, 60, 80, 100))
+    _failure_type_ticks(axes[1])
+    style_axis(axes[1])
+    panel_label(axes[1], "(b)")
+
+    _plot_lines(axes[2], stress, methods)
+    axes[2].set_xlabel("Capacity Reduction (%)")
+    axes[2].set_ylabel("Recovery Success Rate (%)")
+    axes[2].set_ylim(0.0, 105.0)
+    axes[2].set_yticks((0, 20, 40, 60, 80, 100))
+    axes[2].set_xticks(sorted({float(row["x_value"]) for row in stress}))
+    style_axis(axes[2])
+    panel_label(axes[2], "(c)")
+
+    handles, labels = axes[1].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=4,
+        columnspacing=0.9,
+        handlelength=1.9,
+    )
+    figure.subplots_adjust(
+        left=0.073,
+        right=0.995,
+        bottom=0.27,
+        top=0.77,
+        wspace=0.40,
+    )
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    pdf = destination / "Fig4_Failure_Recovery.pdf"
+    png = destination / "Fig4_Failure_Recovery.png"
+    figure.savefig(
+        pdf,
+        format="pdf",
+        metadata={
+            "Title": "Failure-Driven Elastic Recovery",
+            "Subject": "Vector paper figure generated from canonical aggregate CSV",
+        },
+    )
+    figure.savefig(png, format="png", dpi=300)
+    plt.close(figure)
+    return pdf, png
+
+
+def _plot_grouped_bars(
+    axis,
+    rows: Iterable[dict[str, str]],
+    method_ids: tuple[str, ...],
+    *,
+    x_values: tuple[float, ...],
+    missing_label: str | None = None,
+) -> None:
+    values = {
+        (row["method_id"], float(row["x_value"])): row for row in rows
+    }
+    width = 0.19
+    center = (len(method_ids) - 1) / 2.0
+    for method_index, method_id in enumerate(method_ids):
+        positions = np.asarray(x_values) + (method_index - center) * width
+        selected = [values.get((method_id, x_value)) for x_value in x_values]
+        means = np.asarray(
+            [float(row["mean"]) if row is not None else np.nan for row in selected]
+        )
+        lower = np.asarray(
+            [
+                float(row["mean"]) - float(row["ci_lower"])
+                if row is not None
+                else 0.0
+                for row in selected
+            ]
+        )
+        upper = np.asarray(
+            [
+                float(row["ci_upper"]) - float(row["mean"])
+                if row is not None
+                else 0.0
+                for row in selected
+            ]
+        )
+        axis.bar(
+            positions,
+            means,
+            width,
+            yerr=(lower, upper),
+            error_kw={"elinewidth": 0.7, "capsize": 1.5, "capthick": 0.7},
+            **method_bar_kwargs(method_id),
+        )
+        if missing_label:
+            for position, row in zip(positions, selected):
+                if row is None:
+                    axis.text(
+                        position,
+                        0.15,
+                        missing_label,
+                        rotation=90,
+                        ha="center",
+                        va="bottom",
+                        fontsize=6.5,
+                        color=METHOD_STYLES[method_id].color,
+                    )
+
+
+def _failure_type_ticks(axis) -> None:
+    axis.set_xticks((0.0, 1.0, 2.0))
+    axis.set_xticklabels(("Agent\nFailure", "Link\nFailure", "Capacity\n(30%)"))
+
+
 def _plot_lines(
     axis,
     rows: Iterable[dict[str, str]],
@@ -263,6 +428,21 @@ def _metric_rows(
     ]
 
 
+def _metric_rows_for_series(
+    rows: Iterable[dict[str, str]],
+    experiment: str,
+    series: str,
+    metric: str,
+) -> list[dict[str, str]]:
+    return [
+        row
+        for row in rows
+        if row["experiment"] == experiment
+        and row["series"] == series
+        and row["metric"] == metric
+    ]
+
+
 def _rows_by_method(
     rows: Iterable[dict[str, str]],
 ) -> dict[str, list[dict[str, str]]]:
@@ -281,17 +461,22 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot final composite paper figures")
     parser.add_argument("--summary", required=True)
     parser.add_argument("--output-dir", default="results/paper_figures")
-    parser.add_argument("--experiment", choices=("exp1", "exp3"), default="exp1")
+    parser.add_argument(
+        "--experiment",
+        choices=("exp1", "exp3", "exp4"),
+        default="exp1",
+    )
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
-    outputs = (
-        plot_exp1(args.summary, args.output_dir)
-        if args.experiment == "exp1"
-        else plot_exp3(args.summary, args.output_dir)
-    )
+    plotter = {
+        "exp1": plot_exp1,
+        "exp3": plot_exp3,
+        "exp4": plot_exp4,
+    }[args.experiment]
+    outputs = plotter(args.summary, args.output_dir)
     print("wrote " + ", ".join(str(path.resolve()) for path in outputs))
 
 

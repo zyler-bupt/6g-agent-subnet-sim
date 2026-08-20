@@ -7,7 +7,7 @@ from pathlib import Path
 
 from experiments.paper_protocol import EXPERIMENT_METHODS
 from scripts.paper_style import METHOD_STYLES
-from scripts.plot_final_paper_figures import plot_exp1, plot_exp3
+from scripts.plot_final_paper_figures import plot_exp1, plot_exp3, plot_exp4
 
 
 class PaperStyleTests(unittest.TestCase):
@@ -107,6 +107,60 @@ class Exp3PlotTests(unittest.TestCase):
 
             pdf = root / "figures" / "Fig3_Business_Elasticity.pdf"
             png = root / "figures" / "Fig3_Business_Elasticity.png"
+            self.assertEqual(outputs, (pdf, png))
+            self.assertTrue(pdf.read_bytes().startswith(b"%PDF"))
+            self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))
+            self.assertGreater(pdf.stat().st_size, 2000)
+
+
+class Exp4PlotTests(unittest.TestCase):
+    def test_exp4_plot_writes_three_panel_failure_figure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.csv"
+            rows = []
+            for method_index, method_id in enumerate(EXPERIMENT_METHODS["exp4"]):
+                for failure_index in range(3):
+                    for metric, estimate in (
+                        ("recovery_latency_ms", 4.0 + method_index + failure_index),
+                        ("success_rate_percent", 100.0 - 8.0 * method_index),
+                    ):
+                        rows.append(
+                            {
+                                **_summary_row(
+                                    method_id,
+                                    "failure_type",
+                                    "failure_type_index",
+                                    failure_index,
+                                    metric,
+                                    estimate,
+                                ),
+                                "experiment": "exp4",
+                            }
+                        )
+                for reduction in (10, 20, 30, 40, 50):
+                    rows.append(
+                        {
+                            **_summary_row(
+                                method_id,
+                                "capacity_stress",
+                                "capacity_reduction_percent",
+                                reduction,
+                                "success_rate_percent",
+                                max(0.0, 100.0 - method_index * reduction * 0.3),
+                            ),
+                            "experiment": "exp4",
+                        }
+                    )
+            with summary.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            outputs = plot_exp4(summary, root / "figures")
+
+            pdf = root / "figures" / "Fig4_Failure_Recovery.pdf"
+            png = root / "figures" / "Fig4_Failure_Recovery.png"
             self.assertEqual(outputs, (pdf, png))
             self.assertTrue(pdf.read_bytes().startswith(b"%PDF"))
             self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))

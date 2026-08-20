@@ -1,0 +1,231 @@
+{
+  "experiment": "exp4",
+  "mode": "pilot",
+  "raw_trial_count": 320,
+  "aggregate_row_count": 190,
+  "topology_seed_count": 5,
+  "error_count": 0,
+  "warning_count": 2,
+  "failure_type_results": [
+    {
+      "failure_type": "agent_failure",
+      "method_id": "proposed",
+      "method_label": "Proposed",
+      "mean_recovery_latency_ms": 7.218999999999999,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 27.703495293104748
+    },
+    {
+      "failure_type": "agent_failure",
+      "method_id": "netkeeper",
+      "method_label": "NetKeeper*",
+      "mean_recovery_latency_ms": null,
+      "success_rate_percent": 0.0,
+      "rule_change_ratio_percent": 0.0
+    },
+    {
+      "failure_type": "agent_failure",
+      "method_id": "cspf",
+      "method_label": "CSPF",
+      "mean_recovery_latency_ms": null,
+      "success_rate_percent": 0.0,
+      "rule_change_ratio_percent": 0.0
+    },
+    {
+      "failure_type": "agent_failure",
+      "method_id": "full_rebuild",
+      "method_label": "Full-Rebuild",
+      "mean_recovery_latency_ms": 17.133,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 115.80838968513794
+    },
+    {
+      "failure_type": "link_failure",
+      "method_id": "proposed",
+      "method_label": "Proposed",
+      "mean_recovery_latency_ms": 4.9086,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 8.95821578999849
+    },
+    {
+      "failure_type": "link_failure",
+      "method_id": "netkeeper",
+      "method_label": "NetKeeper*",
+      "mean_recovery_latency_ms": 4.6016,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 9.74121863109075
+    },
+    {
+      "failure_type": "link_failure",
+      "method_id": "cspf",
+      "method_label": "CSPF",
+      "mean_recovery_latency_ms": 4.2416,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 9.74121863109075
+    },
+    {
+      "failure_type": "link_failure",
+      "method_id": "full_rebuild",
+      "method_label": "Full-Rebuild",
+      "mean_recovery_latency_ms": 15.948,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 101.60429378521559
+    },
+    {
+      "failure_type": "capacity_degradation",
+      "method_id": "proposed",
+      "method_label": "Proposed",
+      "mean_recovery_latency_ms": 6.110799999999999,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 17.71457185497966
+    },
+    {
+      "failure_type": "capacity_degradation",
+      "method_id": "netkeeper",
+      "method_label": "NetKeeper*",
+      "mean_recovery_latency_ms": 4.5796,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 9.15452569916486
+    },
+    {
+      "failure_type": "capacity_degradation",
+      "method_id": "cspf",
+      "method_label": "CSPF",
+      "mean_recovery_latency_ms": 5.1892,
+      "success_rate_percent": 50.0,
+      "rule_change_ratio_percent": 8.346110893352826
+    },
+    {
+      "failure_type": "capacity_degradation",
+      "method_id": "full_rebuild",
+      "method_label": "Full-Rebuild",
+      "mean_recovery_latency_ms": 15.923000000000002,
+      "success_rate_percent": 100.0,
+      "rule_change_ratio_percent": 101.30078808348479
+    }
+  ],
+  "capacity_stress": [
+    {
+      "method_id": "proposed",
+      "method_label": "Proposed",
+      "points": [
+        {
+          "reduction_percent": 10.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 20.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 30.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 40.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 50.0,
+          "success_rate_percent": 100.0
+        }
+      ]
+    },
+    {
+      "method_id": "netkeeper",
+      "method_label": "NetKeeper*",
+      "points": [
+        {
+          "reduction_percent": 10.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 20.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 30.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 40.0,
+          "success_rate_percent": 90.0
+        },
+        {
+          "reduction_percent": 50.0,
+          "success_rate_percent": 50.0
+        }
+      ]
+    },
+    {
+      "method_id": "cspf",
+      "method_label": "CSPF",
+      "points": [
+        {
+          "reduction_percent": 10.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 20.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 30.0,
+          "success_rate_percent": 50.0
+        },
+        {
+          "reduction_percent": 40.0,
+          "success_rate_percent": 50.0
+        },
+        {
+          "reduction_percent": 50.0,
+          "success_rate_percent": 50.0
+        }
+      ]
+    },
+    {
+      "method_id": "full_rebuild",
+      "method_label": "Full-Rebuild",
+      "points": [
+        {
+          "reduction_percent": 10.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 20.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 30.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 40.0,
+          "success_rate_percent": 100.0
+        },
+        {
+          "reduction_percent": 50.0,
+          "success_rate_percent": 100.0
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "level": "WARNING",
+      "code": "ALWAYS_SUCCESS",
+      "message": "full_rebuild succeeds for every sampled capacity_stress trial",
+      "experiment": "exp4",
+      "series": "capacity_stress",
+      "method_id": "full_rebuild"
+    },
+    {
+      "level": "WARNING",
+      "code": "ALWAYS_SUCCESS",
+      "message": "full_rebuild succeeds for every sampled failure_type trial",
+      "experiment": "exp4",
+      "series": "failure_type",
+      "method_id": "full_rebuild"
+    }
+  ]
+}

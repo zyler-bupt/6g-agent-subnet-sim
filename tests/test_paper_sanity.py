@@ -225,6 +225,40 @@ class PaperSanityTests(unittest.TestCase):
             {item.code for item in findings},
         )
 
+    def test_exp4_warns_if_network_only_recovery_improves_with_capacity_reduction(self) -> None:
+        rows = []
+        for reduction, cspf_success in ((0.10, False), (0.50, True)):
+            for method_id in EXPERIMENT_METHODS["exp4"]:
+                success = cspf_success if method_id == "cspf" else True
+                rows.append(
+                    _row(
+                        experiment="exp4",
+                        trial_id=(
+                            f"exp4:capacity_stress:{100 * reduction:g}:"
+                            "seed:0000:event:000"
+                        ),
+                        method_id=method_id,
+                        method_label=method_id,
+                        series="capacity_stress",
+                        failure_type="capacity_degradation",
+                        failure_severity=reduction,
+                        formation_latency_ms="",
+                        recovery_latency_ms=(10.0 if success else ""),
+                        success=success,
+                        qos_satisfied=success,
+                        rule_change_ratio=0.2,
+                        gateway_change_ratio=0.2,
+                        unaffected_disturbance_ratio=0.0,
+                    )
+                )
+
+        findings = check_results(rows, experiment="exp4")
+
+        self.assertIn(
+            "EXP4_NETWORK_RECOVERY_IMPROVES_WITH_STRESS",
+            {item.code for item in findings},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

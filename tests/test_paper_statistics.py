@@ -168,6 +168,74 @@ class PaperAggregationTests(unittest.TestCase):
         self.assertEqual(success.x_name, "affected_scope_ratio_percent")
         self.assertEqual(success.x_value, 20.0)
 
+    def test_exp4_aggregation_supports_failure_bars_and_capacity_stress(self) -> None:
+        rows = []
+        for seed in range(3):
+            rows.extend(
+                (
+                    {
+                        "experiment": "exp4",
+                        "mode": "pilot",
+                        "series": "failure_type",
+                        "seed": seed,
+                        "event_id": 0,
+                        "method_id": "cspf",
+                        "method_label": "CSPF",
+                        "failure_type": "link_failure",
+                        "failure_severity": 1.0,
+                        "recovery_latency_ms": 4.0 + seed,
+                        "rule_change_ratio": 0.08,
+                        "gateway_change_ratio": 0.20,
+                        "unaffected_disturbance_ratio": 0.0,
+                        "success": True,
+                        "qos_satisfied": True,
+                    },
+                    {
+                        "experiment": "exp4",
+                        "mode": "pilot",
+                        "series": "capacity_stress",
+                        "seed": seed,
+                        "event_id": 0,
+                        "method_id": "cspf",
+                        "method_label": "CSPF",
+                        "failure_type": "capacity_degradation",
+                        "failure_severity": 0.4,
+                        "recovery_latency_ms": "",
+                        "rule_change_ratio": 0.0,
+                        "gateway_change_ratio": 0.0,
+                        "unaffected_disturbance_ratio": 0.0,
+                        "success": seed == 2,
+                        "qos_satisfied": seed == 2,
+                    },
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            summary = aggregate_experiment(
+                rows,
+                Path(directory) / "summary.csv",
+                bootstrap_iterations=300,
+            )
+
+        link_latency = next(
+            row
+            for row in summary
+            if row.series == "failure_type"
+            and row.metric == "recovery_latency_ms"
+        )
+        stress_success = next(
+            row
+            for row in summary
+            if row.series == "capacity_stress"
+            and row.metric == "success_rate_percent"
+        )
+        self.assertEqual(link_latency.x_name, "failure_type_index")
+        self.assertEqual(link_latency.x_value, 1.0)
+        self.assertEqual(link_latency.sample_count, 3)
+        self.assertEqual(stress_success.x_name, "capacity_reduction_percent")
+        self.assertEqual(stress_success.x_value, 40.0)
+        self.assertAlmostEqual(stress_success.mean, 100.0 / 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

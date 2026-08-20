@@ -86,6 +86,34 @@ class PilotRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Rule Change Ratio", report)
             self.assertIn("Success Rate", report)
 
+    async def test_exp4_pilot_orchestrates_three_panel_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = await run_pilot(
+                ("exp4",),
+                output_root=root,
+                seeds=(0,),
+                exp4_event_ids=(0,),
+                exp4_capacity_reductions=(10,),
+                bootstrap_iterations=100,
+            )
+
+            self.assertEqual(result.experiments, ("exp4",))
+            self.assertEqual(result.error_count, 0)
+            expected = (
+                root / "raw" / "pilot" / "exp4" / "trials.csv",
+                root / "aggregated" / "pilot" / "exp4" / "summary.csv",
+                root / "aggregated" / "pilot" / "exp4" / "sanity.json",
+                root / "aggregated" / "pilot" / "exp4" / "PILOT_SUMMARY.md",
+                root / "paper_figures" / "Fig4_Failure_Recovery.pdf",
+                root / "paper_figures" / "Fig4_Failure_Recovery.png",
+            )
+            self.assertTrue(all(path.exists() for path in expected))
+            report = expected[3].read_text(encoding="utf-8")
+            self.assertIn("Pilot only", report)
+            self.assertIn("Failure Type", report)
+            self.assertIn("Capacity Stress", report)
+
 
 if __name__ == "__main__":
     unittest.main()

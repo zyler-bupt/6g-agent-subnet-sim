@@ -17,9 +17,10 @@ if __package__ in {None, ""}:
 
 from experiments.exp1_initial_formation import run_exp1
 from experiments.exp3_business_elasticity import run_exp3
+from experiments.exp4_failure import run_exp4
 from experiments.paper_protocol import METHODS
 from scripts.aggregate_results import aggregate_experiment
-from scripts.plot_final_paper_figures import plot_exp1, plot_exp3
+from scripts.plot_final_paper_figures import plot_exp1, plot_exp3, plot_exp4
 from scripts.sanity_check_results import SanityFinding, check_results
 
 
@@ -41,11 +42,13 @@ async def run_pilot(
     exp1_task_sizes: tuple[int, ...] = (8, 12, 16, 20, 24, 28, 32),
     exp1_churn_points: tuple[int | float, ...] = (0, 5, 10, 15, 20, 30),
     exp3_buckets: tuple[int, ...] = (10, 20, 30, 40, 50),
+    exp4_event_ids: tuple[int, ...] | None = None,
+    exp4_capacity_reductions: tuple[int, ...] = (10, 20, 30, 40, 50),
     bootstrap_iterations: int = 5000,
     replace_existing: bool = False,
 ) -> PilotRunResult:
     selected = tuple(dict.fromkeys(experiments))
-    unsupported = set(selected) - {"exp1", "exp3"}
+    unsupported = set(selected) - {"exp1", "exp3", "exp4"}
     if unsupported:
         raise ValueError(
             "pilot orchestration is not implemented yet for: "
@@ -75,12 +78,20 @@ async def run_pilot(
             task_sizes=exp1_task_sizes,
             churn_points=exp1_churn_points,
         )
-    else:
+    elif experiment == "exp3":
         rows = await run_exp3(
             "pilot",
             output_root,
             seeds=seeds,
             buckets=exp3_buckets,
+        )
+    else:
+        rows = await run_exp4(
+            "pilot",
+            output_root,
+            seeds=seeds,
+            event_ids=exp4_event_ids,
+            capacity_reductions=exp4_capacity_reductions,
         )
     aggregate_rows = aggregate_experiment(
         raw_path,
@@ -105,10 +116,14 @@ async def run_pilot(
         plot_exp1(summary_path, figure_dir)
         report = _exp1_pilot_report(rows, aggregate_rows, findings)
         payload = _exp1_pilot_summary_payload(rows, aggregate_rows, findings)
-    else:
+    elif experiment == "exp3":
         plot_exp3(summary_path, figure_dir)
         report = _exp3_pilot_report(rows, aggregate_rows, findings)
         payload = _exp3_pilot_summary_payload(rows, aggregate_rows, findings)
+    else:
+        plot_exp4(summary_path, figure_dir)
+        report = _exp4_pilot_report(rows, aggregate_rows, findings)
+        payload = _exp4_pilot_summary_payload(rows, aggregate_rows, findings)
     (aggregate_dir / "PILOT_SUMMARY.md").write_text(report, encoding="utf-8")
     with (aggregate_dir / "PILOT_SUMMARY.json").open(
         "w",
@@ -313,6 +328,131 @@ def _format_optional(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.3f}"
 
 
+def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
+    payload = _exp4_pilot_summary_payload(rows, aggregate_rows, findings)
+    lines = [
+        "# Exp.4 Pilot Summary",
+        "",
+        "> Pilot only — these values are for implementation and stress-range checks, not paper results.",
+        "",
+        f"- Raw trials: {payload['raw_trial_count']}",
+        f"- Topology seeds: {payload['topology_seed_count']}",
+        f"- Sanity errors: {payload['error_count']}",
+        f"- Sanity warnings: {payload['warning_count']}",
+        "",
+        "## Failure Type Results",
+        "",
+        "| Failure Type | Method | Mean Successful Latency (ms) | Success Rate (%) | Rule Change Ratio (%) |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for item in payload["failure_type_results"]:
+        lines.append(
+            f"| {item['failure_type']} | {item['method_label']} "
+            f"| {_format_optional(item['mean_recovery_latency_ms'])} "
+            f"| {item['success_rate_percent']:.1f} "
+            f"| {item['rule_change_ratio_percent']:.1f} |"
+        )
+    lines.extend(("", "## Capacity Stress", ""))
+    for item in payload["capacity_stress"]:
+        lines.append(
+            f"- {item['method_label']}: "
+            + ", ".join(
+                f"{point['reduction_percent']:.0f}%={point['success_rate_percent']:.1f}%"
+                for point in item["points"]
+            )
+        )
+    lines.extend(("", "## Sanity Findings", ""))
+    if findings:
+        lines.extend(
+            f"- [{item.level}] `{item.code}`: {item.message}"
+            for item in findings
+        )
+    else:
+        lines.append("- No findings.")
+    lines.extend(
+        (
+            "",
+            "## Outputs",
+            "",
+            "- Raw CSV: `results/raw/pilot/exp4/trials.csv`",
+            "- Aggregate CSV: `results/aggregated/pilot/exp4/summary.csv`",
+            "- Figure: `results/paper_figures/Fig4_Failure_Recovery.{pdf,png}`",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
+    failure_results = []
+    for failure_type in ("agent_failure", "link_failure", "capacity_degradation"):
+        for method_id in ("proposed", "netkeeper", "cspf", "full_rebuild"):
+            selected = [
+                row
+                for row in rows
+                if row.series == "failure_type"
+                and row.failure_type == failure_type
+                and row.method_id == method_id
+            ]
+            latencies = [
+                row.recovery_latency_ms
+                for row in selected
+                if row.recovery_latency_ms is not None
+            ]
+            failure_results.append(
+                {
+                    "failure_type": failure_type,
+                    "method_id": method_id,
+                    "method_label": METHODS[method_id].label,
+                    "mean_recovery_latency_ms": (
+                        mean(latencies) if latencies else None
+                    ),
+                    "success_rate_percent": 100.0
+                    * sum(bool(row.success) for row in selected)
+                    / len(selected),
+                    "rule_change_ratio_percent": 100.0
+                    * mean(row.rule_change_ratio for row in selected),
+                }
+            )
+    stress = []
+    for method_id in ("proposed", "netkeeper", "cspf", "full_rebuild"):
+        points = []
+        selected = [
+            row
+            for row in rows
+            if row.series == "capacity_stress" and row.method_id == method_id
+        ]
+        for severity in sorted({row.failure_severity for row in selected}):
+            point_rows = [row for row in selected if row.failure_severity == severity]
+            points.append(
+                {
+                    "reduction_percent": 100.0 * severity,
+                    "success_rate_percent": 100.0
+                    * sum(bool(row.success) for row in point_rows)
+                    / len(point_rows),
+                }
+            )
+        stress.append(
+            {
+                "method_id": method_id,
+                "method_label": METHODS[method_id].label,
+                "points": points,
+            }
+        )
+    return {
+        "experiment": "exp4",
+        "mode": "pilot",
+        "raw_trial_count": len(rows),
+        "aggregate_row_count": len(aggregate_rows),
+        "topology_seed_count": len({row.seed for row in rows}),
+        "error_count": sum(item.level == "ERROR" for item in findings),
+        "warning_count": sum(item.level == "WARNING" for item in findings),
+        "failure_type_results": failure_results,
+        "capacity_stress": stress,
+        "findings": [asdict(item) for item in findings],
+    }
+
+
 def _clear_pilot(output_root: Path, experiment: str) -> None:
     raw_dir = output_root / "raw" / "pilot" / experiment
     aggregate_dir = output_root / "aggregated" / "pilot" / experiment
@@ -322,6 +462,7 @@ def _clear_pilot(output_root: Path, experiment: str) -> None:
     figure_name = {
         "exp1": "Fig1_Formation",
         "exp3": "Fig3_Business_Elasticity",
+        "exp4": "Fig4_Failure_Recovery",
     }[experiment]
     for suffix in ("pdf", "png"):
         figure = output_root / "paper_figures" / f"{figure_name}.{suffix}"

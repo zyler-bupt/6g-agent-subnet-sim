@@ -138,6 +138,8 @@ def check_results(
         findings.extend(_exp1_trend_findings(rows))
     elif selected_experiment == "exp3":
         findings.extend(_exp3_trend_findings(rows))
+    elif selected_experiment == "exp4":
+        findings.extend(_exp4_trend_findings(rows))
     return _deduplicate(findings)
 
 
@@ -165,12 +167,15 @@ def _constant_output_findings(
             "exp4": {"failure_type"},
         }.get(experiment, set())
         if latency_field is not None and series in primary_latency_series:
-            latencies = {
-                value
+            latency_points = [
+                (_series_x_value(row), value)
                 for row in selected
                 if (value := _optional_number(row.get(latency_field))) is not None
-            }
-            if len(latencies) == 1:
+                and _series_x_value(row) is not None
+            ]
+            latency_x_values = {point[0] for point in latency_points}
+            latencies = {point[1] for point in latency_points}
+            if len(latency_x_values) >= 3 and len(latencies) == 1:
                 findings.append(
                     SanityFinding(
                         "ERROR",
@@ -329,6 +334,44 @@ def _exp3_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
     return []
 
 
+def _exp4_trend_findings(rows: Sequence[dict[str, Any]]) -> list[SanityFinding]:
+    findings = []
+    stress_rows = [
+        row for row in rows if _text(row.get("series")) == "capacity_stress"
+    ]
+    for method_id in ("cspf", "netkeeper"):
+        means = []
+        selected = [
+            row
+            for row in stress_rows
+            if _text(row.get("method_id")) == method_id
+        ]
+        for severity, point_rows in _group(selected, "failure_severity").items():
+            severity_value = _optional_number(severity)
+            success_values = [
+                value
+                for row in point_rows
+                if (value := _optional_boolean(row.get("success"))) is not None
+            ]
+            if severity_value is not None and success_values:
+                means.append(
+                    (severity_value, sum(success_values) / len(success_values))
+                )
+        means.sort()
+        if len(means) >= 2 and means[-1][1] > means[0][1] + 1e-9:
+            findings.append(
+                SanityFinding(
+                    "WARNING",
+                    "EXP4_NETWORK_RECOVERY_IMPROVES_WITH_STRESS",
+                    f"{method_id} recovery improves as capacity reduction increases",
+                    "exp4",
+                    "capacity_stress",
+                    method_id,
+                )
+            )
+    return findings
+
+
 def _read_rows(
     source: str | Path | Sequence[Mapping[str, Any] | object],
 ) -> list[dict[str, Any]]:
@@ -374,6 +417,12 @@ def _series_x_value(row: Mapping[str, Any]) -> float | None:
             if bucket is not None
             else _optional_number(row.get("affected_scope_ratio"))
         )
+    if series == "failure_type":
+        return {
+            "agent_failure": 0.0,
+            "link_failure": 1.0,
+            "capacity_degradation": 2.0,
+        }.get(_text(row.get("failure_type")))
     field = {
         "task_size": "task_size",
         "state_churn": "state_churn_probability",
