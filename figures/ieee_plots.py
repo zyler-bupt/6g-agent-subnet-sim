@@ -132,17 +132,17 @@ METHOD_STYLE: dict[str, dict] = {
     "local_only": {"color": B1_RED, "marker": "x", "ls": "dashed", "label": "Local-Only"},
     "netren": {"color": B2_ORANGE, "marker": "triangle", "ls": "dashed", "label": "NetRen*"},
     "full_rebuild": {"color": B3_BLUE, "marker": "plus", "ls": "dashed", "label": "Full Rebuild"},
-    # Exp4 recovery (implemented proxies / intended baselines)
+    # Exp4 recovery (failure-specific baselines; no mixed comparison)
     "network_only": {"color": ABLATION_GRAY, "marker": "circle", "ls": "dotted", "label": "Network-Only"},
     "frr": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "FRR"},
     "te_reopt": {"color": B3_BLUE, "marker": "circle", "ls": "dashed", "label": "TE-Reopt"},
+    "sfc_restoration": {"color": EXTRA_PURPLE, "marker": "star", "ls": "dashed", "label": "SFC-Restore"},
     # Appendix / internal ablation only (kept for reference, not in main figures)
     "ilp_sfc": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "ILP-SFC*"},
     "adjacent_layer": {"color": ABLATION_GRAY, "marker": "triangle", "ls": "dotted", "label": "Adjacent-Layer"},
     "proposed_without_batch": {"color": PROPOSED_GREEN, "marker": "circle", "ls": "dotted", "label": "Proposed w/o Batch"},
     "srd": {"color": ABLATION_GRAY, "marker": "square", "ls": "dotted", "label": "SRD"},
     "netkeeper": {"color": ABLATION_GRAY, "marker": "square", "ls": "dotted", "label": "NetKeeper*"},
-    "sfc_restoration": {"color": EXTRA_PURPLE, "marker": "star", "ls": "dotted", "label": "SFC-Restore"},
 }
 
 # Fallback for any method_id not explicitly registered above.
@@ -439,23 +439,28 @@ def _demo_rows() -> list[dict]:
                          "y_mean": succ, "y_lo": succ - 3, "y_hi": succ + 3})
 
     # Exp4: failure types 0=Link,1=Agent,2=Capacity.
-    # Per-failure method sets (v3). cspf/frr/te_reopt are included in the demo
-    # to validate the layout; they have no real data until strategies exist.
+    # Per-failure method sets exactly match the frozen protocol:
+    #   Link     : proposed, cspf
+    #   Agent    : proposed, sfc_restoration, full_rebuild
+    #   Capacity : proposed, te_reopt, full_rebuild
+    # Expected scientific story (no forced win):
+    #   Link     -> routing methods competitive (proposed ~ cspf)
+    #   Agent    -> cross-layer awareness wins (proposed < sfc_restoration < full_rebuild)
+    #   Capacity -> semantic scope control avoids needless global change
+    #              (proposed < te_reopt < full_rebuild)
     recovery = {
         "proposed": {"Link": 900, "Agent": 700, "Capacity": 800},
-        "network_only": {"Link": 1500, "Agent": 1400, "Capacity": 1300},
-        "cspf": {"Link": 1250},
-        "frr": {"Link": 1000},
+        "cspf": {"Link": 1050},
+        "sfc_restoration": {"Agent": 1500},
         "full_rebuild": {"Agent": 2400, "Capacity": 2200},
         "te_reopt": {"Capacity": 1500},
     }
     scope = {
         "proposed": {"Link": 20, "Agent": 18, "Capacity": 22},
-        "network_only": {"Link": 70, "Agent": 65, "Capacity": 60},
-        "cspf": {"Link": 55},
-        "frr": {"Link": 50},
+        "cspf": {"Link": 48},
+        "sfc_restoration": {"Agent": 70},
         "full_rebuild": {"Agent": 95, "Capacity": 92},
-        "te_reopt": {"Capacity": 35},
+        "te_reopt": {"Capacity": 40},
     }
     for m, per_ft in recovery.items():
         for ft, lat in per_ft.items():

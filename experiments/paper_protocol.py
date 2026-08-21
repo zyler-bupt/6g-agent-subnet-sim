@@ -284,12 +284,11 @@ METHODS: Mapping[str, MethodMetadata] = {
     ),
     "network_only": _method(
         "network_only", "Network-Only", "strategy",
-        "Network-only local recovery (executable placeholder)",
-        "Currently the executable proxy for link/capacity recovery baselines "
-        "(CSPF/FRR/TE-Reopt) until their recovery strategies are implemented. "
-        "Lives only in EXPERIMENT_METHODS['exp4'] (executable union), not in "
-        "the per-fault-type sets; will be replaced by the specific literature "
-        "baselines once implemented.",
+        "Network-only local recovery (legacy proxy)",
+        "Former executable proxy for link/capacity recovery baselines. "
+        "Replaced by the failure-specific CSPF / TE-Reopt strategies in the "
+        "frozen protocol; kept only as an internal-ablation reference.",
+        status="ablation",
     ),
     "netkeeper": _method(
         "netkeeper", "NetKeeper*", "literature-inspired",
@@ -301,23 +300,24 @@ METHODS: Mapping[str, MethodMetadata] = {
     "frr": _method(
         "frr", "FRR", "literature-inspired",
         "IP/MPLS Fast Reroute",
-        "Local protection baseline for link-failure recovery (Exp4). "
-        "Recovery strategy pending implementation.",
-        status="pending",
+        "Optional local-protection baseline for link-failure recovery (Exp4). "
+        "Omitted from the main protocol because it is a near-duplicate of CSPF "
+        "for our path-recovery scenario; kept registered for reference.",
+        status="appendix",
     ),
     "te_reopt": _method(
         "te_reopt", "TE-Reopt", "literature-inspired",
         "Traffic Engineering Re-optimization",
         "TE re-optimization baseline for physical-capacity-degradation "
-        "recovery (Exp4). Recovery strategy pending implementation.",
-        status="pending",
+        "recovery (Exp4). Redistributes network resources without task-DAG "
+        "semantic awareness, so it may modify unnecessary paths.",
     ),
     "sfc_restoration": _method(
         "sfc_restoration", "SFC-Restore", "literature-inspired",
         "SFC Restoration",
-        "Service-chain restoration baseline for an appendix/alternative "
-        "recovery comparison.",
-        status="appendix",
+        "Service-chain restoration baseline for agent-failure recovery (Exp4). "
+        "Replaces the failed function and rebuilds the chain around it; correct "
+        "but cannot exploit task-DAG dependency, so larger scope than Proposed.",
     ),
 }
 
@@ -335,25 +335,32 @@ EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
     "exp1": ("proposed", "cspf", "sfc_reoptimization"),
     "exp2": ("proposed", "independent", "weighted_sum", "sanet_dw"),
     "exp3": ("proposed", "local_only", "netren", "full_rebuild"),
-    # Executable union of recovery strategies currently implemented. The
-    # plotting/aggregation layer groups these per failure type using
-    # EXPERIMENT_FAILURE_METHODS. cspf / FRR / TE-Reopt recovery strategies
-    # belong to the frozen protocol but are not yet implemented (see audit).
-    "exp4": ("proposed", "full_rebuild", "network_only"),
+    # Executable union of recovery strategies currently implemented (failure
+    # type specific). The runner iterates EXPERIMENT_FAILURE_METHODS[exp4]
+    # per failure type; this tuple is only a convenience for callers that need
+    # the full implemented set. Every entry here must be dispatchable by
+    # run_paper_failure_method.
+    "exp4": ("proposed", "cspf", "full_rebuild", "sfc_restoration", "te_reopt"),
 }
 
 
-# v2 Exp4: failure-specific comparison sets (the paper protocol). These name the
-# baselines each failure type is judged against; the runner executes
-# EXPERIMENT_METHODS["exp4"] and the plotting layer filters per failure type.
-#   LINK_FAILURE           : proposed vs CSPF (+ optional FRR)
-#   AGENT_FAILURE          : proposed vs Full Rebuild
-#   PHYSICAL_CAPACITY_DROP : proposed vs TE-Reopt + Full Rebuild
+# Frozen Exp4 (v3 final alignment): failure-specific comparison sets. The keys
+# match PaperFailureSnapshot.failure_type EXACTLY so the runner can index with
+# snapshot.failure_type directly. Each failure type is judged against its own
+# representative literature-inspired recovery method(s); baselines are never
+# mixed across failure types.
+#   link_failure         : proposed vs CSPF (routing/path recovery)
+#   agent_failure         : proposed vs SFC-Restoration vs Full Rebuild
+#                           (service/task recovery; cross-layer awareness wins)
+#   capacity_degradation  : proposed vs TE-Reopt vs Full Rebuild
+#                           (resource reoptimization)
+# FRR is intentionally omitted: it is an optional link baseline and would be a
+# near-duplicate of CSPF for our path-recovery scenario (see audit).
 EXPERIMENT_FAILURE_METHODS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "exp4": {
-        "LINK_FAILURE": ("proposed", "cspf", "frr"),
-        "AGENT_FAILURE": ("proposed", "full_rebuild"),
-        "PHYSICAL_CAPACITY_DROP": ("proposed", "te_reopt", "full_rebuild"),
+        "link_failure": ("proposed", "cspf"),
+        "agent_failure": ("proposed", "sfc_restoration", "full_rebuild"),
+        "capacity_degradation": ("proposed", "te_reopt", "full_rebuild"),
     }
 }
 

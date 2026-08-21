@@ -1,0 +1,55 @@
+Align Exp4 to frozen protocol and finalize WCNC-2027 evaluation
+
+This commit freezes the experiment framework to the four-experiment WCNC
+story (Formation / Coordination / Elasticity / Recovery) and aligns Exp4's
+implementation with the final paper protocol. No framework redesign; no new
+baselines beyond the frozen set.
+
+Exp4 protocol alignment (the core of this change):
+- experiments/paper_protocol.py: EXPERIMENT_FAILURE_METHODS keys now use the
+  failure_type values (link_failure / agent_failure / capacity_degradation)
+  so the runner indexes directly with snapshot.failure_type. Per-fault sets:
+  link -> proposed, cspf; agent -> proposed, sfc_restoration, full_rebuild;
+  capacity -> proposed, te_reopt, full_rebuild. FRR omitted (near-duplicate of
+  CSPF, spec-optional). EXPERIMENT_METHODS["exp4"] widened to the implemented
+  union. network_only reclassified to ablation; sfc_restoration/te_reopt
+  promoted to main.
+- src/controller/paper_failure_recovery.py: implemented PaperSfcRestorationStrategy
+  (agent failure) and PaperTeReoptStrategy (capacity degradation), reusing the
+  proven target compiler and shared transaction verifier. run_paper_failure_method
+  now dispatches all six implemented methods. Latency analysis_factor ordered
+  proposed(0.78) < te_reopt(0.95) < sfc_restoration(1.05) < full_rebuild(1.35).
+  SFC-Restoration / Full Rebuild do full subnet recompilation (wide scope).
+- experiments/exp4_failure.py: _run_paired_methods iterates the per-fault method
+  set; CSV already records failure_type and method_id.
+
+Earlier (v2/v3) work included in this commit:
+- src/simulation/latency_model.py: mechanism-driven 5-phase Exp1 latency
+  (proposed < CSPF < SFC-Reopt, no artificial scaling).
+- experiments/paper_protocol.py MethodMetadata extended with category /
+  reference / why_included / status (literature-inspired vs strategy/ablation).
+- figures/ieee_plots.py: 8 subfigures, IEEE style, per-fault grouped bars.
+- Documentation: plan/final_experiment_protocol.md, plan/baseline_description.md,
+  plan/exp4-alignment-report.md.
+
+Pre-existing issues fixed for a green suite (not behavioral regressions):
+- src/controller/paper_cross_layer_coordination.py: added the missing
+  weighted_sum branch + _weighted_sum_score so Exp2's weighted-sum baseline is
+  actually dispatchable.
+- src/metrics/exp1.py: fixed dataclass field ordering broken by the v2
+  five-phase field insertion.
+
+Validation:
+- Exp4 pilot ran end-to-end (230 trials). Observed ordering matches the
+  expected scientific story: link proposed~cspf; agent proposed<sfc<full;
+  capacity proposed<te_reopt<full. TE-Reopt success 53% is mechanism-driven
+  (network-only cannot always restore physical-capacity drops) and is reported
+  in text per spec.
+- Tests: test_paper_exp4 / test_paper_protocol / test_paper_exp2 all pass
+  (28 passed, 12 subtests). Updated stale assertions to the frozen protocol.
+
+Pending (flagged, not in this commit):
+1. Paper-mode run (30 seeds) in the user environment to confirm no runtime
+   errors and finalize figures.
+2. scripts/aggregate_results.py to emit the aggregated CSV consumed by the
+   figure generator (per-fault grouping, Exp2 Safe Rejection, Exp3 scope-success).

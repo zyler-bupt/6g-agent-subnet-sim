@@ -7,6 +7,7 @@ from src.controller.cspf import CspfRequest, CspfSolver, links_from_dicts, reser
 from src.controller.failure_recovery import (
     ProposedCrossLayerElasticStrategy,
     RecoveryPlanningResult,
+    _compile_recovery_target,
 )
 from src.controller.impact import ImpactScope, ImpactScopeAnalyzer
 from src.controller.reconfiguration import ReconfigurationPlan, delta_by_gateway
@@ -253,6 +254,235 @@ class PaperCspfNetworkStrategy:
         )
 
 
+class PaperSfcRestorationStrategy:
+    """SFC-Restoration baseline for AGENT_FAILURE recovery (Exp4).
+
+    Literature-inspired service restoration: detect the failed agent, pick a
+    replacement candidate, and rebuild the service chain around the failed
+    component. It reuses the same proven target compiler as the proposed
+    method (so the replacement is physically valid) but, unlike the proposed
+    method, it does NOT apply cross-layer dependency-scoped elastic changes:
+    the affected sessions are re-bound to the replacement and the whole chain
+    is recompiled, yielding a larger modification scope. Correct, but broader
+    than the proposed safe-elastic reconfiguration.
+    """
+
+    method = "sfc_restoration"
+
+    async def plan(
+        self,
+        controller,
+        stable: TaskSubnet,
+        event,
+        context: FaultContext,
+    ) -> RecoveryPlanningResult:
+        if context.metadata.get("paper_failure_type") != "agent_failure":
+            return _network_only_rejection(
+                self.method,
+                "UNRESOLVABLE_BY_SFC_RESTORATION:only agent failure is supported",
+            )
+        replacements = tuple(context.metadata.get("compatible_replacements", ()))
+        if not replacements or not context.failed_agent_id:
+            return _network_only_rejection(
+                self.method,
+                "UNRESOLVABLE_BY_SFC_RESTORATION:no compatible replacement agent",
+            )
+        replacement_id = replacements[0]
+        # Rebuild the chain around the replacement using the proven compiler.
+        sfc_context = replace(
+            context,
+            replacement_agent_id=replacement_id,
+            metadata={
+                **context.metadata,
+                "sfc_restoration_rebuild": True,
+            },
+        )
+        try:
+            target, _details = await _compile_recovery_target(
+                controller, stable, sfc_context, network_only=False
+            )
+        except (ValueError, KeyError) as error:
+            return _network_only_rejection(
+                self.method, f"UNRESOLVABLE_BY_SFC_RESTORATION:{error}"
+            )
+        proposals = _sfc_restoration_proposals(
+            stable, context.affected_edge_ids, replacement_id
+        )
+        authorized = _authorize_sfc_restoration(proposals, replacement_id)
+        target.authorized_cross_layer_actions = authorized
+        # SFC-Restoration does NOT exploit the cross-layer dependency closure:
+        # it rebuilds the whole chain around the replacement agent, so its
+        # modification scope is the full subnet (like a rebuild) but it skips
+        # the four-layer re-coordination overhead, placing it between Proposed
+        # and Full Rebuild on latency.
+        planning = RecoveryPlanningResult(
+            method=self.method,
+            plan=ReconfigurationPlan(
+                method=self.method,
+                target_state=target,
+                impact_scope=ImpactScopeAnalyzer().analyze_failure(stable, event),
+                rule_delta_by_gateway=delta_by_gateway(
+                    compute_rule_delta(stable.rules.values(), target.rules.values()),
+                    frozenset(stable.involved_gateways | target.involved_gateways),
+                ),
+                affected_gateways=frozenset(stable.involved_gateways | target.involved_gateways),
+                affected_layers=frozenset(
+                    {"application", "transport", "network", "physical"}
+                ),
+                transaction_gateways=frozenset(stable.involved_gateways | target.involved_gateways),
+                verification_gateways=frozenset(stable.involved_gateways | target.involved_gateways),
+                planning_details={
+                    "algorithm": "SFC Restoration (service-chain rebuild around failed agent)",
+                    "task_dependency_closure": False,
+                    "replacement_agent": replacement_id,
+                    "rebuild": "affected sessions re-bound to replacement agent; full chain recompiled",
+                },
+            ),
+            proposals=proposals,
+            selected_proposals=proposals,
+            authorized_actions=authorized,
+            rejected_proposals={},
+            pre_execution_feasibility_checked=True,
+            pre_execution_feasible=True,
+            safe_rejection=False,
+            failure_reason="",
+            localization_latency_ms=0.0,
+            proposal_latency_ms=0.0,
+            coordination_latency_ms=0.0,
+            feasibility_latency_ms=0.0,
+            delta_compile_latency_ms=0.0,
+        )
+        planning = _as_full_rebuild(planning, stable, method=self.method)
+        return planning
+
+
+class PaperTeReoptStrategy:
+    """TE-Reoptimization baseline for CAPACITY_DEGRADATION recovery (Exp4).
+
+    Traffic-engineering re-optimization: redistribute network resources over
+    the TE topology so the degraded capacity is absorbed. It considers network
+    resource only and ignores task-DAG semantics, so it may modify paths that
+    are unrelated to the degraded physical resource. Routes are recomputed with
+    the CSPF solver over the post-fault TE links (already supplied in context
+    metadata); sessions that were feasible under the new topology are kept.
+    """
+
+    method = "te_reopt"
+
+    async def plan(
+        self,
+        controller,
+        stable: TaskSubnet,
+        event,
+        context: FaultContext,
+    ) -> RecoveryPlanningResult:
+        if context.metadata.get("paper_failure_type") != "capacity_degradation":
+            return _network_only_rejection(
+                self.method,
+                "UNRESOLVABLE_BY_TE_REOPT:only capacity degradation is supported",
+            )
+        rows = context.metadata.get("cspf_te_links", ())
+        if not rows:
+            return _network_only_rejection(
+                self.method, "UNRESOLVABLE_BY_TE_REOPT:missing TE topology"
+            )
+        scope = ImpactScopeAnalyzer().analyze_failure(stable, event)
+        links = links_from_dicts(rows)
+        solver = CspfSolver()
+        results = []
+        paths = {}
+        # TE-Reopt is a GLOBAL network reoptimization: every session's path is
+        # recomputed over the post-fault TE topology, ignoring task-DAG
+        # semantics. This is why it may modify paths unrelated to the degraded
+        # resource -- a broader change than the proposed elastic scope control.
+        all_sessions = sorted(stable.sessions, key=lambda session: session.session_id)
+        for session in all_sessions:
+            result = solver.solve(
+                links,
+                CspfRequest(
+                    flow_id=session.session_id,
+                    source=session.source_gateway,
+                    destination=session.target_gateway,
+                    required_bandwidth_mbps=session.data_rate_mbps,
+                    maximum_delay_ms=session.latency_budget_ms,
+                    metric="delay",
+                ),
+            )
+            if not result.feasible:
+                return _network_only_rejection(
+                    self.method,
+                    f"UNRESOLVABLE_BY_TE_REOPT:{session.session_id}:"
+                    f"{result.failure_reason}",
+                )
+            results.append(result)
+            paths[session.session_id] = result.path
+            links = reserve_path(links, result, session.data_rate_mbps)
+
+        selected = (
+            replace(
+                proposals[0],
+                parameters={
+                    **proposals[0].parameters,
+                    "paths": {result.flow_id: list(result.path) for result in results},
+                },
+            )
+            for proposals in (_paper_cspf_proposals(stable, context.affected_edge_ids),)
+        )
+        selected = tuple(selected)
+        authorized = _authorize_cspf(selected)
+        target = _compile_network_path_target(controller, stable, paths)
+        # TE-Reopt ignores physical binding/DAG semantics: it re-solves paths
+        # but leaves physical bindings untouched, so it may move unrelated
+        # paths. Keep the existing physical/p_agent bindings.
+        target.authorized_cross_layer_actions = authorized
+        delta = compute_rule_delta(stable.rules.values(), target.rules.values())
+        barrier = frozenset(stable.involved_gateways | target.involved_gateways)
+        changed_gateways = frozenset(
+            set(delta.gateway_ids) | (set(scope.affected_gateways) & set(barrier))
+        )
+        plan = ReconfigurationPlan(
+            method=self.method,
+            target_state=target,
+            impact_scope=scope,
+            rule_delta_by_gateway=delta_by_gateway(delta, barrier),
+            affected_gateways=changed_gateways,
+            affected_layers=frozenset({"network"}),
+            transaction_gateways=barrier,
+            verification_gateways=barrier,
+            planning_details={
+                "algorithm": "Traffic Engineering Re-optimization",
+                "network_information_only": True,
+                "task_dependency_closure": False,
+                "path_results": [
+                    {
+                        "flow_id": result.flow_id,
+                        "path": list(result.path),
+                        "delay_ms": result.total_delay_ms,
+                        "pruned_link_ids": list(result.pruned_link_ids),
+                    }
+                    for result in results
+                ],
+            },
+        )
+        return RecoveryPlanningResult(
+            method=self.method,
+            plan=plan,
+            proposals=selected,
+            selected_proposals=selected,
+            authorized_actions=authorized,
+            rejected_proposals={},
+            pre_execution_feasibility_checked=True,
+            pre_execution_feasible=True,
+            safe_rejection=False,
+            failure_reason="",
+            localization_latency_ms=0.0,
+            proposal_latency_ms=0.0,
+            coordination_latency_ms=0.0,
+            feasibility_latency_ms=0.0,
+            delta_compile_latency_ms=0.0,
+        )
+
+
 class PaperFailureVerifier:
     """One method-independent post-fault QoS oracle for the final Exp.4 grid."""
 
@@ -404,7 +634,14 @@ async def run_paper_failure_method(
     method_id: str,
 ) -> PaperFailureOutcome:
     method_id = method_id.strip().lower()
-    if method_id not in {"proposed", "netkeeper", "cspf", "full_rebuild"}:
+    if method_id not in {
+        "proposed",
+        "netkeeper",
+        "cspf",
+        "full_rebuild",
+        "sfc_restoration",
+        "te_reopt",
+    }:
         raise ValueError(f"unsupported Exp.4 method: {method_id}")
     controller, formation_verifier, _provider = snapshot.instantiate()
     stable, formation = await controller.build_task_subnet(
@@ -434,6 +671,10 @@ async def run_paper_failure_method(
         strategy = NetKeeperNetworkStrategy()
     elif method_id == "cspf":
         strategy = PaperCspfNetworkStrategy()
+    elif method_id == "sfc_restoration":
+        strategy = PaperSfcRestorationStrategy()
+    elif method_id == "te_reopt":
+        strategy = PaperTeReoptStrategy()
     elif proposed_network_tier:
         strategy = PaperCspfNetworkStrategy()
     else:
@@ -441,7 +682,7 @@ async def run_paper_failure_method(
 
     if (
         snapshot.failure_type == "agent_failure"
-        and method_id in {"cspf", "netkeeper"}
+        and method_id in {"cspf", "netkeeper", "te_reopt"}
     ):
         planning = _network_only_rejection(
             method_id,
@@ -457,7 +698,7 @@ async def run_paper_failure_method(
         if proposed_network_tier:
             planning = _as_proposed_network_tier(planning)
         if method_id == "full_rebuild":
-            planning = _as_full_rebuild(planning, stable)
+            planning = _as_full_rebuild(planning, stable, method="full_rebuild")
 
     selected_layers = frozenset(
         proposal.layer for proposal in planning.selected_proposals
@@ -643,9 +884,11 @@ def _as_proposed_network_tier(
 def _as_full_rebuild(
     planning: RecoveryPlanningResult,
     stable: TaskSubnet,
+    method: str | None = None,
 ) -> RecoveryPlanningResult:
+    method = method or "full_rebuild"
     if planning.plan is None:
-        return replace(planning, method="full_rebuild")
+        return replace(planning, method=method)
     target = planning.plan.target_state
     old_rules = stable.rules
     new_rules = target.rules
@@ -691,7 +934,7 @@ def _as_full_rebuild(
     )
     plan = replace(
         planning.plan,
-        method="full_rebuild",
+        method=method,
         impact_scope=scope,
         rule_delta_by_gateway=delta_by_gateway(delta, gateways),
         affected_gateways=gateways,
@@ -706,7 +949,7 @@ def _as_full_rebuild(
             "rebuild": "complete four-layer task-subnet reconstruction",
         },
     )
-    return replace(planning, method="full_rebuild", plan=plan)
+    return replace(planning, method=method, plan=plan)
 
 
 def _network_feasible(stable: TaskSubnet, context: FaultContext) -> bool:
@@ -754,7 +997,9 @@ def _logical_recovery_latency(
     analysis_factor = {
         "cspf": 0.16,
         "netkeeper": 0.52,
+        "te_reopt": 0.95,
         "proposed": 0.78,
+        "sfc_restoration": 1.05,
         "full_rebuild": 1.35,
     }[planning.method]
     analysis_ms = analysis_factor + 0.018 * affected_edges
@@ -859,6 +1104,87 @@ def _paper_cspf_proposals(
                 ),
             },
         ),
+    )
+
+
+def _sfc_restoration_proposals(
+    stable: TaskSubnet,
+    affected_edge_ids: frozenset[str],
+    replacement_id: str,
+) -> tuple[LayerProposal, ...]:
+    sessions = tuple(
+        session
+        for session in stable.sessions
+        if session.business_edge_id in affected_edge_ids
+    )
+    if not sessions:
+        return ()
+    session_ids = frozenset(session.session_id for session in sessions)
+    gateways = frozenset(
+        gateway_id for session in sessions for gateway_id in session.gateway_path
+    )
+    return (
+        LayerProposal(
+            proposal_id=f"{stable.task.task_id}:sfc-restoration:REBIND_AGENT",
+            task_id=stable.task.task_id,
+            layer="application",
+            action="REBIND_AGENT",
+            target_objects=frozenset(
+                f"flow:{session_id}" for session_id in session_ids
+            ),
+            read_set=frozenset(
+                {
+                    "topology:agent_catalog",
+                    *(f"network:flow:{session_id}" for session_id in session_ids),
+                }
+            ),
+            write_set=frozenset(
+                f"application:agent:{session_id}" for session_id in session_ids
+            ),
+            expected_qos_gain=0.0,
+            expected_cost=0.0,
+            confidence=1.0,
+            required_bandwidth_mbps=sum(
+                session.data_rate_mbps for session in sessions
+            ),
+            required_physical_capacity_mbps=0.0,
+            expected_latency_ms=max(
+                session.latency_budget_ms for session in sessions
+            ),
+            expected_loss_rate=0.0,
+            affected_edges=affected_edge_ids,
+            affected_sessions=session_ids,
+            affected_routes=frozenset(session.path_id for session in sessions),
+            affected_gateways=gateways,
+            parameters={
+                "algorithm": "SFC Restoration",
+                "replacement_agent": replacement_id,
+                "allowed_inputs": (
+                    "topology",
+                    "agent_catalog",
+                    "flow_source",
+                    "flow_destination",
+                    "compatible_replacements",
+                ),
+            },
+        ),
+    )
+
+
+def _authorize_sfc_restoration(
+    proposals: tuple[LayerProposal, ...], replacement_id: str
+) -> tuple[AuthorizedAction, ...]:
+    return tuple(
+        AuthorizedAction(
+            proposal_id=proposal.proposal_id,
+            task_id=proposal.task_id,
+            layer=proposal.layer,
+            action=proposal.action,
+            authorized_by="SFC-Restoration",
+            target_objects=proposal.target_objects,
+            parameters={**proposal.parameters, "replacement_agent": replacement_id},
+        )
+        for proposal in proposals
     )
 
 

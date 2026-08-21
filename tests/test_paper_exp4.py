@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from experiments.exp4_failure import run_exp4
-from experiments.paper_protocol import EXPERIMENT_METHODS
+from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS
 from src.controller.paper_failure_recovery import run_paper_failure_method
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 
@@ -232,7 +232,16 @@ class PaperExp4RunnerTests(unittest.IsolatedAsyncioTestCase):
                 capacity_reductions=(10,),
             )
 
-            self.assertEqual(len(rows), (3 + 1) * 4)
+            # Frozen Exp4 (v3): each failure type is compared against its OWN
+            # method set (never a common list). With seeds={0}, events={0},
+            # capacity_reductions={10}: 3 main failure points + 1 capacity
+            # stress point, each evaluated with its per-fault method set.
+            expected = (
+                len(EXPERIMENT_FAILURE_METHODS["exp4"]["link_failure"])
+                + len(EXPERIMENT_FAILURE_METHODS["exp4"]["agent_failure"])
+                + len(EXPERIMENT_FAILURE_METHODS["exp4"]["capacity_degradation"]) * 2
+            )
+            self.assertEqual(len(rows), expected)
             grouped = {}
             for row in rows:
                 grouped.setdefault(row.trial_id, set()).add(row.method_id)
@@ -240,9 +249,18 @@ class PaperExp4RunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(row.num_dag_edges, 36)
                 self.assertEqual(row.num_gateways, 12)
             self.assertTrue(grouped)
-            self.assertTrue(
-                all(methods == set(EXPERIMENT_METHODS["exp4"]) for methods in grouped.values())
-            )
+            # Every trial's method set must match its own failure type's set.
+            for trial_id, methods in grouped.items():
+                ft = next(
+                    row.failure_type
+                    for row in rows
+                    if row.trial_id == trial_id
+                )
+                self.assertEqual(
+                    methods,
+                    set(EXPERIMENT_FAILURE_METHODS["exp4"][ft]),
+                    msg=f"trial {trial_id} (ft={ft}) used wrong method set",
+                )
             self.assertTrue((root / "raw" / "pilot" / "exp4" / "trials.csv").exists())
 
 

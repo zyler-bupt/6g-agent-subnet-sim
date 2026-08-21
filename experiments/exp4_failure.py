@@ -9,7 +9,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.paper_protocol import (
-    EXPERIMENT_METHODS,
+    EXPERIMENT_FAILURE_METHODS,
     METHODS,
     RunMode,
     mode_spec,
@@ -130,7 +130,10 @@ async def _run_paired_methods(
     series: str,
 ) -> list[PaperTrial]:
     rows = []
-    for method_id in EXPERIMENT_METHODS["exp4"]:
+    # Frozen Exp4 protocol: each failure type is compared against its own
+    # representative baseline set (never a common list for all failures).
+    methods = EXPERIMENT_FAILURE_METHODS["exp4"][snapshot.failure_type]
+    for method_id in methods:
         outcome = await run_paper_failure_method(snapshot, method_id)
         rows.append(_paper_trial(mode, snapshot, outcome, trial_id, series))
     return rows

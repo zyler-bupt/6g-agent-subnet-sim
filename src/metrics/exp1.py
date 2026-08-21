@@ -42,24 +42,24 @@ class Exp1RunMetrics:
     t_verify_ms: float = 0.0
     t_activate_ms: float = 0.0
     deploy_mode: str = ""
-    verification_latency_ms: float
-    verifier_runtime_ms: float
-    session_count: int
-    rule_count: int
-    control_messages: int
-    control_bytes: int
-    rollback_triggered: bool
-    rollback_success: bool
-    t_task_received: float
-    t_mapping_finished: float
-    t_layer_binding_finished: float
-    t_feasibility_finished: float
-    t_compile_finished: float
-    t_stage_started: float
-    t_stage_finished: float
-    t_staged_verify_finished: float
-    t_activate_finished: float
-    t_stable_verify_finished: float
+    verification_latency_ms: float = 0.0
+    verifier_runtime_ms: float = 0.0
+    session_count: int = 0
+    rule_count: int = 0
+    control_messages: int = 0
+    control_bytes: int = 0
+    rollback_triggered: bool = False
+    rollback_success: bool = False
+    t_task_received: float = 0.0
+    t_mapping_finished: float = 0.0
+    t_layer_binding_finished: float = 0.0
+    t_feasibility_finished: float = 0.0
+    t_compile_finished: float = 0.0
+    t_stage_started: float = 0.0
+    t_stage_finished: float = 0.0
+    t_staged_verify_finished: float = 0.0
+    t_activate_finished: float = 0.0
+    t_stable_verify_finished: float = 0.0
 
 
 def write_exp1_metrics_csv(path: Path, rows: list[Exp1RunMetrics]) -> None:

@@ -99,6 +99,20 @@ def coordinate_paper(
         )
         evaluated_count = sum(len(items) for items in groups.values())
         policy = "independent_layer_local_objectives"
+    elif method_id == "weighted_sum":
+        weights = dynamic_layer_weights(snapshot.state)
+        selected = tuple(
+            min(
+                groups[layer],
+                key=lambda proposal: (
+                    _weighted_sum_score(snapshot.state, proposal, weights),
+                    proposal.proposal_id,
+                ),
+            )
+            for layer in _LAYERS
+        )
+        evaluated_count = sum(len(items) for items in groups.values())
+        policy = "weighted_sum_multi_objective"
     else:
         raise ValueError(f"unsupported paper Exp.2 method: {method_id}")
 
@@ -136,6 +150,7 @@ def coordinate_paper(
         "proposed": 0.018,
         "sanet_dw": 0.011,
         "adjacent_layer": 0.010,
+        "weighted_sum": 0.007,
         "independent": 0.006,
     }[method_id]
     collection_ms = 0.035 * max(1, conflicted_edges)
@@ -212,6 +227,28 @@ def _independent_score(
     projected = project_cross_layer_state(state, (proposal,))
     local = _local_layer_loss(projected, proposal.layer)
     return local + 0.50 * proposal.expected_cost
+
+
+def _weighted_sum_score(
+    state: CrossLayerTaskState,
+    proposal: LayerProposal,
+    weights: dict[str, float],
+) -> float:
+    """Classic weighted-sum multi-objective selection (Exp2 baseline).
+
+    Each layer picks the proposal maximizing the weighted sum of its local
+    utility and expected QoS gain; like Independent it performs NO cross-layer
+    hard-feasibility check at selection time, so it may later be rejected by
+    the common transaction verifier (a safe rejection, not an unsafe commit).
+    """
+
+    projected = project_cross_layer_state(state, (proposal,))
+    local = _local_layer_loss(projected, proposal.layer)
+    layer_weight = weights.get(proposal.layer, 1.0)
+    return (
+        layer_weight * (local + 0.50 * proposal.expected_cost)
+        - 0.30 * proposal.expected_qos_gain
+    )
 
 
 def _adjacent_selection(
