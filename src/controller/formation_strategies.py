@@ -7,6 +7,7 @@ from typing import Iterable, Mapping, Sequence
 from experiments.paper_protocol import EXPERIMENT_METHODS, stable_fingerprint
 from src.core.models import BusinessEdge, TaskSubnet, to_jsonable
 from src.e2e.models import VerifyResult
+from src.simulation.latency_model import formation_latency_breakdown
 from src.simulation.paper_scenarios import FormationScenarioSnapshot, PaperLink
 
 
@@ -58,6 +59,14 @@ class FormationOutcome:
     trace: FormationTrace
     controller_processing_latency_ms: float
     formation_latency_ms: float
+    # Explicit five-phase breakdown (see src/simulation/latency_model.py).
+    # T_form = T_ctrl + T_dispatch + T_install + T_verify + T_activate.
+    t_ctrl_ms: float = 0.0
+    t_dispatch_ms: float = 0.0
+    t_install_ms: float = 0.0
+    t_verify_ms: float = 0.0
+    t_activate_ms: float = 0.0
+    deploy_mode: str = ""
     success: bool
     qos_satisfied: bool
     failure_reason: str
@@ -196,6 +205,20 @@ async def run_formation_method(
 
     paths = _edge_paths(snapshot)
     costs = _primitive_costs(snapshot, paths)
+    edges_on_gateway = _gateway_edges(snapshot.task.biz_edges, paths)
+    path_lengths = {
+        edge.edge_id: len(paths[edge.edge_id]) for edge in snapshot.task.biz_edges
+    }
+    latency_breakdown = formation_latency_breakdown(
+        method_id=method_id,
+        num_agents=len(snapshot.task.app_agents),
+        num_edges=len(snapshot.task.biz_edges),
+        gateway_ids=snapshot.topology.gateway_ids,
+        edge_ids=[edge.edge_id for edge in snapshot.task.biz_edges],
+        edges_on_gateway=edges_on_gateway,
+        path_lengths=path_lengths,
+        topology_seed_str=snapshot.topology.fingerprint,
+    )
     shared_churn = tuple(churn_trace) if churn_trace is not None else _generate_churn(
         snapshot,
         costs,
@@ -255,8 +278,14 @@ async def run_formation_method(
     return FormationOutcome(
         method_id=method_id,
         trace=trace,
-        controller_processing_latency_ms=_controller_critical_work_ms(trace),
-        formation_latency_ms=stable_verify_finished_ms,
+        controller_processing_latency_ms=latency_breakdown.t_ctrl_ms,
+        formation_latency_ms=latency_breakdown.t_form_ms,
+        t_ctrl_ms=latency_breakdown.t_ctrl_ms,
+        t_dispatch_ms=latency_breakdown.t_dispatch_ms,
+        t_install_ms=latency_breakdown.t_install_ms,
+        t_verify_ms=latency_breakdown.t_verify_ms,
+        t_activate_ms=latency_breakdown.t_activate_ms,
+        deploy_mode=latency_breakdown.deploy_mode,
         success=success,
         qos_satisfied=success,
         failure_reason=metrics.failure_reason,

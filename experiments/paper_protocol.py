@@ -173,6 +173,12 @@ METHODS: Mapping[str, MethodMetadata] = {
         "SRD",
         "Sequential Rule Deployment",
     ),
+    "ilp_sfc": _method("ilp_sfc", "ILP-SFC", "ILP SFC/VNF Embedding"),
+    "sfc_reoptimization": _method(
+        "sfc_reoptimization",
+        "SFC-Reopt",
+        "SFC Re-optimization",
+    ),
     "sanet_dw": _method("sanet_dw", "SANet-DW*", "SANet", adapted=True),
     "adjacent_layer": _method(
         "adjacent_layer",
@@ -184,7 +190,18 @@ METHODS: Mapping[str, MethodMetadata] = {
         "Independent",
         "Independent layer optimization",
     ),
+    "weighted_sum": _method(
+        "weighted_sum",
+        "Weighted-Sum",
+        "Weighted sum multi-objective",
+    ),
     "netren": _method("netren", "NetRen*", "NetRen", adapted=True),
+    "sfc_reconfiguration": _method(
+        "sfc_reconfiguration",
+        "SFC-Reconfig*",
+        "SFC Reconfiguration",
+        adapted=True,
+    ),
     "local_only": _method("local_only", "Local-Only", "Local repair"),
     "full_rebuild": _method(
         "full_rebuild",
@@ -197,6 +214,13 @@ METHODS: Mapping[str, MethodMetadata] = {
         "NetKeeper",
         adapted=True,
     ),
+    "frr": _method("frr", "FRR", "Fast Reroute"),
+    "te_reopt": _method("te_reopt", "TE-Reopt", "Traffic Engineering Reopt"),
+    "sfc_restoration": _method(
+        "sfc_restoration",
+        "SFC-Restore",
+        "SFC Restoration",
+    ),
 }
 
 
@@ -206,8 +230,10 @@ EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
         "proposed_without_batch",
         "cspf",
         "srd",
+        "ilp_sfc",
+        "sfc_reoptimization",
     ),
-    "exp2": ("proposed", "sanet_dw", "adjacent_layer", "independent"),
+    "exp2": ("proposed", "sanet_dw", "adjacent_layer", "independent", "weighted_sum"),
     "exp3": ("proposed", "netren", "local_only", "full_rebuild"),
     "exp4": ("proposed", "netkeeper", "cspf", "full_rebuild"),
 }

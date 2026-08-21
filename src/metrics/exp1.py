@@ -34,6 +34,14 @@ class Exp1RunMetrics:
     compilation_and_planning_latency_ms: float
     installation_latency_ms: float
     activation_latency_ms: float
+    # New explicit five-phase breakdown from src/simulation/latency_model.py.
+    # T_form = t_ctrl + t_dispatch + t_install + t_verify + t_activate.
+    t_ctrl_ms: float = 0.0
+    t_dispatch_ms: float = 0.0
+    t_install_ms: float = 0.0
+    t_verify_ms: float = 0.0
+    t_activate_ms: float = 0.0
+    deploy_mode: str = ""
     verification_latency_ms: float
     verifier_runtime_ms: float
     session_count: int

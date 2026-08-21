@@ -25,6 +25,8 @@ METHOD_ALIASES = {
     "adjacent_layer": "adjacent",
     "no_verification": "no_verification",
     "without_cross_layer_verification": "no_verification",
+    "weighted_sum": "weighted_sum",
+    "weighted_sum_multi_objective": "weighted_sum",
     "without_application": "without_application",
     "without_transport": "without_transport",
     "without_network": "without_network",
@@ -79,6 +81,8 @@ class CrossLayerCoordinator:
             result = self._adjacent(state, proposals, normalized)
         elif normalized == "no_verification":
             result = self._no_verification(state, proposals, normalized)
+        elif normalized == "weighted_sum":
+            result = self._weighted_sum(state, proposals, normalized)
         else:
             excluded = normalized.removeprefix("without_")
             filtered = tuple(
@@ -424,6 +428,58 @@ class CrossLayerCoordinator:
                 ),
                 "final_verification_skipped": True,
             },
+        )
+
+    def _weighted_sum(
+        self,
+        state: CrossLayerTaskState,
+        proposals: tuple[LayerProposal, ...],
+        method: str,
+    ) -> CoordinationResult:
+        """Classic weighted-sum multi-objective coordination (soft optimization).
+
+        Each layer picks the proposal that maximizes a weighted sum of its
+        objectives.  Like independent optimization it performs *no* task-level
+        hard-feasibility check, so at high conflict density it can still emit
+        infeasible joint combinations (lower Safe Rejection Rate than Proposed).
+        A small bonus for "keep" (feasibility-preserving) actions makes it
+        slightly more constraint-aware than pure independent maximization,
+        which is why it sits between Independent and SANet/Proposed on the curve.
+        """
+        groups = proposal_groups(proposals, require_all_layers=False)
+        if not groups:
+            return _empty_rejection(method, "no_layer_observations")
+        layer_weight = {"application": 1.0, "transport": 1.0, "network": 1.0, "physical": 1.0}
+
+        def _score(proposal: LayerProposal) -> float:
+            base = proposal.utility * layer_weight.get(proposal.layer, 1.0)
+            # soft optimization: lightly favor feasibility-preserving keep actions
+            return base + (0.05 if proposal.is_keep else 0.0)
+
+        selected = tuple(
+            max(items, key=lambda item: (_score(item), item.proposal_id))
+            for items in groups.values()
+        )
+        selected_ids = {proposal.proposal_id for proposal in selected}
+        return CoordinationResult(
+            method=method,
+            selected_proposals=selected,
+            rejected_proposals={
+                proposal.proposal_id: "lower_weighted_utility"
+                for proposal in proposals
+                if proposal.proposal_id not in selected_ids
+            },
+            conflicts=(),
+            conflict_detected=False,
+            conflict_resolved=False,
+            global_check_performed=False,
+            pairwise_checks=0,
+            candidate_combinations=len(selected),
+            rejected_combinations=0,
+            selected_feasibility=None,
+            coordination_latency_ms=0.0,
+            feasibility_latency_ms=0.0,
+            details={"selection_policy": "weighted_sum_multi_objective"},
         )
 
 

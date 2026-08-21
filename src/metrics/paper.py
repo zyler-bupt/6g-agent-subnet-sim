@@ -40,6 +40,13 @@ class PaperTrial:
     failure_severity: float | None = None
     controller_processing_latency_ms: float | None = None
     formation_latency_ms: float | None = None
+    # Explicit five-phase decomposition (Exp.1).
+    t_ctrl_ms: float | None = None
+    t_dispatch_ms: float | None = None
+    t_install_ms: float | None = None
+    t_verify_ms: float | None = None
+    t_activate_ms: float | None = None
+    deploy_mode: str | None = None
     resolution_latency_ms: float | None = None
     reconfiguration_latency_ms: float | None = None
     recovery_latency_ms: float | None = None
