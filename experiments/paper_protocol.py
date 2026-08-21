@@ -176,10 +176,10 @@ METHODS: Mapping[str, MethodMetadata] = {
     "ilp_sfc": _method("ilp_sfc", "ILP-SFC", "ILP SFC/VNF Embedding"),
     "sfc_reoptimization": _method(
         "sfc_reoptimization",
-        "SFC-Reopt",
+        "SFC Re-opt",
         "SFC Re-optimization",
     ),
-    "sanet_dw": _method("sanet_dw", "SANet-DW*", "SANet", adapted=True),
+    "sanet_dw": _method("sanet_dw", "SANet*", "SANet", adapted=True),
     "adjacent_layer": _method(
         "adjacent_layer",
         "Adjacent-Layer",
@@ -205,7 +205,7 @@ METHODS: Mapping[str, MethodMetadata] = {
     "local_only": _method("local_only", "Local-Only", "Local repair"),
     "full_rebuild": _method(
         "full_rebuild",
-        "Full-Rebuild",
+        "Full Rebuild",
         "Global reconstruction",
     ),
     "netkeeper": _method(
@@ -224,18 +224,39 @@ METHODS: Mapping[str, MethodMetadata] = {
 }
 
 
+# Frozen protocol for WCNC 2027 (experiment revision v2).
+#
+# Each experiment answers ONE scientific question; every baseline has a clear
+# paper-level role. Do NOT add further main baselines without motivation.
+#   Exp1 Formation   : proposed vs CSPF + SFC Re-optimization
+#   Exp2 Coordination: proposed vs Independent / Weighted-Sum / SANet
+#   Exp3 Elasticity  : proposed vs Local-Only / NetRen / Full Rebuild
+#   Exp4 Recovery    : heterogeneous failures, compared PER failure type
+#                       (see EXPERIMENT_FAILURE_METHODS) -- never all together.
 EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
-    "exp1": (
-        "proposed",
-        "proposed_without_batch",
-        "cspf",
-        "srd",
-        "ilp_sfc",
-        "sfc_reoptimization",
-    ),
-    "exp2": ("proposed", "sanet_dw", "adjacent_layer", "independent", "weighted_sum"),
-    "exp3": ("proposed", "netren", "local_only", "full_rebuild"),
-    "exp4": ("proposed", "netkeeper", "cspf", "full_rebuild"),
+    "exp1": ("proposed", "cspf", "sfc_reoptimization"),
+    "exp2": ("proposed", "independent", "weighted_sum", "sanet_dw"),
+    "exp3": ("proposed", "local_only", "netren", "full_rebuild"),
+    # Executable union of recovery strategies currently implemented. The
+    # plotting/aggregation layer groups these per failure type using
+    # EXPERIMENT_FAILURE_METHODS. cspf / FRR / TE-Reopt recovery strategies
+    # belong to the frozen protocol but are not yet implemented (see audit).
+    "exp4": ("proposed", "full_rebuild", "network_only"),
+}
+
+
+# v2 Exp4: failure-specific comparison sets (the paper protocol). These name the
+# baselines each failure type is judged against; the runner executes
+# EXPERIMENT_METHODS["exp4"] and the plotting layer filters per failure type.
+#   LINK_FAILURE           : proposed vs CSPF (+ optional FRR)
+#   AGENT_FAILURE          : proposed vs Full Rebuild
+#   PHYSICAL_CAPACITY_DROP : proposed vs TE-Reopt + Full Rebuild
+EXPERIMENT_FAILURE_METHODS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
+    "exp4": {
+        "LINK_FAILURE": ("proposed", "cspf", "frr"),
+        "AGENT_FAILURE": ("proposed", "full_rebuild"),
+        "PHYSICAL_CAPACITY_DROP": ("proposed", "te_reopt", "full_rebuild"),
+    }
 }
 
 

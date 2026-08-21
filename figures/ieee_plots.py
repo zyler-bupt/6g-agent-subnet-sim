@@ -1,19 +1,20 @@
-"""IEEE communication-paper figure generator for the WCNC experiments.
+"""IEEE communication-paper figure generator for the WCNC 2027 experiments.
 
-Produces the eight sub-figures required by the experiment guide:
+Produces the eight sub-figures required by experiment revision v2:
 
-    Fig.1 Formation        (a) formation latency   (b) success rate
-    Fig.2 Coordination     (a) QoS satisfaction    (b) feasible solution rate
-    Fig.3 Elasticity       (a) reconfig latency    (b) scope-success tradeoff
+    Fig.1 Formation        (a) formation latency   (b) success rate (bar)
+    Fig.2 Coordination     (a) QoS satisfaction    (b) safe rejection rate
+    Fig.3 Elasticity       (a) reconfig latency    (b) scope-success (scatter)
     Fig.4 Recovery         (a) recovery latency    (b) modification scope
+                                                  (both grouped by failure type)
 
 Style contract (from the guide)
 -------------------------------
 * Font: Times New Roman (falls back to Times / DejaVu Serif if absent).
 * Axis 10 pt, tick 9 pt, legend 8-9 pt.
 * White background, light grid, vector PDF output.
-* Consistent colours: Proposed green #2ca25f solid diamond;
-  baselines red #e74c3c / orange #f39c12 / blue #3498db; ablation gray #7f7f7f.
+* Proposed green #2ca25f solid diamond; baselines red #e74c3c (B1) /
+  orange #f39c12 (B2) / blue #3498db (B3); ablation gray #7f7f7f.
   The SAME method_id always uses the SAME colour/marker/linestyle.
 
 Input contract
@@ -22,18 +23,17 @@ Input contract
     experiment, subplot, method, x, y_mean, y_lo, y_hi
 where (experiment, subplot) identifies one of the eight sub-figures and
 y_lo / y_hi are the 95% confidence (or bootstrap) bounds. Categorical x
-(e.g. failure type) is given as a small integer 0,1,2,... and a label map
-in CATEGORICAL_X below.
+(e.g. failure type, or method for a bar chart) is given as a small integer
+0,1,2,... with a label map in CATEGORICAL_X below.
 
 `--demo` synthesizes plausible data following the guide's expected trends so
-the visual style can be validated before the real pipeline produces results.
+the visual style and layout can be validated before the real pipeline runs.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import math
 from pathlib import Path
 from typing import Iterable
 
@@ -42,6 +42,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless / CI safe
 import matplotlib.pyplot as plt
 from matplotlib import font_manager  # noqa: F401  (ensures font cache build)
+
 
 # ---------------------------------------------------------------------------
 # IEEE style
@@ -94,8 +95,6 @@ B2_ORANGE = "#f39c12"
 B3_BLUE = "#3498db"
 ABLATION_GRAY = "#7f7f7f"
 EXTRA_PURPLE = "#8e44ad"
-EXTRA_BROWN = "#795548"
-EXTRA_PINK = "#e84393"
 
 MARKERS = {
     "diamond": "D",
@@ -114,35 +113,44 @@ LINESTYLES = {
     "dashdot": "-.",
 }
 
+# v2 frozen method sets. Baseline role -> colour per experiment:
+#   Exp1 B1=CSPF(red)  B2=SFC Re-opt(orange)
+#   Exp2 B1=Independent(red) B2=Weighted-Sum(orange) B3=SANet(blue)
+#   Exp3 B1=Local-Only(red) B2=NetRen(orange)       B3=Full Rebuild(blue)
+#   Exp4 link: CSPF(red); capacity: TE-Reopt(blue) + Full Rebuild(blue)
 METHOD_STYLE: dict[str, dict] = {
     # Proposed is ALWAYS green / solid / diamond.
     "proposed": {"color": PROPOSED_GREEN, "marker": "diamond", "ls": "solid", "label": "Proposed"},
-    "proposed_without_batch": {
-        "color": PROPOSED_GREEN, "marker": "circle", "ls": "dotted", "label": "Proposed w/o Batch",
-    },
-    # Baseline pool (distinct per experiment via these assignments).
+    # Exp1
     "cspf": {"color": B1_RED, "marker": "square", "ls": "dashed", "label": "CSPF"},
-    "ilp_sfc": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "ILP-SFC"},
-    "sfc_reoptimization": {"color": B3_BLUE, "marker": "circle", "ls": "dotted", "label": "SFC-Reopt"},
-    "sanet_dw": {"color": B1_RED, "marker": "square", "ls": "dashed", "label": "SANet-DW*"},
-    "adjacent_layer": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "Adjacent-Layer"},
-    "independent": {"color": B3_BLUE, "marker": "circle", "ls": "dotted", "label": "Independent"},
-    "weighted_sum": {"color": EXTRA_PURPLE, "marker": "star", "ls": "dotted", "label": "Weighted-Sum"},
-    "netren": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "NetRen*"},
-    "sfc_reconfiguration": {"color": B3_BLUE, "marker": "circle", "ls": "dotted", "label": "SFC-Reconfig*"},
-    "local_only": {"color": ABLATION_GRAY, "marker": "x", "ls": "dotted", "label": "Local-Only"},
-    "full_rebuild": {"color": ABLATION_GRAY, "marker": "plus", "ls": "dashed", "label": "Full-Rebuild"},
-    "netkeeper": {"color": B1_RED, "marker": "square", "ls": "dashed", "label": "NetKeeper*"},
+    "sfc_reoptimization": {"color": B2_ORANGE, "marker": "triangle", "ls": "dashed", "label": "SFC Re-opt"},
+    # Exp2
+    "independent": {"color": B1_RED, "marker": "square", "ls": "dashed", "label": "Independent"},
+    "weighted_sum": {"color": B2_ORANGE, "marker": "star", "ls": "dashed", "label": "Weighted-Sum"},
+    "sanet_dw": {"color": B3_BLUE, "marker": "circle", "ls": "dashed", "label": "SANet*"},
+    # Exp3
+    "local_only": {"color": B1_RED, "marker": "x", "ls": "dashed", "label": "Local-Only"},
+    "netren": {"color": B2_ORANGE, "marker": "triangle", "ls": "dashed", "label": "NetRen*"},
+    "full_rebuild": {"color": B3_BLUE, "marker": "plus", "ls": "dashed", "label": "Full Rebuild"},
+    # Exp4 recovery (implemented proxies / intended baselines)
+    "network_only": {"color": ABLATION_GRAY, "marker": "circle", "ls": "dotted", "label": "Network-Only"},
     "frr": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "FRR"},
-    "te_reopt": {"color": B3_BLUE, "marker": "circle", "ls": "dotted", "label": "TE-Reopt"},
+    "te_reopt": {"color": B3_BLUE, "marker": "circle", "ls": "dashed", "label": "TE-Reopt"},
+    # Appendix / internal ablation only (kept for reference, not in main figures)
+    "ilp_sfc": {"color": B2_ORANGE, "marker": "triangle", "ls": "dotted", "label": "ILP-SFC*"},
+    "adjacent_layer": {"color": ABLATION_GRAY, "marker": "triangle", "ls": "dotted", "label": "Adjacent-Layer"},
+    "proposed_without_batch": {"color": PROPOSED_GREEN, "marker": "circle", "ls": "dotted", "label": "Proposed w/o Batch"},
+    "srd": {"color": ABLATION_GRAY, "marker": "square", "ls": "dotted", "label": "SRD"},
+    "netkeeper": {"color": ABLATION_GRAY, "marker": "square", "ls": "dotted", "label": "NetKeeper*"},
     "sfc_restoration": {"color": EXTRA_PURPLE, "marker": "star", "ls": "dotted", "label": "SFC-Restore"},
 }
 
+# Fallback for any method_id not explicitly registered above.
+_FALLBACK_STYLE = {"color": EXTRA_PURPLE, "marker": "circle", "ls": "dotted", "label": "Unknown"}
+
 
 def style_for(method_id: str) -> dict:
-    if method_id not in METHOD_STYLE:
-        raise KeyError(f"no IEEE style registered for method_id={method_id!r}")
-    spec = METHOD_STYLE[method_id]
+    spec = METHOD_STYLE.get(method_id, _FALLBACK_STYLE)
     return {
         "color": spec["color"],
         "marker": MARKERS[spec["marker"]],
@@ -151,25 +159,31 @@ def style_for(method_id: str) -> dict:
     }
 
 
-# Categorical x-axis labels for the recovery experiment.
+# Categorical x-axis labels.
 CATEGORICAL_X = {
-    "exp4": {
+    "exp1": {  # exp1(b) success-rate bar: x = method
+        0: "Proposed",
+        1: "CSPF",
+        2: "SFC Re-opt",
+    },
+    "exp4": {  # exp4 recovery: x = failure type
         0: "Link",
         1: "Agent",
         2: "Capacity",
-    }
+    },
 }
 
-# (experiment, subplot) -> (title, xlabel, ylabel, y_percent)
+# (experiment, subplot) -> (title, xlabel, ylabel, y_percent, kind)
+# kind in {"line", "bar", "scatter", "grouped_bar"}
 SUBFIGURE_META = {
-    ("exp1", "a"): ("Formation Latency", "Task Size (agents)", "E2E Formation (ms)", False),
-    ("exp1", "b"): ("Formation Success Rate", "Task Size (agents)", "Success Rate (%)", True),
-    ("exp2", "a"): ("QoS Satisfaction", "Conflict Density (%)", "QoS Satisfaction (%)", True),
-    ("exp2", "b"): ("Feasible Solution Rate", "Conflict Density (%)", "Feasible Rate (%)", True),
-    ("exp3", "a"): ("Reconfiguration Latency", "Changed Agents", "Latency (ms)", False),
-    ("exp3", "b"): ("Scope vs Success Tradeoff", "Modification Scope (%)", "Success Rate (%)", True),
-    ("exp4", "a"): ("Recovery Latency", "Failure Type", "Recovery (ms)", False),
-    ("exp4", "b"): ("Modification Scope", "Failure Type", "Changed Scope (%)", True),
+    ("exp1", "a"): ("Formation Latency", "Task Size (agents)", "E2E Formation (ms)", False, "line"),
+    ("exp1", "b"): ("Formation Success Rate", "Method", "Success Rate (%)", True, "bar"),
+    ("exp2", "a"): ("QoS Satisfaction", "Conflict Density (%)", "QoS Satisfaction (%)", True, "line"),
+    ("exp2", "b"): ("Safe Rejection Rate", "Conflict Density (%)", "Safe Rejection (%)", True, "line"),
+    ("exp3", "a"): ("Reconfiguration Latency", "Changed Agents", "Latency (ms)", False, "line"),
+    ("exp3", "b"): ("Scope vs Success Tradeoff", "Modification Scope (%)", "Success Rate (%)", True, "scatter"),
+    ("exp4", "a"): ("Recovery Latency", "Failure Type", "Recovery (ms)", False, "grouped_bar"),
+    ("exp4", "b"): ("Modification Scope", "Failure Type", "Changed Scope (%)", True, "grouped_bar"),
 }
 
 FIGURE_LAYOUT = {
@@ -185,18 +199,27 @@ FIGURE_LAYOUT = {
 # ---------------------------------------------------------------------------
 
 def _ordered_methods(methods: Iterable[str]) -> list[str]:
-    """Plot Proposed first, then proposed-without-batch, then baselines sorted."""
+    """Plot Proposed first, then the rest sorted for stable legend ordering."""
     unique = set(methods)
-    order = [m for m in ("proposed", "proposed_without_batch") if m in unique]
+    order = ["proposed"] if "proposed" in unique else []
     order.extend(sorted(unique - set(order)))
     return order
 
 
-def _plot_subfigure(ax, rows: list[dict], experiment: str, subplot: str) -> None:
-    title, xlabel, ylabel, is_pct = SUBFIGURE_META[(experiment, subplot)]
+def _categorical_ticks(ax, experiment: str, categories) -> None:
+    if experiment in CATEGORICAL_X:
+        labels = {int(k): v for k, v in CATEGORICAL_X[experiment].items()}
+        ticks = sorted(labels.keys())
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([labels[t] for t in ticks])
+    else:
+        ax.set_xticks(sorted(categories))
+
+
+def _plot_line(ax, rows, experiment, subplot):
+    title, xlabel, ylabel, is_pct, _ = SUBFIGURE_META[(experiment, subplot)]
     methods = _ordered_methods({r["method"] for r in rows})
-    # group by method
-    by_method: dict[str, list[dict]] = {m: [] for m in methods}
+    by_method = {m: [] for m in methods}
     for r in rows:
         by_method[r["method"]].append(r)
     for m in methods:
@@ -212,17 +235,87 @@ def _plot_subfigure(ax, rows: list[dict], experiment: str, subplot: str) -> None
             label=st["label"], linewidth=1.6, markersize=6,
         )
         ax.fill_between(xs, lo, hi, color=st["color"], alpha=0.12, linewidth=0)
-    # x ticks: categorical for recovery
     if experiment in CATEGORICAL_X:
-        ticks = sorted(CATEGORICAL_X[experiment].keys())
-        ax.set_xticks(ticks)
-        ax.set_xticklabels([CATEGORICAL_X[experiment][t] for t in ticks])
+        _categorical_ticks(ax, experiment, {int(r["x"]) for r in rows})
     ax.set_title(title, fontsize=10)
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
     if is_pct:
         ax.set_ylim(0, 105)
     ax.legend(fontsize=8, frameon=False, loc="best")
+
+
+def _plot_scatter(ax, rows, experiment, subplot):
+    title, xlabel, ylabel, is_pct, _ = SUBFIGURE_META[(experiment, subplot)]
+    methods = _ordered_methods({r["method"] for r in rows})
+    for m in methods:
+        xs = [r["x"] for r in rows if r["method"] == m]
+        ys = [r["y_mean"] for r in rows if r["method"] == m]
+        st = style_for(m)
+        scatter_kwargs = dict(
+            color=st["color"], marker=st["marker"],
+            label=st["label"], s=42, linewidths=1.0,
+        )
+        if st["marker"] not in ("x", "+"):  # unfilled markers ignore edgecolors
+            scatter_kwargs["edgecolors"] = "white"
+        ax.scatter(xs, ys, **scatter_kwargs)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    if is_pct:
+        ax.set_ylim(0, 105)
+    ax.legend(fontsize=8, frameon=False, loc="best")
+
+
+def _plot_grouped_bar(ax, rows, experiment, subplot):
+    title, xlabel, ylabel, is_pct, _ = SUBFIGURE_META[(experiment, subplot)]
+    categories = sorted({int(r["x"]) for r in rows})
+    # Per-category method set so bars are centred within each group.
+    methods_by_cat: dict[int, list[str]] = {c: [] for c in categories}
+    for r in rows:
+        c = int(r["x"])
+        if r["method"] not in methods_by_cat[c]:
+            methods_by_cat[c].append(r["method"])
+    for c in categories:
+        methods_by_cat[c] = _ordered_methods(methods_by_cat[c])
+
+    value = {
+        (int(r["x"]), r["method"]): r for r in rows
+    }
+    for c in categories:
+        methods = methods_by_cat[c]
+        n = len(methods)
+        width = 0.8 / max(n, 1)
+        for j, m in enumerate(methods):
+            center = c + (j - (n - 1) / 2) * width
+            row = value.get((c, m))
+            if row is None:
+                continue
+            st = style_for(m)
+            ax.bar(
+                center, row["y_mean"], width,
+                color=st["color"], label=st["label"],
+                edgecolor="white", linewidth=0.6,
+                yerr=[[row["y_mean"] - row["y_lo"]], [row["y_hi"] - row["y_mean"]]],
+                capsize=2, error_kw={"elinewidth": 0.8, "ecolor": "#555555"},
+            )
+    _categorical_ticks(ax, experiment, set(categories))
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    if is_pct:
+        ax.set_ylim(0, 105)
+    ax.legend(fontsize=8, frameon=False, loc="best")
+
+
+def _plot_subfigure(ax, rows, experiment, subplot):
+    kind = SUBFIGURE_META[(experiment, subplot)][4]
+    if kind == "line":
+        _plot_line(ax, rows, experiment, subplot)
+    elif kind == "scatter":
+        _plot_scatter(ax, rows, experiment, subplot)
+    else:  # "bar" and "grouped_bar" share the grouped-bar renderer
+        _plot_grouped_bar(ax, rows, experiment, subplot)
 
 
 def build_figures(aggregated_csv: Path, out_dir: Path) -> list[Path]:
@@ -279,50 +372,58 @@ def _demo_rows() -> list[dict]:
 
     # Exp1: formation latency rises with task size; proposed < baselines.
     sizes = [8, 12, 16, 20, 24, 28, 32]
-    base = {"proposed": 850, "cspf": 1700, "ilp_sfc": 1750, "sfc_reoptimization": 1730}
-    slope = {"proposed": 55, "cspf": 165, "ilp_sfc": 168, "sfc_reoptimization": 166}
+    base = {"proposed": 850, "cspf": 1700, "sfc_reoptimization": 1720}
+    slope = {"proposed": 55, "cspf": 165, "sfc_reoptimization": 166}
     for m, b in base.items():
         for x in sizes:
             y = b + slope[m] * (x - 8)
             rows.append({"experiment": "exp1", "subplot": "a", "method": m, "x": x,
                          "y_mean": y, "y_lo": y - 60, "y_hi": y + 60})
-            sr = 100 - 0.15 * (x - 8) if m == "proposed" else max(80, 99 - 1.2 * (x - 8))
-            rows.append({"experiment": "exp1", "subplot": "b", "method": m, "x": x,
-                         "y_mean": sr, "y_lo": sr - 3, "y_hi": sr + 3})
+    # Exp1(b): success-rate bar (x = method index 0/1/2).
+    sr = {"proposed": 99.5, "cspf": 98.4, "sfc_reoptimization": 98.8}
+    for i, m in enumerate(("proposed", "cspf", "sfc_reoptimization")):
+        rows.append({"experiment": "exp1", "subplot": "b", "method": m, "x": i,
+                     "y_mean": sr[m], "y_lo": sr[m] - 1.2, "y_hi": sr[m] + 1.2})
 
-    # Exp2: conflict density 0..60; proposed stays high, independent drops most.
+    # Exp2: conflict density 0..60.
+    #   Low conflict: all similar. High conflict: independent degrades most;
+    #   weighted-sum better but may violate constraints; SANet better semantic;
+    #   proposed highest because of hard verification.
     densities = [0, 10, 20, 30, 40, 50, 60]
     qos = {
         "proposed": lambda d: 99 - 0.05 * d,
-        "sanet_dw": lambda d: 98 - 0.25 * d,
-        "weighted_sum": lambda d: 97 - 0.7 * d,
-        "independent": lambda d: 96 - 1.5 * d,
-        "adjacent_layer": lambda d: 97 - 1.1 * d,
+        "sanet_dw": lambda d: 98 - 0.30 * d,
+        "weighted_sum": lambda d: 97 - 0.85 * d,
+        "independent": lambda d: 96 - 1.6 * d,
     }
-    for m, fn in qos.items():
+    safe = {  # unsafe configurations DETECTED instead of executed
+        "proposed": lambda d: 99 - 0.04 * d,
+        "sanet_dw": lambda d: 93 - 0.25 * d,
+        "weighted_sum": lambda d: 82 - 0.9 * d,  # accepts some infeasible
+        "independent": lambda d: 60 - 1.3 * d,    # no cross-layer check
+    }
+    for m in qos:
         for d in densities:
-            y = max(20, fn(d) + jitter(1.5))
+            yq = max(20, qos[m](d) + jitter(1.2))
             rows.append({"experiment": "exp2", "subplot": "a", "method": m, "x": d,
-                         "y_mean": y, "y_lo": y - 3, "y_hi": y + 3})
-            fr = max(15, y - 4 + jitter(2))
+                         "y_mean": yq, "y_lo": yq - 2.5, "y_hi": yq + 2.5})
+            ys = max(10, safe[m](d) + jitter(2.0))
             rows.append({"experiment": "exp2", "subplot": "b", "method": m, "x": d,
-                         "y_mean": fr, "y_lo": fr - 3, "y_hi": fr + 3})
+                         "y_mean": ys, "y_lo": ys - 3.0, "y_hi": ys + 3.0})
 
-    # Exp3: changed agents 1..8; proposed small scope + high success.
+    # Exp3: changed agents; proposed small scope + high success.
     ncs = [1, 2, 4, 8]
     scope_of = {
         "proposed": lambda x: 8 + 3 * x,
         "full_rebuild": lambda x: 95 + 2 * x,
         "local_only": lambda x: 4 + x,
         "netren": lambda x: 40 + 8 * x,
-        "sfc_reconfiguration": lambda x: 40 + 8 * x,
     }
     succ_of = {
         "proposed": lambda x: 99 - 0.4 * x,
         "full_rebuild": lambda x: 99,
-        "local_only": lambda x: 70 + 3 * x,
+        "local_only": lambda x: 70 + 3 * x,    # misses global dependency
         "netren": lambda x: 90 + 1 * x,
-        "sfc_reconfiguration": lambda x: 90 + 1 * x,
     }
     for m in scope_of:
         for x in ncs:
@@ -331,35 +432,38 @@ def _demo_rows() -> list[dict]:
             )
             rows.append({"experiment": "exp3", "subplot": "a", "method": m, "x": x,
                          "y_mean": lat, "y_lo": lat - 80, "y_hi": lat + 80})
-            # exp3(b): scope-success tradeoff (x = scope %, y = success %)
             scope = scope_of[m](x)
             succ = succ_of[m](x)
             rows.append({"experiment": "exp3", "subplot": "b", "method": m, "x": scope,
                          "y_mean": succ, "y_lo": succ - 3, "y_hi": succ + 3})
 
     # Exp4: failure types 0=Link,1=Agent,2=Capacity.
-    for m in ("proposed", "netkeeper", "cspf", "full_rebuild", "frr", "te_reopt", "sfc_restoration"):
-        for xi, ft in enumerate(("Link", "Agent", "Capacity")):
-            if m == "proposed":
-                lat = {"Link": 900, "Agent": 700, "Capacity": 800}[ft]
-            elif m == "cspf" and ft == "Link":
-                lat = 600
-            elif m == "frr" and ft == "Link":
-                lat = 550
-            elif m == "netkeeper" and ft == "Agent":
-                lat = 750
-            elif ft == "Agent":
-                lat = 1500 if m in ("cspf", "frr") else 1000
-            elif ft == "Capacity":
-                lat = 700 if m == "te_reopt" else 1300
-            else:
-                lat = 1000
+    # Per-failure method sets (v2). cspf/frr/te_reopt are included in the demo
+    # to validate the layout; they have no real data until strategies exist.
+    recovery = {
+        "proposed": {"Link": 900, "Agent": 700, "Capacity": 800},
+        "network_only": {"Link": 1500, "Agent": 1400, "Capacity": 1300},
+        "cspf": {"Link": 1250},
+        "frr": {"Link": 1000},
+        "full_rebuild": {"Agent": 2400, "Capacity": 2200},
+        "te_reopt": {"Capacity": 1500},
+    }
+    scope = {
+        "proposed": {"Link": 20, "Agent": 18, "Capacity": 22},
+        "network_only": {"Link": 70, "Agent": 65, "Capacity": 60},
+        "cspf": {"Link": 55},
+        "frr": {"Link": 50},
+        "full_rebuild": {"Agent": 95, "Capacity": 92},
+        "te_reopt": {"Capacity": 35},
+    }
+    for m, per_ft in recovery.items():
+        for ft, lat in per_ft.items():
+            xi = {"Link": 0, "Agent": 1, "Capacity": 2}[ft]
             rows.append({"experiment": "exp4", "subplot": "a", "method": m, "x": xi,
                          "y_mean": lat, "y_lo": lat - 90, "y_hi": lat + 90})
-            scope = {"proposed": 20, "full_rebuild": 95, "cspf": 60,
-                     "netkeeper": 25, "frr": 55, "te_reopt": 35, "sfc_restoration": 40}[m]
+            sc = scope[m][ft]
             rows.append({"experiment": "exp4", "subplot": "b", "method": m, "x": xi,
-                         "y_mean": scope, "y_lo": scope - 5, "y_hi": scope + 5})
+                         "y_mean": sc, "y_lo": sc - 5, "y_hi": sc + 5})
     return rows
 
 
