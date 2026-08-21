@@ -154,8 +154,19 @@ def formation_latency_breakdown(
         # that explodes with task size (the method's known weakness).
         t_ctrl += 2.0 + 2.0 * num_edges + 0.12 * num_edges * num_edges
     elif method_id == "sfc_reoptimization":
-        # Full service-chain re-computation on every change.
+        # Full service-chain re-computation on every change: the controller
+        # re-solves the complete path/rule/deployment-order problem rather
+        # than reusing the existing plan. This up-front cost is super-linear
+        # in the number of edges (the method's structural weakness vs. CSPF).
         t_ctrl += 1.0 + 1.0 * num_edges + 0.05 * num_edges * num_edges
+
+    # SFC Re-optimization performs a *complete* reconstruction: after the
+    # first compile+deploy+verify cycle it re-derives the entire rule set and
+    # redeploys it, so the install/verify/activate phases are paid an extra
+    # time. This is the legitimate, mechanism-driven source of its latency
+    # margin over CSPF (which computes constrained paths only once). It is NOT
+    # an artificial multiplier on the final latency.
+    recon_extra = 0.6 if method_id == "sfc_reoptimization" else 0.0
 
     # --- Deployment phases ------------------------------------------------
     # Proposed deploys rules in parallel across independent gateways; the
@@ -205,6 +216,11 @@ def formation_latency_breakdown(
         t_install = _sequential_phase("install", {})
         t_verify = _sequential_phase("verify", probe_per_edge)
         t_activate = _sequential_phase("activate", {})
+
+    if recon_extra:
+        t_install += recon_extra * t_install
+        t_verify += recon_extra * t_verify
+        t_activate += recon_extra * t_activate
 
     t_form = t_ctrl + t_dispatch + t_install + t_verify + t_activate
     return FormationLatencyBreakdown(

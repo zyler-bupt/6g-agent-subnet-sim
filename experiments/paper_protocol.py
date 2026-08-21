@@ -144,82 +144,180 @@ def load_and_validate_paper_config(
 
 @dataclass(frozen=True)
 class MethodMetadata:
+    """Per-method metadata required by the WCNC-2027 final protocol (v3 §6).
+
+    Baselines are explicitly classified so the paper never presents a
+    strategy/ablation as if it were a published algorithm, and every method
+    has a stated scientific role.
+    """
+
     method_id: str
     label: str
-    source: str
-    adapted: bool
+    # "proposed" | "literature-inspired" | "strategy" | "internal-ablation"
+    category: str
+    # what the method represents / source line (published work or internal)
+    reference: str
+    # paper-level scientific role: why this method is included
+    why_included: str
+    # where it appears in the paper: "main" | "appendix" | "ablation" | "pending"
+    status: str = "main"
+    adapted: bool = False
 
 
 def _method(
     method_id: str,
     label: str,
-    source: str,
+    category: str,
+    reference: str,
+    why_included: str,
     *,
+    status: str = "main",
     adapted: bool = False,
 ) -> MethodMetadata:
-    return MethodMetadata(method_id, label, source, adapted)
+    return MethodMetadata(
+        method_id, label, category, reference, why_included, status, adapted
+    )
 
 
+# category legend
+#   proposed            -> the proposed task-driven cross-layer framework
+#   literature-inspired -> inspired by a published work / classic algorithm
+#   strategy            -> a repair/reconstruction strategy (NOT a published algo)
+#   internal-ablation   -> internal ablation study, never a main-figure baseline
+# status legend
+#   main      -> appears in the frozen main protocol figures
+#   appendix  -> scalability / supplementary analysis only
+#   ablation  -> internal ablation, excluded from main figures
+#   pending   -> named in the frozen protocol but recovery strategy not yet
+#                implemented; runner uses an executable placeholder
 METHODS: Mapping[str, MethodMetadata] = {
-    "proposed": _method("proposed", "Proposed", "This work"),
+    "proposed": _method(
+        "proposed", "Proposed", "proposed",
+        "This work (task-driven cross-layer agent subnet)",
+        "Task-aware cross-layer subnet compilation with verified execution "
+        "and parallel gateway deployment. The method under evaluation.",
+    ),
     "proposed_without_batch": _method(
-        "proposed_without_batch",
-        "Proposed w/o Batch",
-        "This work",
+        "proposed_without_batch", "Proposed w/o Batch", "internal-ablation",
+        "This work (ablation)",
+        "Ablation: removes parallel batch deployment to isolate its "
+        "contribution. Internal study only, not in main figures.",
+        status="ablation",
     ),
-    "cspf": _method("cspf", "CSPF", "CSPF"),
+    "cspf": _method(
+        "cspf", "CSPF", "literature-inspired",
+        "Constraint-based Shortest Path First (RFC 2702 / MPLS-TE)",
+        "Network-centric constrained path computation. Represents the "
+        "traditional routing-oriented solution for Exp1.",
+    ),
     "srd": _method(
-        "srd",
-        "SRD",
-        "Sequential Rule Deployment",
+        "srd", "SRD", "internal-ablation",
+        "Sequential Rule Deployment (internal)",
+        "Ablation of the deployment strategy. Not a literature baseline; "
+        "internal study only.",
+        status="ablation",
     ),
-    "ilp_sfc": _method("ilp_sfc", "ILP-SFC", "ILP SFC/VNF Embedding"),
+    "ilp_sfc": _method(
+        "ilp_sfc", "ILP-SFC", "literature-inspired",
+        "ILP VNF/SFC embedding (e.g. Gubichev et al.)",
+        "Global optimization reference for a scalability analysis. Does not "
+        "model task-agent semantic dependency, so kept in appendix only.",
+        status="appendix",
+    ),
     "sfc_reoptimization": _method(
-        "sfc_reoptimization",
-        "SFC Re-opt",
-        "SFC Re-optimization",
+        "sfc_reoptimization", "SFC Re-opt", "literature-inspired",
+        "SFC Re-optimization (service-chain re-embedding)",
+        "Complete service-chain reconstruction: recomputes path, rule set and "
+        "deployment order on every change. Exp1 baseline for full recompute.",
     ),
-    "sanet_dw": _method("sanet_dw", "SANet*", "SANet", adapted=True),
+    "sanet_dw": _method(
+        "sanet_dw", "SANet*", "literature-inspired",
+        "SANet (semantic-aware agent network), adapted",
+        "Closest existing semantic-aware agent coordination work. Literature "
+        "baseline for Exp2 cross-layer coordination.",
+        adapted=True,
+    ),
     "adjacent_layer": _method(
-        "adjacent_layer",
-        "Adjacent-Layer",
-        "Adjacent-layer coordination",
+        "adjacent_layer", "Adjacent-Layer", "internal-ablation",
+        "Adjacent-layer coordination (internal)",
+        "Internal ablation only: weaker than global coordination and not a "
+        "strong literature baseline, so excluded from main figures.",
+        status="ablation",
     ),
     "independent": _method(
-        "independent",
-        "Independent",
-        "Independent layer optimization",
+        "independent", "Independent", "strategy",
+        "Independent layer optimization (oracle baseline)",
+        "Each layer optimized independently with no cross-layer interaction. "
+        "Shows why coordination is necessary (Exp2).",
     ),
     "weighted_sum": _method(
-        "weighted_sum",
-        "Weighted-Sum",
-        "Weighted sum multi-objective",
+        "weighted_sum", "Weighted-Sum", "literature-inspired",
+        "Weighted-sum multi-objective optimization",
+        "Classic soft cross-layer optimization baseline for Exp2: maximizes a "
+        "weighted utility without hard feasibility verification.",
     ),
-    "netren": _method("netren", "NetRen*", "NetRen", adapted=True),
-    "sfc_reconfiguration": _method(
-        "sfc_reconfiguration",
-        "SFC-Reconfig*",
-        "SFC Reconfiguration",
+    "netren": _method(
+        "netren", "NetRen*", "literature-inspired",
+        "NetRen (dynamic service/network reconfiguration), adapted",
+        "Represents dynamic service/network reconfiguration. Literature "
+        "baseline for Exp3 elastic reconfiguration.",
         adapted=True,
     ),
-    "local_only": _method("local_only", "Local-Only", "Local repair"),
+    "sfc_reconfiguration": _method(
+        "sfc_reconfiguration", "SFC-Reconfig*", "literature-inspired",
+        "SFC Reconfiguration, adapted",
+        "Service-chain reconfiguration baseline for an appendix/alternative "
+        "elasticity comparison.",
+        adapted=True, status="appendix",
+    ),
+    "local_only": _method(
+        "local_only", "Local-Only", "strategy",
+        "Local-only update (repair strategy)",
+        "Fast local repair that modifies only directly affected components. "
+        "May miss global dependencies. Strategy baseline for Exp3.",
+    ),
     "full_rebuild": _method(
-        "full_rebuild",
-        "Full Rebuild",
-        "Global reconstruction",
+        "full_rebuild", "Full Rebuild", "strategy",
+        "Full rebuild (global reconstruction)",
+        "Recomputes the whole subnet from scratch. High correctness but "
+        "expensive. Strategy baseline for Exp3 and Exp4 (agent failure).",
+    ),
+    "network_only": _method(
+        "network_only", "Network-Only", "strategy",
+        "Network-only local recovery (executable placeholder)",
+        "Currently the executable proxy for link/capacity recovery baselines "
+        "(CSPF/FRR/TE-Reopt) until their recovery strategies are implemented. "
+        "Lives only in EXPERIMENT_METHODS['exp4'] (executable union), not in "
+        "the per-fault-type sets; will be replaced by the specific literature "
+        "baselines once implemented.",
     ),
     "netkeeper": _method(
-        "netkeeper",
-        "NetKeeper*",
-        "NetKeeper",
-        adapted=True,
+        "netkeeper", "NetKeeper*", "literature-inspired",
+        "NetKeeper, adapted",
+        "Network-keeper style baseline for an alternative recovery comparison; "
+        "not in the frozen main figures.",
+        adapted=True, status="appendix",
     ),
-    "frr": _method("frr", "FRR", "Fast Reroute"),
-    "te_reopt": _method("te_reopt", "TE-Reopt", "Traffic Engineering Reopt"),
+    "frr": _method(
+        "frr", "FRR", "literature-inspired",
+        "IP/MPLS Fast Reroute",
+        "Local protection baseline for link-failure recovery (Exp4). "
+        "Recovery strategy pending implementation.",
+        status="pending",
+    ),
+    "te_reopt": _method(
+        "te_reopt", "TE-Reopt", "literature-inspired",
+        "Traffic Engineering Re-optimization",
+        "TE re-optimization baseline for physical-capacity-degradation "
+        "recovery (Exp4). Recovery strategy pending implementation.",
+        status="pending",
+    ),
     "sfc_restoration": _method(
-        "sfc_restoration",
-        "SFC-Restore",
+        "sfc_restoration", "SFC-Restore", "literature-inspired",
         "SFC Restoration",
+        "Service-chain restoration baseline for an appendix/alternative "
+        "recovery comparison.",
+        status="appendix",
     ),
 }
 

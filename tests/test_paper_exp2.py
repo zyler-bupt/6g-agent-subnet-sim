@@ -184,7 +184,7 @@ def _conditional_fixture() -> list[dict[str, object]]:
             event_id=event_id,
             method_id=method.method_id,
             method_label=method.label,
-            method_source=method.source,
+            method_source=method.reference,
             adapted=method.adapted,
             topology_fingerprint="topology",
             scenario_fingerprint=f"scenario-{event_id}",

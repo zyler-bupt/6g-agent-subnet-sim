@@ -53,9 +53,9 @@ class PaperProtocolTests(unittest.TestCase):
             ("proposed", "proposed_without_batch", "cspf", "srd"),
         )
         self.assertEqual(METHODS["srd"].label, "SRD")
-        self.assertEqual(METHODS["srd"].source, "Sequential Rule Deployment")
+        self.assertEqual(METHODS["srd"].reference, "Sequential Rule Deployment (internal)")
         self.assertFalse(METHODS["srd"].adapted)
-        self.assertEqual(METHODS["sanet_dw"].label, "SANet-DW*")
+        self.assertEqual(METHODS["sanet_dw"].label, "SANet*")
         self.assertEqual(METHODS["netren"].label, "NetRen*")
         self.assertEqual(METHODS["netkeeper"].label, "NetKeeper*")
         self.assertFalse(METHODS["proposed"].adapted)
@@ -138,7 +138,7 @@ class PaperProtocolTests(unittest.TestCase):
             event_id=0,
             method_id="proposed",
             method_label=metadata.label,
-            method_source=metadata.source,
+            method_source=metadata.reference,
             adapted=metadata.adapted,
             topology_fingerprint="topology-hash",
             scenario_fingerprint="scenario-hash",

@@ -107,7 +107,7 @@ def _paper_trial(
         event_id=snapshot.event_id,
         method_id=method.method_id,
         method_label=method.label,
-        method_source=method.source,
+        method_source=method.reference,
         adapted=method.adapted,
         topology_fingerprint=snapshot.topology_fingerprint,
         scenario_fingerprint=snapshot.scenario_fingerprint,

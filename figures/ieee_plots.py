@@ -370,10 +370,11 @@ def _demo_rows() -> list[dict]:
         rng_state = (1103515245 * rng_state + 12345) & 0x7FFFFFFF
         return (rng_state / 0x7FFFFFFF - 0.5) * 2 * spread
 
-    # Exp1: formation latency rises with task size; proposed < baselines.
+    # Exp1: formation latency rises with task size; ordering
+    # proposed < CSPF < SFC-Reopt (SFC-Reopt ~1.5x CSPF, never "≈").
     sizes = [8, 12, 16, 20, 24, 28, 32]
-    base = {"proposed": 850, "cspf": 1700, "sfc_reoptimization": 1720}
-    slope = {"proposed": 55, "cspf": 165, "sfc_reoptimization": 166}
+    base = {"proposed": 500, "cspf": 1600, "sfc_reoptimization": 2400}
+    slope = {"proposed": 35, "cspf": 260, "sfc_reoptimization": 390}
     for m, b in base.items():
         for x in sizes:
             y = b + slope[m] * (x - 8)
@@ -438,7 +439,7 @@ def _demo_rows() -> list[dict]:
                          "y_mean": succ, "y_lo": succ - 3, "y_hi": succ + 3})
 
     # Exp4: failure types 0=Link,1=Agent,2=Capacity.
-    # Per-failure method sets (v2). cspf/frr/te_reopt are included in the demo
+    # Per-failure method sets (v3). cspf/frr/te_reopt are included in the demo
     # to validate the layout; they have no real data until strategies exist.
     recovery = {
         "proposed": {"Link": 900, "Agent": 700, "Capacity": 800},

@@ -432,7 +432,7 @@ def _paper_trial_from_business_change(
         event_id=snapshot.event_id,
         method_id=method.method_id,
         method_label=method.label,
-        method_source=method.source,
+        method_source=method.reference,
         adapted=method.adapted,
         topology_fingerprint=snapshot.formation_snapshot.topology.fingerprint,
         scenario_fingerprint=snapshot.fingerprint,
