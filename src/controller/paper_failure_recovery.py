@@ -585,6 +585,8 @@ class PaperFailureVerifier:
                 capacity += reserve_mbps
             available_mbps = min(available_mbps, capacity)
             if (
+                self.snapshot.failure_type == "capacity_degradation"
+                and
                 session.business_edge_id in affected
                 and session.business_edge_id not in rebound
                 and link_loads.get(pair, 0.0) > capacity + 1e-9

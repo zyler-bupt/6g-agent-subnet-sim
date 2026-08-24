@@ -16,6 +16,7 @@ from src.controller.feasibility import (
     evaluate_cross_layer_combination,
 )
 from src.controller.failure_recovery import (
+    CspfNetworkOnlyStrategy,
     FailureRecoveryStrategy,
     FullRebuildFailureStrategy,
     ProposedCrossLayerElasticStrategy,
@@ -23,6 +24,12 @@ from src.controller.failure_recovery import (
     RecoveryPlanningResult,
     WithoutScopeIdentificationStrategy,
     WithoutVerificationRollbackStrategy,
+)
+from src.controller.cspf import (
+    CspfRequest,
+    CspfResult,
+    CspfSolver,
+    TrafficEngineeringLink,
 )
 from src.controller.ground_truth import GroundTruthResult, GroundTruthSolver
 from src.controller.impact import ImpactScope, ImpactScopeAnalyzer
@@ -52,6 +59,10 @@ __all__ = [
     "CrossLayerCoordinator",
     "CrossLayerExecutionResult",
     "CrossLayerFeasibilityResult",
+    "CspfNetworkOnlyStrategy",
+    "CspfRequest",
+    "CspfResult",
+    "CspfSolver",
     "ElasticAdjuster",
     "ElasticUpdateStrategy",
     "FullRebuildStrategy",
@@ -73,6 +84,7 @@ __all__ = [
     "RiskWeights",
     "TransactionExecutionResult",
     "TransactionExecutor",
+    "TrafficEngineeringLink",
     "WithoutScopeIdentificationStrategy",
     "WithoutVerificationRollbackStrategy",
     "check_four_layer_feasibility",

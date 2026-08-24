@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from experiments.exp4_failure import run_exp4
 from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS
-from src.controller.paper_failure_recovery import run_paper_failure_method
+from scripts.sanity_check_results import check_results
+from src.controller.paper_failure_recovery import (
+    PaperFailureVerifier,
+    PaperSfcRestorationStrategy,
+    run_paper_failure_method,
+)
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 
 
@@ -78,6 +84,39 @@ class PaperFailureScenarioTests(unittest.TestCase):
 
 
 class PaperFailureStrategyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_failure_verification_does_not_invent_capacity_failure(self) -> None:
+        snapshot = generate_paper_failure_snapshot(
+            "agent_failure",
+            1.0,
+            seed=0,
+            event_id=0,
+        )
+        controller, formation_verifier, _ = snapshot.instantiate()
+        stable, formation = await controller.build_task_subnet(
+            snapshot.task,
+            verifier=formation_verifier,
+            run_id=0,
+            seed=0,
+        )
+        self.assertTrue(formation.networking_success, formation.failure_reason)
+        event, context = snapshot.apply_fault(controller, stable)
+        event = replace(event, occurred_at=0.0)
+        planning = await PaperSfcRestorationStrategy().plan(
+            controller,
+            stable,
+            event,
+            context,
+        )
+        self.assertIsNotNone(planning.plan)
+
+        result = await PaperFailureVerifier(snapshot, stable, context).verify(
+            planning.plan.target_state
+        )
+
+        errors = [item.error for item in result.edge_results if not item.ok]
+        self.assertNotIn("post_failure_capacity_exceeded", errors)
+        self.assertTrue(result.ok, errors)
+
     async def test_agent_failure_exposes_network_only_capability_boundary(self) -> None:
         snapshot = generate_paper_failure_snapshot(
             "agent_failure",
@@ -262,6 +301,12 @@ class PaperExp4RunnerTests(unittest.IsolatedAsyncioTestCase):
                     msg=f"trial {trial_id} (ft={ft}) used wrong method set",
                 )
             self.assertTrue((root / "raw" / "pilot" / "exp4" / "trials.csv").exists())
+
+            findings = check_results(rows, experiment="exp4")
+            incomplete = [
+                item for item in findings if item.code == "INCOMPLETE_METHOD_PAIR"
+            ]
+            self.assertEqual(incomplete, [])
 
 
 if __name__ == "__main__":

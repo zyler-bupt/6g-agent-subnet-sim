@@ -24,6 +24,11 @@ class Exp4RunMetrics:
     fault_severity: float
     fault_effective_at: float
     failure_detected_at: float
+    fault_was_disruptive: bool
+    pre_recovery_requirement_mbps: float
+    post_failure_capacity_mbps: float
+    pre_recovery_violation_margin_mbps: float
+    requirement_violated_before_recovery: bool
     num_agents: int
     num_edges: int
     num_gateways: int

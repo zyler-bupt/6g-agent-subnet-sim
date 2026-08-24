@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import Callable, Protocol
 
 from src.controller.impact import ImpactScope, ImpactScopeAnalyzer
+from src.controller.cspf import CspfRequest, CspfSolver, links_from_dicts, reserve_path
 from src.controller.reconfiguration import ReconfigurationPlan, delta_by_gateway
 from src.core.cross_layer import AuthorizedAction, LayerProposal
 from src.core.events import RuntimeEvent, RuntimeEventType
@@ -328,6 +329,157 @@ class ReactiveNetworkOnlyStrategy:
         )
 
 
+class CspfNetworkOnlyStrategy:
+    """Network-only recovery using real bandwidth/delay constrained SPF."""
+
+    method = "cspf"
+
+    def __init__(self, clock: Callable[[], float] = perf_counter) -> None:
+        self.clock = clock
+        self.solver = CspfSolver()
+
+    async def plan(self, controller, stable_state, event, context) -> RecoveryPlanningResult:
+        localization_started = self.clock()
+        scope = ImpactScopeAnalyzer().analyze_failure(stable_state, event)
+        localization_ms = _elapsed_ms(localization_started, self.clock())
+        proposal_started = self.clock()
+        proposals = _cspf_network_proposals(
+            stable_state,
+            context.affected_edge_ids,
+        )
+        proposal_ms = _elapsed_ms(proposal_started, self.clock())
+        coordinate_started = self.clock()
+        link_rows = context.metadata.get("cspf_te_links", ())
+        if not link_rows:
+            return _rejected_result(
+                self.method,
+                proposals,
+                (),
+                {item.proposal_id: "missing_network_TE_topology" for item in proposals},
+                "UNRESOLVABLE_BY_CSPF:missing network-layer TE topology",
+                localization_ms,
+                proposal_ms,
+                _elapsed_ms(coordinate_started, self.clock()),
+                prechecked=True,
+            )
+        links = links_from_dicts(link_rows)
+        path_overrides: dict[str, tuple[str, ...]] = {}
+        results = []
+        affected_sessions = sorted(
+            (
+                session
+                for session in stable_state.sessions
+                if session.business_edge_id in context.affected_edge_ids
+            ),
+            key=lambda item: item.session_id,
+        )
+        for session in affected_sessions:
+            result = self.solver.solve(
+                links,
+                CspfRequest(
+                    flow_id=session.session_id,
+                    source=session.source_gateway,
+                    destination=session.target_gateway,
+                    required_bandwidth_mbps=session.data_rate_mbps,
+                    maximum_delay_ms=session.latency_budget_ms,
+                    metric=str(context.metadata.get("cspf_metric", "delay")),
+                ),
+            )
+            results.append(result)
+            if not result.feasible:
+                return _rejected_result(
+                    self.method,
+                    proposals,
+                    (),
+                    {item.proposal_id: result.failure_reason for item in proposals},
+                    f"UNRESOLVABLE_BY_CSPF:{session.session_id}:{result.failure_reason}",
+                    localization_ms,
+                    proposal_ms,
+                    _elapsed_ms(coordinate_started, self.clock()),
+                    prechecked=True,
+                )
+            path_overrides[session.session_id] = result.path
+            links = reserve_path(links, result, session.data_rate_mbps)
+        selected_base = proposals[0] if proposals else None
+        if selected_base is None:
+            return _rejected_result(
+                self.method,
+                proposals,
+                (),
+                {item.proposal_id: "no_network_route_action" for item in proposals},
+                "UNRESOLVABLE_BY_CSPF:no network route action",
+                localization_ms,
+                proposal_ms,
+                _elapsed_ms(coordinate_started, self.clock()),
+                prechecked=True,
+            )
+        selected = (
+            replace(
+                selected_base,
+                action="SWITCH_ROUTE",
+                parameters={
+                    **selected_base.parameters,
+                    "algorithm": "CSPF",
+                    "metric": context.metadata.get("cspf_metric", "delay"),
+                    "paths": {
+                        result.flow_id: list(result.path) for result in results
+                    },
+                },
+            ),
+        )
+        rejected = {
+            item.proposal_id: "not_selected_by_CSPF"
+            for item in proposals
+            if item.proposal_id != selected_base.proposal_id
+        }
+        target = _compile_cspf_network_target(
+            controller,
+            stable_state,
+            path_overrides,
+        )
+        target.authorized_cross_layer_actions = _authorize(selected)
+        coordination_ms = _elapsed_ms(coordinate_started, self.clock())
+        delta_started = self.clock()
+        plan = _incremental_plan(
+            self.method,
+            stable_state,
+            target,
+            scope,
+            selected,
+            {
+                "algorithm": "Constrained Shortest Path First",
+                "network_information_only": True,
+                "path_results": [
+                    {
+                        "flow_id": result.flow_id,
+                        "path": list(result.path),
+                        "delay_ms": result.total_delay_ms,
+                        "cost": result.total_cost,
+                        "pruned_link_ids": list(result.pruned_link_ids),
+                    }
+                    for result in results
+                ],
+            },
+        )
+        return RecoveryPlanningResult(
+            method=self.method,
+            plan=plan,
+            proposals=proposals,
+            selected_proposals=selected,
+            authorized_actions=_authorize(selected),
+            rejected_proposals=rejected,
+            pre_execution_feasibility_checked=True,
+            pre_execution_feasible=True,
+            safe_rejection=False,
+            failure_reason="",
+            localization_latency_ms=localization_ms,
+            proposal_latency_ms=proposal_ms,
+            coordination_latency_ms=coordination_ms,
+            feasibility_latency_ms=0.0,
+            delta_compile_latency_ms=_elapsed_ms(delta_started, self.clock()),
+        )
+
+
 class WithoutScopeIdentificationStrategy(ProposedCrossLayerElasticStrategy):
     def __init__(self, **kwargs) -> None:
         super().__init__(
@@ -426,6 +578,68 @@ def generate_failure_proposals(
     return tuple(proposals)
 
 
+def _cspf_network_proposals(
+    stable: TaskSubnet,
+    affected_edge_ids: frozenset[str],
+) -> tuple[LayerProposal, ...]:
+    """Create a network-only action from TE topology and task-flow inputs."""
+
+    edge_ids = affected_edge_ids or frozenset(stable.business_edges)
+    sessions = tuple(
+        session
+        for session in stable.sessions
+        if session.business_edge_id in edge_ids
+    )
+    if not sessions:
+        return ()
+    session_ids = frozenset(item.session_id for item in sessions)
+    route_ids = frozenset(item.path_id for item in sessions)
+    gateways = frozenset(
+        gateway_id for item in sessions for gateway_id in item.gateway_path
+    )
+    return (
+        LayerProposal(
+            proposal_id=f"{stable.task.task_id}:cspf:network:SWITCH_ROUTE",
+            task_id=stable.task.task_id,
+            layer="network",
+            action="SWITCH_ROUTE",
+            target_objects=frozenset(f"flow:{item}" for item in session_ids),
+            read_set=frozenset(
+                {
+                    "network:te-topology",
+                    *(f"network:flow:{item}" for item in session_ids),
+                }
+            ),
+            write_set=frozenset(f"network:route:{item}" for item in session_ids),
+            expected_qos_gain=0.0,
+            expected_cost=0.0,
+            confidence=1.0,
+            required_bandwidth_mbps=sum(item.data_rate_mbps for item in sessions),
+            required_physical_capacity_mbps=0.0,
+            expected_latency_ms=max(item.latency_budget_ms for item in sessions),
+            expected_loss_rate=0.0,
+            affected_edges=edge_ids,
+            affected_sessions=session_ids,
+            affected_routes=route_ids,
+            affected_gateways=gateways,
+            parameters={
+                "algorithm": "CSPF",
+                "allowed_inputs": (
+                    "topology",
+                    "link_up",
+                    "available_bandwidth",
+                    "link_delay",
+                    "te_cost",
+                    "flow_source",
+                    "flow_destination",
+                    "required_bandwidth",
+                    "maximum_delay",
+                ),
+            },
+        ),
+    )
+
+
 async def _compile_recovery_target(
     controller,
     stable: TaskSubnet,
@@ -499,6 +713,53 @@ async def _compile_recovery_target(
         },
         "excluded_support_agents": sorted(exclusions),
     }
+
+
+def _compile_cspf_network_target(
+    controller,
+    stable: TaskSubnet,
+    path_overrides: dict[str, tuple[str, ...]],
+) -> TaskSubnet:
+    """Compile network route changes without reallocating other layers."""
+
+    target = deepcopy(stable)
+    target.version = stable.version + 1
+    target.state = TaskState.PLANNING
+    target.sessions = [
+        replace(
+            session,
+            gateway_path=path_overrides.get(
+                session.session_id,
+                session.gateway_path,
+            ),
+            path_id="->".join(
+                path_overrides.get(
+                    session.session_id,
+                    session.gateway_path,
+                )
+            ),
+        )
+        for session in stable.sessions
+    ]
+    target.involved_gateways = {
+        gateway_id
+        for session in target.sessions
+        for gateway_id in session.gateway_path
+    }
+    target.path_supports, target.session_supports = controller._build_support_bindings(
+        target.sessions
+    )
+    target.gateway_routes = controller._build_gateway_route_tables(
+        target.task,
+        target.sessions,
+        controller._current_app_cards(target.task),
+        version=target.version,
+    )
+    # CSPF neither reallocates nor releases transport/physical resources.
+    target.transport_agents = deepcopy(stable.transport_agents)
+    target.physical_agents = deepcopy(stable.physical_agents)
+    target.physical_bindings = deepcopy(stable.physical_bindings)
+    return target
 
 
 def _replace_business_agent(task, failed_agent_id: str, replacement_agent_id: str):

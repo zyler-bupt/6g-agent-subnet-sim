@@ -28,8 +28,8 @@ AGENT_FAILURE_LEVELS = (
     "network",
     "physical",
 )
-LINK_FAILURE_LEVELS = (1.0, 0.8, 0.6, 0.4, 0.0)
-PHYSICAL_DROP_LEVELS = (1.0, 0.8, 0.6, 0.4, 0.2)
+LINK_FAILURE_LEVELS = (0.90, 0.75, 0.60, 0.45, 0.0)
+PHYSICAL_DROP_LEVELS = (0.90, 0.75, 0.60, 0.45, 0.30)
 
 
 @dataclass(frozen=True)
@@ -126,7 +126,45 @@ class FaultScenarioSnapshot:
             "fault_effective_at": self.fault_effective_at,
             "failure_detected_at": self.failure_detected_at,
             "monitor_samples": [asdict(item) for item in self.monitor_samples],
+            "cspf_te_link_profiles": self.cspf_te_link_profiles(),
         }
+
+    def cspf_te_link_profiles(self) -> list[dict[str, object]]:
+        """Method-independent network-layer topology for the paired CSPF run."""
+
+        rng = random.Random(
+            f"exp4-cspf:{self.seed}:{self.config.fault_type}"
+        )
+        gateways = tuple(item.gateway_id for item in self.catalog.gateways)
+        primary_links = set(zip(self.primary_path, self.primary_path[1:]))
+        backup_links = set(zip(self.backup_path, self.backup_path[1:]))
+        rows: list[dict[str, object]] = []
+        for source in gateways:
+            for target in gateways:
+                if source == target:
+                    continue
+                pair = (source, target)
+                if pair in primary_links:
+                    capacity_factor = rng.uniform(1.25, 1.55)
+                    delay_ms = rng.uniform(3.0, 5.0)
+                elif pair in backup_links:
+                    capacity_factor = rng.uniform(0.78, 1.55)
+                    delay_ms = rng.uniform(5.0, 8.0)
+                else:
+                    capacity_factor = rng.uniform(0.65, 1.20)
+                    delay_ms = rng.uniform(7.0, 12.0)
+                rows.append(
+                    {
+                        "link_id": f"{source}->{target}",
+                        "source": source,
+                        "target": target,
+                        "capacity_factor": capacity_factor,
+                        "delay_ms": delay_ms,
+                        "te_cost": delay_ms + rng.uniform(0.0, 1.0),
+                        "up": True,
+                    }
+                )
+        return rows
 
     def instantiate(
         self,
@@ -229,11 +267,18 @@ class FaultScenarioSnapshot:
                 if item.business_edge_id in affected_edges
             )
             baseline = max(1.0, affected_demand * 1.20)
-            degraded_link_capacity = baseline * self.config.severity
+            # ``severity`` is the frozen post-failure capacity/requirement
+            # ratio. It is not a multiplier applied to an arbitrary baseline.
+            degraded_link_capacity = max(
+                0.0,
+                affected_demand * self.config.severity,
+            )
             payload.update(
                 source_gateway=self.failed_link[0],
                 target_gateway=self.failed_link[1],
                 degradation_factor=self.config.severity,
+                service_requirement_mbps=affected_demand,
+                post_failure_capacity_to_requirement_ratio=self.config.severity,
                 degraded_capacity_mbps=degraded_link_capacity,
             )
             event_type = (
@@ -253,7 +298,10 @@ class FaultScenarioSnapshot:
             )
             baseline_physical = max(1.0, task_reserved * 1.25)
             agent.configure_capacity(baseline_physical)
-            physical_capacity = max(0.01, baseline_physical * self.config.severity)
+            # Every final physical-capacity point is defined relative to the
+            # actual reserved task demand, so ratios below one are provably
+            # disruptive before any recovery action is considered.
+            physical_capacity = max(0.01, task_reserved * self.config.severity)
             agent.configure_capacity(physical_capacity)
             affected_edges = {
                 item.business_edge_id
@@ -263,6 +311,8 @@ class FaultScenarioSnapshot:
             payload.update(
                 physical_agent_id=physical_id,
                 capacity_factor=self.config.severity,
+                post_failure_capacity_to_requirement_ratio=self.config.severity,
+                service_requirement_mbps=task_reserved,
                 baseline_capacity_mbps=baseline_physical,
                 available_capacity_mbps=physical_capacity,
             )
@@ -309,9 +359,45 @@ class FaultScenarioSnapshot:
                 "stable_health_windows": self.config.stable_health_windows,
                 "probe_interval_ms": self.config.probe_interval_ms,
                 "affected_demand_mbps": affected_demand,
+                "service_requirement_mbps": affected_demand,
+                "post_failure_capacity_mbps": (
+                    physical_capacity
+                    if event_type == RuntimeEventType.PHYSICAL_CAPACITY_DROP
+                    else degraded_link_capacity
+                ),
+                "requirement_violated_before_recovery": bool(
+                    affected_demand > 0.0
+                    and (
+                        physical_capacity
+                        if event_type == RuntimeEventType.PHYSICAL_CAPACITY_DROP
+                        else degraded_link_capacity
+                    )
+                    + 1e-9
+                    < affected_demand
+                ),
+                "pre_recovery_violation_margin_mbps": max(
+                    0.0,
+                    affected_demand
+                    - (
+                        physical_capacity
+                        if event_type == RuntimeEventType.PHYSICAL_CAPACITY_DROP
+                        else degraded_link_capacity
+                    ),
+                ),
                 "session_edge_map": {
                     item.session_id: item.business_edge_id for item in stable.sessions
                 },
+                "cspf_metric": "delay",
+                "cspf_te_links": _materialize_cspf_links(
+                    self,
+                    max(affected_demand, 0.01),
+                    event_type.value,
+                    degraded_link_capacity,
+                    physical_capacity,
+                ),
+                "physical_drop_scope": (
+                    "endpoint_access_shared_across_candidate_network_paths"
+                ),
             },
         )
         return event, context
@@ -485,3 +571,41 @@ def _fault_time_offset(fault_type: str) -> float:
         RuntimeEventType.LINK_FAILURE.value: 2.0,
         RuntimeEventType.PHYSICAL_CAPACITY_DROP.value: 3.0,
     }[fault_type]
+
+
+def _materialize_cspf_links(
+    snapshot: FaultScenarioSnapshot,
+    affected_demand_mbps: float,
+    event_type: str,
+    degraded_link_capacity_mbps: float,
+    physical_capacity_mbps: float,
+) -> list[dict[str, object]]:
+    primary_first = tuple(snapshot.primary_path[:2])
+    rows: list[dict[str, object]] = []
+    for profile in snapshot.cspf_te_link_profiles():
+        pair = (str(profile["source"]), str(profile["target"]))
+        capacity = affected_demand_mbps * float(profile["capacity_factor"])
+        up = bool(profile["up"])
+        if event_type in {
+            RuntimeEventType.LINK_FAILURE.value,
+            RuntimeEventType.LINK_DEGRADATION.value,
+        } and pair == snapshot.failed_link:
+            capacity = max(0.0, degraded_link_capacity_mbps)
+            up = event_type != RuntimeEventType.LINK_FAILURE.value
+        if (
+            event_type == RuntimeEventType.PHYSICAL_CAPACITY_DROP.value
+            and pair == primary_first
+        ):
+            capacity = max(0.0, physical_capacity_mbps)
+        rows.append(
+            {
+                "link_id": profile["link_id"],
+                "source": profile["source"],
+                "target": profile["target"],
+                "available_bandwidth_mbps": capacity,
+                "delay_ms": profile["delay_ms"],
+                "te_cost": profile["te_cost"],
+                "up": up,
+            }
+        )
+    return rows

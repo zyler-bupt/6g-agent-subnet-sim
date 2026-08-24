@@ -9,6 +9,7 @@ from typing import Any, Iterable
 import yaml
 
 from src.controller.failure_recovery import (
+    CspfNetworkOnlyStrategy,
     FullRebuildFailureStrategy,
     ProposedCrossLayerElasticStrategy,
     ReactiveNetworkOnlyStrategy,
@@ -47,6 +48,46 @@ from src.simulation.failure_scenario_generator import (
 
 MAIN_METHODS = ("proposed", "full_rebuild", "network_only")
 ABLATION_METHODS = ("no_scope", "no_verification_rollback")
+FINAL_METHODS = ("proposed", "full_rebuild", "cspf")
+FORMAL_SEEDS = tuple(range(30))
+FORMAL_OUTPUT = Path("results/exp4_cspf_final")
+
+
+def validate_protocol(
+    config: dict[str, Any],
+    methods: tuple[str, ...],
+    seeds: tuple[int, ...],
+    output_dir: Path,
+) -> None:
+    """Reject a formal invocation that drifts from the frozen pilot decision."""
+
+    experiment = config.get("experiment", {})
+    phase = str(experiment.get("phase", ""))
+    if phase not in {"pilot", "formal"}:
+        raise ValueError("Exp4 phase must be pilot or formal")
+    expected_methods = tuple(config.get("methods", ()))
+    expected_seeds = parse_seed_range(str(config.get("simulation", {}).get("seed_range", "")))
+    expected_output = Path(str(experiment.get("output_dir", "")))
+    if methods != expected_methods:
+        raise ValueError("Exp4 methods differ from the registered protocol")
+    if seeds != expected_seeds:
+        raise ValueError("Exp4 seeds differ from the registered protocol")
+    if output_dir != expected_output:
+        raise ValueError("Exp4 output differs from the registered protocol")
+    if phase == "formal":
+        if not bool(experiment.get("frozen", False)):
+            raise ValueError("formal Exp4 config is not frozen")
+        if methods != FINAL_METHODS or seeds != FORMAL_SEEDS or output_dir != FORMAL_OUTPUT:
+            raise ValueError("formal Exp4 invocation is not canonical")
+    for sweep_name in (
+        "link_post_failure_to_requirement_ratios",
+        "physical_post_failure_to_requirement_ratios",
+    ):
+        ratios = tuple(float(value) for value in config.get("fault_sweeps", {}).get(sweep_name, ()))
+        if not ratios or any(value < 0.0 or value >= 1.0 for value in ratios):
+            raise ValueError(
+                f"{sweep_name} must keep every injected capacity below service requirement"
+            )
 
 
 async def run_experiment(
@@ -332,7 +373,10 @@ async def run_one(
     plan = planning.plan
     changed = _changed_objects(stable, plan.target_state if plan else stable)
     delta = plan.rule_delta if plan is not None else RuleDelta()
-    total_rules = max(1, len(stable.rules))
+    rule_universe = set(stable.rules)
+    if plan is not None:
+        rule_universe.update(plan.target_state.rules)
+    total_rules = max(1, len(rule_universe))
     affected_gateways = len(plan.affected_gateways) if plan else len(scope.affected_gateways)
     task_gateways = max(1, len(stable.involved_gateways | final_state.involved_gateways))
     stage_started = execution.timestamp(EventStage.STAGE_STARTED) if execution else 0.0
@@ -362,6 +406,19 @@ async def run_one(
         fault_severity=context.severity,
         fault_effective_at=context.fault_effective_at,
         failure_detected_at=context.failure_detected_at,
+        fault_was_disruptive=fault_was_disruptive,
+        pre_recovery_requirement_mbps=float(
+            context.metadata.get("service_requirement_mbps", 0.0)
+        ),
+        post_failure_capacity_mbps=float(
+            context.metadata.get("post_failure_capacity_mbps", 0.0)
+        ),
+        pre_recovery_violation_margin_mbps=float(
+            context.metadata.get("pre_recovery_violation_margin_mbps", 0.0)
+        ),
+        requirement_violated_before_recovery=bool(
+            context.metadata.get("requirement_violated_before_recovery", False)
+        ),
         num_agents=len(stable.application_agents),
         num_edges=len(stable.business_edges),
         num_gateways=len(stable.involved_gateways),
@@ -519,18 +576,21 @@ async def run_one(
         }
         for sample in snapshot.monitor_samples
     )
+    selected_by_id = {
+        item.proposal_id: item for item in planning.selected_proposals
+    }
+    authorized_ids = {
+        action.proposal_id for action in planning.authorized_actions
+    }
     proposals = [
         {
             "run_id": run_id,
             "scenario": snapshot.scenario,
             "method": method,
-            "selected": item in planning.selected_proposals,
-            "authorized": any(
-                action.proposal_id == item.proposal_id
-                for action in planning.authorized_actions
-            ),
+            "selected": item.proposal_id in selected_by_id,
+            "authorized": item.proposal_id in authorized_ids,
             "rejection_reason": planning.rejected_proposals.get(item.proposal_id, ""),
-            "proposal": to_jsonable(item),
+            "proposal": to_jsonable(selected_by_id.get(item.proposal_id, item)),
         }
         for item in planning.proposals
     ]
@@ -558,17 +618,25 @@ def _main_points(config: dict[str, Any]) -> Iterable[FailureScenarioConfig]:
             severity=1.0,
             **base,
         )
-    for factor in sweeps.get("link_capacity_factors", LINK_FAILURE_LEVELS):
+    link_ratios = sweeps.get(
+        "link_post_failure_to_requirement_ratios",
+        sweeps.get("link_capacity_factors", LINK_FAILURE_LEVELS),
+    )
+    for factor in link_ratios:
         yield FailureScenarioConfig(
             fault_type="LINK_FAILURE",
-            fault_level=f"capacity_factor_{float(factor):.1f}",
+            fault_level=f"post_capacity_to_requirement_{float(factor):.2f}",
             severity=float(factor),
             **base,
         )
-    for factor in sweeps.get("physical_capacity_factors", PHYSICAL_DROP_LEVELS):
+    physical_ratios = sweeps.get(
+        "physical_post_failure_to_requirement_ratios",
+        sweeps.get("physical_capacity_factors", PHYSICAL_DROP_LEVELS),
+    )
+    for factor in physical_ratios:
         yield FailureScenarioConfig(
             fault_type="PHYSICAL_CAPACITY_DROP",
-            fault_level=f"capacity_factor_{float(factor):.1f}",
+            fault_level=f"post_capacity_to_requirement_{float(factor):.2f}",
             severity=float(factor),
             **base,
         )
@@ -588,6 +656,8 @@ def _strategy(method: str, clock):
         return FullRebuildFailureStrategy(clock=clock)
     if method == "network_only":
         return ReactiveNetworkOnlyStrategy(clock=clock)
+    if method == "cspf":
+        return CspfNetworkOnlyStrategy(clock=clock)
     if method == "no_scope":
         return WithoutScopeIdentificationStrategy(clock=clock)
     if method == "no_verification_rollback":
@@ -926,19 +996,22 @@ def main() -> None:
     with Path(args.config).open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     methods = tuple(item.strip() for item in args.methods.split(",") if item.strip())
+    seeds = parse_seed_range(args.seeds)
+    output_dir = Path(args.output_dir)
+    validate_protocol(config, methods, seeds, output_dir)
     rows = asyncio.run(
         run_experiment(
             config,
             methods=methods,
-            seeds=parse_seed_range(args.seeds),
-            output_dir=Path(args.output_dir),
+            seeds=seeds,
+            output_dir=output_dir,
             include_ablations=args.include_ablations,
             include_timeline=not args.skip_timeline,
         )
     )
     successful = sum(item.success for item in rows)
     print(
-        f"Experiment 4 wrote {len(rows)} raw runs to {Path(args.output_dir).resolve()} "
+        f"Experiment 4 wrote {len(rows)} raw runs to {output_dir.resolve()} "
         f"(successful={successful}, failed={len(rows) - successful})"
     )
 

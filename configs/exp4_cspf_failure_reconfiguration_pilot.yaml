@@ -1,0 +1,48 @@
+experiment:
+  phase: pilot
+  frozen: false
+  protocol_version: wcnc-exp4-cspf-v2
+  output_dir: results/wcnc_pilot/exp4_cspf
+
+simulation:
+  seeds: 5
+  seed_range: "9000:9004"
+  timeout_ms: 10000
+  result_mode: in_memory_transactional_control_plane_simulation
+
+task:
+  num_agents: 20
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+
+topology:
+  multi_hop: true
+  candidate_paths: 2
+  cspf_metric: delay
+
+monitor:
+  probe_interval_ms: 50
+  failure_detection_threshold: 3
+  qos_violation_threshold: 3
+  stable_health_windows: 3
+
+controller:
+  verification_enabled: true
+  rollback_enabled: true
+  scope_identification_enabled: true
+
+fault_sweeps:
+  agent_failure_levels:
+    - application_same_gateway
+    - application_different_gateway
+    - transport
+    - network
+    - physical
+  link_post_failure_to_requirement_ratios: [0.90, 0.75, 0.60, 0.45, 0.00]
+  physical_post_failure_to_requirement_ratios: [0.90, 0.75, 0.60, 0.45, 0.30]
+
+methods:
+  - proposed
+  - full_rebuild
+  - cspf

@@ -13,6 +13,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.paper_protocol import (
+    EXPERIMENT_FAILURE_METHODS,
     EXPERIMENT_METHODS,
     PAPER_FIGURE_MIN_TOPOLOGY_CLUSTERS,
 )
@@ -62,8 +63,15 @@ def check_results(
             )
         )
 
-    expected_methods = set(EXPERIMENT_METHODS.get(selected_experiment, ()))
+    common_expected_methods = set(EXPERIMENT_METHODS.get(selected_experiment, ()))
     for trial_id, paired in _group(rows, "trial_id").items():
+        if selected_experiment == "exp4":
+            failure_type = _text(paired[0].get("failure_type"))
+            expected_methods = set(
+                EXPERIMENT_FAILURE_METHODS["exp4"].get(failure_type, ())
+            )
+        else:
+            expected_methods = common_expected_methods
         actual_methods = {_text(row.get("method_id")) for row in paired}
         if expected_methods and actual_methods != expected_methods:
             findings.append(

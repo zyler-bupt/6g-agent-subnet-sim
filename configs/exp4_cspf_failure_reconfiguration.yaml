@@ -1,0 +1,57 @@
+experiment:
+  phase: formal
+  frozen: true
+  protocol_version: wcnc-exp4-cspf-v2
+  pilot_source: results/wcnc_pilot/exp4_cspf
+  output_dir: results/exp4_cspf_final
+  pilot_binding:
+    seeds: "9000:9004"
+    config_sha256: a4fc0c30f471471128151234d70608b003c456467f38c489370b80bfcfc0e2b4
+    raw_runs_sha256: 1b6ca20112b361d2a3fb942a79ff36a30e64f73ac3e4d7beeec8ede53162eed7
+    proposals_sha256: e00bbf2fcf9bee1c63055c5ec1677f5c9a9c19e56c2b5bb419e26a3592def833
+    audit_sha256: e113fe93ff26b3adba13495f9a515362ca6276319df05a00e3f3c3823249c1b8
+    decision: retain_all_registered_failure_levels
+  physical_failure_semantics: post_capacity_relative_to_actual_service_requirement
+
+simulation:
+  seeds: 30
+  seed_range: "0:29"
+  timeout_ms: 10000
+  result_mode: in_memory_transactional_control_plane_simulation
+
+task:
+  num_agents: 20
+  edge_ratio: 1.5
+  num_gateways: 4
+  cross_gateway_edge_ratio: 0.5
+
+topology:
+  multi_hop: true
+  candidate_paths: 2
+  cspf_metric: delay
+
+monitor:
+  probe_interval_ms: 50
+  failure_detection_threshold: 3
+  qos_violation_threshold: 3
+  stable_health_windows: 3
+
+controller:
+  verification_enabled: true
+  rollback_enabled: true
+  scope_identification_enabled: true
+
+fault_sweeps:
+  agent_failure_levels:
+    - application_same_gateway
+    - application_different_gateway
+    - transport
+    - network
+    - physical
+  link_post_failure_to_requirement_ratios: [0.90, 0.75, 0.60, 0.45, 0.00]
+  physical_post_failure_to_requirement_ratios: [0.90, 0.75, 0.60, 0.45, 0.30]
+
+methods:
+  - proposed
+  - full_rebuild
+  - cspf
