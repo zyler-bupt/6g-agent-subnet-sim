@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from experiments.paper_protocol import EXPERIMENT_METHODS
+from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS
 from scripts.paper_style import METHOD_STYLES
 from scripts.plot_final_paper_figures import plot_exp1, plot_exp2, plot_exp3, plot_exp4
 
@@ -190,8 +190,15 @@ class Exp4PlotTests(unittest.TestCase):
             root = Path(directory)
             summary = root / "summary.csv"
             rows = []
-            for method_index, method_id in enumerate(EXPERIMENT_METHODS["exp4"]):
-                for failure_index in range(3):
+            failure_types = (
+                "agent_failure",
+                "link_failure",
+                "capacity_degradation",
+            )
+            for failure_index, failure_type in enumerate(failure_types):
+                for method_index, method_id in enumerate(
+                    EXPERIMENT_FAILURE_METHODS["exp4"][failure_type]
+                ):
                     for metric, estimate in (
                         ("recovery_latency_ms", 4.0 + method_index + failure_index),
                         ("modification_scope_ratio_percent", 8.0 + 4.0 * method_index),
@@ -224,6 +231,42 @@ class Exp4PlotTests(unittest.TestCase):
             self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))
             self.assertGreater(pdf.stat().st_size, 2000)
             self.assertEqual(_panels(source), {"a", "b"})
+            with source.open(encoding="utf-8", newline="") as handle:
+                plotted = {
+                    (float(row["x_value"]), row["method_id"])
+                    for row in csv.DictReader(handle)
+                }
+            self.assertNotIn((0.0, "cspf"), plotted)
+            self.assertNotIn((1.0, "sfc_restoration"), plotted)
+            self.assertNotIn((2.0, "cspf"), plotted)
+
+    def test_exp4_plot_rejects_an_inapplicable_method_as_data_not_na(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.csv"
+            rows = []
+            for method_id in ("proposed", "sfc_restoration", "full_rebuild", "cspf"):
+                for metric in (
+                    "recovery_latency_ms",
+                    "modification_scope_ratio_percent",
+                ):
+                    rows.append(
+                        {
+                            **_summary_row(
+                                method_id,
+                                "failure_type",
+                                "failure_type_index",
+                                0,
+                                metric,
+                                10.0,
+                            ),
+                            "experiment": "exp4",
+                        }
+                    )
+            _write_rows(summary, rows)
+
+            with self.assertRaisesRegex(ValueError, "agent_failure"):
+                plot_exp4(summary, root / "figures")
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:

@@ -79,6 +79,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                         writer.writerow({"scenario_fingerprint": "paired", "method_id": method, "success": True, "failure_reason": "", "failure_type": "link_failure"})
             hashes = {str(path.relative_to(root)): __import__("hashlib").sha256(path.read_bytes()).hexdigest() for path in (root / "raw").glob("**/*") if path.is_file()}
             manifest = {
+                "git_commit": "0" * 40,
                 "raw_artifact_hashes": hashes,
                 "source_hashes": {"scripts/aggregate_wcnc_final_v3.py": "0" * 64},
                 "config_hashes": {"configs/wcnc_final_v3.yaml": "0" * 64},
@@ -90,6 +91,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             self.assertIn("raw artifact drift", report["errors"])
             self.assertIn("scoped source drift", report["errors"])
             self.assertIn("config drift", report["errors"])
+            self.assertIn("git commit drift", report["errors"])
 
 
 if __name__ == "__main__": unittest.main()

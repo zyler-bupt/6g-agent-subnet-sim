@@ -120,8 +120,17 @@ EXPECTED_WCNC_V3_CONFIG: Mapping[str, Any] = {
     "pilot": {"seeds": "9000:9019"},
     "formal": {"exp1_seeds": "0:49", "exp2_exp4_seeds": "0:99"},
     "exp1": {
+        "formal_config": "configs/exp1_netns_verified_formation_v3.yaml",
+        "pilot_config": "configs/exp1_netns_verified_formation_pilot_v3.yaml",
         "num_agents": [4, 8, 12, 16, 20],
         "methods": ["proposed", "cspf", "global_sfc_embedding"],
+        "deployment_policies": {
+            "proposed": "parallel_single_batch",
+            "cspf": "sequential_flow_batches",
+            "global_sfc_embedding": "sequential_hop_route_then_activation_batches",
+        },
+        "require_isolated_outer_network_namespace": True,
+        "require_all_formal_trials_successful": True,
         "timeout_s": 45,
         "result_mode": "measured_netns",
     },

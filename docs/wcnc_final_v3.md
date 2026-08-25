@@ -16,6 +16,18 @@ The frozen protocol is `configs/wcnc_final_v3.yaml`. Formal artifacts live only 
 
 `SANet-DW*` and `NetRen*` are adapted baselines. The star must remain in every figure and the manuscript must not call either a full reproduction.
 
+Exp1 uses method-owned deployment plans rather than a shared route installer:
+
+- `proposed`: exact Task-DAG edge host routes in one parallel batch;
+- `cspf`: deterministic constrained per-flow paths installed in sequential flow batches;
+- `global_sfc_embedding`: a deterministic source-to-sink chain cover installed in sequential chain batches.
+
+All three plans operate on the same Agent/Gateway mapping and finish with the same ping/iperf3 verifier. No sleep or formula-derived latency is added.
+`Control Messages` counts controller deployment transactions (one sequential
+batch is one transaction); `Rules Installed` counts the netlink route/rule
+commands actually executed. Planning work units and every batch/command are
+retained in the raw event log for audit.
+
 ## Pilot
 
 ```bash
@@ -32,6 +44,21 @@ On the Linux netns host:
 ```bash
 scripts/run_wcnc_final_v3_remote.sh
 ```
+
+The script first runs a `4 agents × 2 seeds × 3 methods` netns smoke. It stops before the formal run if any smoke trial fails. When unprivileged user namespaces cannot configure veth/netlink, it requests `sudo` and still creates a fresh outer network namespace automatically.
+
+To run the smoke manually, do not set `WCNC_EXP1_INSIDE_USERNS`:
+
+```bash
+sudo -E .venv/bin/python -m experiments.exp1_netns_verified_formation \
+  --config configs/exp1_netns_verified_formation_pilot_v3.yaml \
+  --output-dir results/paper/wcnc_final_v3/pilot/exp1_netns_smoke_v3 \
+  --seeds 9000:9001 --task-sizes 4 \
+  --methods proposed,cspf,global_sfc_embedding \
+  --require-all-success
+```
+
+The runner rejects a manually forged namespace sentinel. Formal runs return non-zero if any trial fails or the expected grid is incomplete.
 
 Individual transactional experiments can be resumed with:
 

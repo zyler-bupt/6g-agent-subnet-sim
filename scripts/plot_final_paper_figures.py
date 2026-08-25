@@ -9,7 +9,11 @@ from typing import Iterable
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.paper_protocol import EXPERIMENT_METHODS, figure_min_topology_clusters
+from experiments.paper_protocol import (
+    EXPERIMENT_FAILURE_METHODS,
+    EXPERIMENT_METHODS,
+    figure_min_topology_clusters,
+)
 from scripts.paper_style import (
     CI_ALPHA,
     METHOD_STYLES,
@@ -322,9 +326,9 @@ def plot_exp4(
         "failure_type",
         "modification_scope_ratio_percent",
     )
-    _require_complete_methods(latency, methods, "Exp.4 recovery latency")
-    _require_complete_methods(
-        modification_scope, methods, "Exp.4 modification scope"
+    _require_failure_specific_methods(latency, "Exp.4 recovery latency")
+    _require_failure_specific_methods(
+        modification_scope, "Exp.4 modification scope"
     )
 
     apply_paper_style()
@@ -538,6 +542,38 @@ def _require_complete_methods(
         raise ValueError(
             f"{context} methods are incomplete: {sorted(methods)} != {sorted(expected)}"
         )
+
+
+def _require_failure_specific_methods(
+    rows: Iterable[dict[str, str]],
+    context: str,
+) -> None:
+    """Reject inapplicable Exp.4 baselines without requiring absent pilot families."""
+
+    materialized = list(rows)
+    if not materialized:
+        raise ValueError(f"no aggregate rows are available for {context}")
+    failure_type_by_index = {
+        0.0: "agent_failure",
+        1.0: "link_failure",
+        2.0: "capacity_degradation",
+    }
+    for x_value in sorted({float(row["x_value"]) for row in materialized}):
+        failure_type = failure_type_by_index.get(x_value)
+        if failure_type is None:
+            raise ValueError(f"{context} has unsupported failure index {x_value}")
+        actual = {
+            row["method_id"]
+            for row in materialized
+            if float(row["x_value"]) == x_value
+        }
+        expected = set(EXPERIMENT_FAILURE_METHODS["exp4"][failure_type])
+        inapplicable = actual - expected
+        if inapplicable:
+            raise ValueError(
+                f"{context} contains inapplicable methods for {failure_type}: "
+                f"{sorted(inapplicable)}"
+            )
 
 
 def _metric_rows(

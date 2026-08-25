@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -29,11 +29,58 @@ class FormationEdge:
 
 
 @dataclass(frozen=True)
+class DeploymentCommand:
+    namespace: str
+    pid: int | None
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DeploymentBatch:
+    label: str
+    commands: tuple[DeploymentCommand, ...]
+
+
+@dataclass(frozen=True)
+class FormationDeploymentPlan:
+    method_id: str
+    planning_policy: str
+    tie_break: str
+    ordered_edge_ids: tuple[str, ...]
+    service_chain_count: int
+    planning_work_units: int
+    batches: tuple[DeploymentBatch, ...]
+    path_records: tuple[dict[str, object], ...] = ()
+
+    @property
+    def control_messages(self) -> int:
+        return len(self.batches)
+
+    @property
+    def rules_installed(self) -> int:
+        return sum(len(batch.commands) for batch in self.batches)
+
+    def audit(self) -> dict[str, object]:
+        return {
+            "planning_policy": self.planning_policy,
+            "tie_break": self.tie_break,
+            "planned_edge_count": len(self.ordered_edge_ids),
+            "ordered_edge_ids": list(self.ordered_edge_ids),
+            "service_chain_count": self.service_chain_count,
+            "planning_work_units": self.planning_work_units,
+            "deployment_batch_count": self.control_messages,
+            "planned_rule_count": self.rules_installed,
+            "path_records": list(self.path_records),
+        }
+
+
+@dataclass(frozen=True)
 class NetnsFormationRun:
     run_id: str
     run_sequence: int
     block_index: int
     order_position: int
+    method_order_position: int
     seed: int
     method_id: str
     method_label: str
@@ -63,7 +110,7 @@ class NetnsFormationRun:
     ping_verification_latency_s: float
     iperf3_verification_latency_s: float
     verification_latency_s: float
-    verified_formation_latency_s: float
+    verified_formation_latency_s: float | None
     ping_edges_total: int
     ping_edges_passed: int
     ping_attempts: int
@@ -84,6 +131,8 @@ class NetnsFormationRun:
     background_utilization: float
     background_target_mbps: float
     tc_profile_count: int
+    failure_stage: str
+    formation_timing_valid: bool
     formation_failed: bool
     success: bool
     failure_reason: str
@@ -259,100 +308,268 @@ class ProcessNetnsTopology:
             commands.append((gateway.pid, ("ip", "route", "del", "default")))
         self._parallel_commands(commands, check=False)
 
-    def install_task_routes(self) -> int:
-        commands: list[tuple[int | None, tuple[str, ...]]] = []
-        for gateway_index, gateway in enumerate(self.gateways):
-            commands.append(
-                (
-                    gateway.pid,
-                    (
-                        "ip",
-                        "route",
-                        "replace",
-                        "default",
-                        "via",
-                        f"10.200.{gateway_index}.1",
-                        "dev",
-                        "up0",
-                    ),
-                )
+    def plan_task_routes(
+        self,
+        method_id: str,
+        edges: Sequence[FormationEdge],
+        *,
+        profiles: Sequence[TrafficControlProfile] = (),
+        max_path_delay_ms: float | None = None,
+    ) -> FormationDeploymentPlan:
+        """Build the method-owned route plan used by the shared netns backend."""
+        if method_id not in {"proposed", "cspf", "global_sfc_embedding"}:
+            raise ValueError(f"unsupported canonical Exp1 method: {method_id}")
+        ordered = _ordered_formation_edges(method_id, edges, self.num_gateways)
+        common = tuple(self._gateway_default_commands()) + tuple(self._outer_agent_commands())
+        if method_id == "proposed":
+            peer_commands: list[DeploymentCommand] = []
+            seen: set[tuple[int | None, tuple[str, ...]]] = set()
+            for edge in ordered:
+                for command in self._explicit_peer_commands(edge):
+                    identity = (command.pid, command.argv)
+                    if identity not in seen:
+                        seen.add(identity)
+                        peer_commands.append(command)
+            commands = common + tuple(peer_commands)
+            batches = (DeploymentBatch("task_dag_parallel_batch", commands),)
+            policy = "task_dag_batch_parallel_deployment"
+            chains: tuple[tuple[FormationEdge, ...], ...] = ()
+            work_units = len(self.agents) + len(edges)
+        elif method_id == "cspf":
+            path_records = self._cspf_path_records(
+                ordered, profiles, max_path_delay_ms=max_path_delay_ms
             )
-        for agent_index, agent in enumerate(self.agents):
-            gateway_index = self.agent_gateways[agent_index]
-            table = str(100 + agent_index)
-            source = f"{self.agent_ips[agent_index]}/32"
-            commands.append(
-                (
-                    agent.pid,
-                    (
-                        "ip",
-                        "route",
-                        "replace",
-                        "default",
-                        "via",
-                        f"10.{100 + gateway_index}.{agent_index}.1",
-                        "dev",
-                        "eth0",
-                    ),
+            edge_batches = tuple(
+                DeploymentBatch(
+                    f"cspf_flow:{edge.edge_id}",
+                    tuple(self._explicit_peer_commands(edge)),
                 )
+                for edge in ordered
             )
-            commands.append(
+            batches = (DeploymentBatch("cspf_shared_infrastructure", common),) + edge_batches
+            policy = "failed_or_insufficient_links_pruned_then_deterministic_te_shortest_path"
+            chains = ()
+            work_units = len(edges) * (len(self.agents) + len(edges))
+        else:
+            chains = _service_chains(edges)
+            seen: set[tuple[int | None, tuple[str, ...]]] = set()
+            chain_batches: list[DeploymentBatch] = []
+            for chain_index, chain in enumerate(chains):
+                for hop_index, edge in enumerate(chain):
+                    route_commands: list[DeploymentCommand] = []
+                    rule_commands: list[DeploymentCommand] = []
+                    for command in self._table_peer_commands(edge):
+                        identity = (command.pid, command.argv)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        destination = (
+                            route_commands if command.argv[1] == "route" else rule_commands
+                        )
+                        destination.append(command)
+                    if route_commands:
+                        chain_batches.append(
+                            DeploymentBatch(
+                                f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:routes",
+                                tuple(route_commands),
+                            )
+                        )
+                    if rule_commands:
+                        chain_batches.append(
+                            DeploymentBatch(
+                                f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:activate",
+                                tuple(rule_commands),
+                            )
+                        )
+            batches = (
+                DeploymentBatch(
+                    "sfc_gateway_infrastructure", tuple(self._gateway_default_commands())
+                ),
+                DeploymentBatch(
+                    "sfc_outer_reachability", tuple(self._outer_agent_commands())
+                ),
+                *chain_batches,
+            )
+            policy = "task_dag_source_to_sink_chain_embedding_heuristic"
+            work_units = len(edges) + sum(len(chain) ** 2 for chain in chains)
+        if method_id != "cspf":
+            path_records = ()
+        return FormationDeploymentPlan(
+            method_id=method_id,
+            planning_policy=policy,
+            tie_break="canonical_edge_id",
+            ordered_edge_ids=tuple(edge.edge_id for edge in ordered),
+            service_chain_count=len(chains),
+            planning_work_units=work_units,
+            batches=tuple(batches),
+            path_records=tuple(path_records),
+        )
+
+    def install_deployment_plan(
+        self, plan: FormationDeploymentPlan
+    ) -> tuple[int, int]:
+        """Execute batches sequentially while parallelizing each batch internally."""
+        self.last_install_commands = []
+        for batch_index, batch in enumerate(plan.batches):
+            executable = tuple((command.pid, command.argv) for command in batch.commands)
+            self._parallel_commands(executable, check=True)
+            self.last_install_commands.extend(
+                {
+                    "batch_index": batch_index,
+                    "batch_label": batch.label,
+                    "namespace": command.namespace,
+                    "command": list(command.argv),
+                }
+                for command in batch.commands
+            )
+        return plan.control_messages, plan.rules_installed
+
+    def _gateway_default_commands(self) -> list[DeploymentCommand]:
+        return [
+            DeploymentCommand(
+                f"gateway-{gateway_index}",
+                gateway.pid,
                 (
-                    agent.pid,
-                    (
-                        "ip",
-                        "route",
-                        "replace",
-                        "table",
-                        table,
-                        "default",
-                        "via",
-                        f"10.{100 + gateway_index}.{agent_index}.1",
-                        "dev",
-                        "eth0",
-                    ),
-                )
+                    "ip", "route", "replace", "default", "via",
+                    f"10.200.{gateway_index}.1", "dev", "up0",
+                ),
             )
-            commands.append(
-                (
-                    agent.pid,
-                    (
-                        "ip",
-                        "rule",
-                        "add",
-                        "priority",
-                        str(10_000 + agent_index),
-                        "from",
-                        source,
-                        "lookup",
-                        table,
-                    ),
-                )
-            )
-            commands.append(
-                (
-                    None,
-                    (
-                        "ip",
-                        "route",
-                        "replace",
-                        f"{self.agent_ips[agent_index]}/32",
-                        "via",
-                        f"10.200.{gateway_index}.2",
-                        "dev",
-                        f"og{gateway_index}",
-                    ),
-                )
-            )
-        self.last_install_commands = [
-            {
-                "namespace": "outer" if pid is None else f"pid:{pid}",
-                "command": list(command),
-            }
-            for pid, command in commands
+            for gateway_index, gateway in enumerate(self.gateways)
         ]
-        self._parallel_commands(commands, check=True)
-        return len(commands)
+
+    def _outer_agent_commands(self) -> list[DeploymentCommand]:
+        return [
+            DeploymentCommand(
+                "outer",
+                None,
+                (
+                    "ip", "route", "replace", f"{self.agent_ips[agent_index]}/32",
+                    "via", f"10.200.{gateway_index}.2", "dev", f"og{gateway_index}",
+                ),
+            )
+            for agent_index, gateway_index in enumerate(self.agent_gateways)
+        ]
+
+    def _explicit_peer_commands(self, edge: FormationEdge) -> list[DeploymentCommand]:
+        commands: list[DeploymentCommand] = []
+        for source_index, target_index in (
+            (edge.source_index, edge.target_index),
+            (edge.target_index, edge.source_index),
+        ):
+            gateway_index = self.agent_gateways[source_index]
+            commands.append(
+                DeploymentCommand(
+                    f"agent-{source_index}",
+                    self.agents[source_index].pid,
+                    (
+                        "ip", "route", "replace", f"{self.agent_ips[target_index]}/32",
+                        "via", f"10.{100 + gateway_index}.{source_index}.1", "dev", "eth0",
+                    ),
+                )
+            )
+        return commands
+
+    def _cspf_path_records(
+        self,
+        edges: Sequence[FormationEdge],
+        profiles: Sequence[TrafficControlProfile],
+        *,
+        max_path_delay_ms: float | None,
+    ) -> tuple[dict[str, object], ...]:
+        if not profiles:
+            return ()
+        by_endpoint = {profile.endpoint: profile for profile in profiles}
+        records: list[dict[str, object]] = []
+        for edge in edges:
+            source_gateway = self.agent_gateways[edge.source_index]
+            target_gateway = self.agent_gateways[edge.target_index]
+            endpoints = [
+                f"agent-{edge.source_index}:eth0",
+                f"gateway-{source_gateway}:ga{edge.source_index}",
+            ]
+            path = [
+                f"agent-{edge.source_index}",
+                f"gateway-{source_gateway}",
+            ]
+            if source_gateway != target_gateway:
+                endpoints.extend(
+                    (
+                        f"gateway-{source_gateway}:up0",
+                        f"outer:og{source_gateway}",
+                        f"outer:og{target_gateway}",
+                        f"gateway-{target_gateway}:up0",
+                    )
+                )
+                path.extend(("outer", f"gateway-{target_gateway}"))
+            endpoints.extend(
+                (
+                    f"gateway-{target_gateway}:ga{edge.target_index}",
+                    f"agent-{edge.target_index}:eth0",
+                )
+            )
+            path.append(f"agent-{edge.target_index}")
+            missing = [endpoint for endpoint in endpoints if endpoint not in by_endpoint]
+            if missing:
+                raise RuntimeError(
+                    f"CSPF path observation missing endpoints for {edge.edge_id}: "
+                    + ",".join(missing)
+                )
+            bottleneck = min(by_endpoint[endpoint].bandwidth_mbps for endpoint in endpoints)
+            if bottleneck < edge.required_throughput_mbps:
+                raise RuntimeError(
+                    f"CSPF pruned {edge.edge_id}: path bandwidth {bottleneck:.6f} Mbps "
+                    f"is below demand {edge.required_throughput_mbps:.6f} Mbps"
+                )
+            delay_cost_ms = sum(
+                by_endpoint[endpoint].base_delay_ms for endpoint in endpoints
+            )
+            if max_path_delay_ms is not None and delay_cost_ms > max_path_delay_ms:
+                raise RuntimeError(
+                    f"CSPF pruned {edge.edge_id}: path delay {delay_cost_ms:.6f} ms "
+                    f"exceeds constraint {max_path_delay_ms:.6f} ms"
+                )
+            records.append(
+                {
+                    "edge_id": edge.edge_id,
+                    "path": path,
+                    "path_endpoints": endpoints,
+                    "bottleneck_mbps": bottleneck,
+                    "delay_cost_ms": delay_cost_ms,
+                    "tie_break": edge.edge_id,
+                }
+            )
+        return tuple(records)
+
+    def _table_peer_commands(self, edge: FormationEdge) -> list[DeploymentCommand]:
+        commands: list[DeploymentCommand] = []
+        for source_index, target_index in (
+            (edge.source_index, edge.target_index),
+            (edge.target_index, edge.source_index),
+        ):
+            gateway_index = self.agent_gateways[source_index]
+            table = str(100 + source_index)
+            commands.extend(
+                (
+                    DeploymentCommand(
+                        f"agent-{source_index}",
+                        self.agents[source_index].pid,
+                        (
+                            "ip", "rule", "add", "priority", str(10_000 + source_index),
+                            "from", f"{self.agent_ips[source_index]}/32", "lookup", table,
+                        ),
+                    ),
+                    DeploymentCommand(
+                        f"agent-{source_index}",
+                        self.agents[source_index].pid,
+                        (
+                            "ip", "route", "replace", "table", table,
+                            f"{self.agent_ips[target_index]}/32", "via",
+                            f"10.{100 + gateway_index}.{source_index}.1", "dev", "eth0",
+                        ),
+                    ),
+                )
+            )
+        return commands
 
     def configure_traffic_control(
         self,
@@ -1149,6 +1366,23 @@ _FORMAL_BINDING_VALUES: dict[tuple[str, ...], object] = {
     ("audit", "path_bottleneck", "relative_tolerance"): 0.10,
     ("audit", "path_bottleneck", "short_tcp_min_tolerance_mbps"): 0.25,
 }
+_FORMAL_V3_BINDING_VALUES: dict[tuple[str, ...], object] = {
+    ("experiment", "protocol_id"): "wcnc_final_v3",
+    ("experiment", "provenance"): "wcnc_final_v3_exp1_formal_protocol",
+    ("methods",): ("proposed", "cspf", "global_sfc_embedding"),
+    ("deployment", "proposed", "planning"): "exact_task_dag_scope",
+    ("deployment", "proposed", "routing"): "batched_bidirectional_task_edge_host_routes",
+    ("deployment", "proposed", "scheduling"): "parallel_single_batch",
+    ("deployment", "cspf", "planning"): "observed_bandwidth_and_delay_constrained_path",
+    ("deployment", "cspf", "routing"): "bidirectional_per_flow_host_routes",
+    ("deployment", "cspf", "scheduling"): "sequential_flow_batches",
+    ("deployment", "global_sfc_embedding", "planning"): "deterministic_source_to_sink_edge_disjoint_chain_cover",
+    ("deployment", "global_sfc_embedding", "routing"): "per_chain_policy_table_host_routes",
+    ("deployment", "global_sfc_embedding", "scheduling"): "sequential_hop_route_then_activation_batches",
+    ("execution_gate", "require_isolated_outer_network_namespace"): True,
+    ("execution_gate", "reject_manual_namespace_sentinel"): True,
+    ("execution_gate", "require_all_formal_trials_successful"): True,
+}
 _PROTECTED_V1_OUTPUT_ROOTS = (
     Path("results/exp1_netns"),
     Path("results/exp1_wcnc_final"),
@@ -1173,6 +1407,9 @@ def validate_formal_protocol(config: dict[str, Any], seeds: Sequence[int]) -> No
         raise ValueError("formal Exp1 schedule task_size_order must be latin_rotation")
     for path, expected in _FORMAL_BINDING_VALUES.items():
         _validate_formal_binding_value(config, path, expected)
+    if config.get("experiment", {}).get("protocol_id") == "wcnc_final_v3":
+        for path, expected in _FORMAL_V3_BINDING_VALUES.items():
+            _validate_formal_binding_value(config, path, expected)
 
 
 def _validate_formal_binding_value(
@@ -1237,6 +1474,40 @@ def build_counterbalanced_schedule(
     return tuple(schedule)
 
 
+def build_experiment_schedule(
+    config: Mapping[str, object], seeds: Sequence[int]
+) -> tuple[ScheduledRun, ...]:
+    simulation = config["simulation"]  # type: ignore[index]
+    task_sizes = tuple(int(value) for value in simulation["task_sizes"])  # type: ignore[index]
+    phase = config.get("experiment", {}).get("phase", "formal")  # type: ignore[union-attr]
+    if phase == "formal":
+        return build_counterbalanced_schedule(task_sizes, seeds)
+    return tuple(
+        ScheduledRun(
+            run_sequence=index + 1,
+            block_index=0,
+            order_position=size_index,
+            num_agents=num_agents,
+            seed=int(seed),
+        )
+        for index, (size_index, num_agents, seed) in enumerate(
+            (size_index, num_agents, seed)
+            for size_index, num_agents in enumerate(task_sizes)
+            for seed in seeds
+        )
+    )
+
+
+def counterbalanced_method_order(
+    methods: Sequence[str], seed: int
+) -> tuple[str, ...]:
+    ordered = tuple(methods)
+    if not ordered:
+        return ()
+    offset = int(seed) % len(ordered)
+    return ordered[offset:] + ordered[:offset]
+
+
 def run_one(
     topology: ProcessNetnsTopology,
     config: dict[str, Any],
@@ -1246,6 +1517,7 @@ def run_one(
     run_sequence: int = 1,
     block_index: int = 0,
     order_position: int = 0,
+    method_order_position: int = 0,
     method_id: str = "proposed",
 ) -> tuple[NetnsFormationRun, list[dict[str, object]]]:
     task = config["task"]
@@ -1284,7 +1556,8 @@ def run_one(
     ping_retried_edges = 0
     iperf_retried_flows = 0
     retry_count = 0
-    route_commands = 0
+    control_messages = 0
+    rules_installed = 0
     tc_started = time.perf_counter()
     tc_finished = tc_started
     background_prepared_at = tc_started
@@ -1309,7 +1582,13 @@ def run_one(
         seed,
         float(task["required_throughput_mbps"]),
     )
-    planning_audit = _plan_canonical_formation(method_id, edges, topology.num_gateways)
+    deployment_plan = topology.plan_task_routes(
+        method_id,
+        edges,
+        profiles=profiles,
+        max_path_delay_ms=float(ping["max_average_rtt_ms"]),
+    )
+    planning_audit = deployment_plan.audit()
     mapping_finished = time.perf_counter()
     install_started = mapping_finished
     install_finished = install_started
@@ -1318,14 +1597,20 @@ def run_one(
     ping_started = verification_started
     ping_finished = ping_started
     iperf_started = ping_finished
+    failure_stage = ""
+    current_stage = "PREPARATION"
     try:
         if preparation_error is not None:
             raise preparation_error
+        current_stage = "ROUTE_INSTALLATION"
         install_started = time.perf_counter()
-        route_commands = topology.install_task_routes()
+        control_messages, rules_installed = topology.install_deployment_plan(
+            deployment_plan
+        )
         install_finished = time.perf_counter()
         activation_finished = time.perf_counter()
         verification_started = activation_finished
+        current_stage = "PING_VERIFICATION"
         ping_started = verification_started
         remaining_ping = list(edges)
         final_ping: dict[str, dict[str, object]] = {}
@@ -1369,6 +1654,7 @@ def run_one(
         ping_passed = sum(bool(item["passed"]) for item in final_ping.values())
         iperf_started = ping_finished
         if ping_passed == len(edges):
+            current_stage = "IPERF3_VERIFICATION"
             remaining_iperf = list(edges)
             final_iperf: dict[str, dict[str, object]] = {}
             for attempt in range(1, max_attempts + 1):
@@ -1417,6 +1703,7 @@ def run_one(
         verified_at = time.perf_counter()
         success = ping_passed == len(edges) and iperf_passed == len(edges)
         if not success:
+            failure_stage = "DATA_PLANE_VERIFICATION"
             failure_reason = f"data_plane_verification_failed:ping={ping_passed}/{len(edges)}:iperf3={iperf_passed}/{len(edges)}"
     except Exception as error:
         verified_at = time.perf_counter()
@@ -1429,6 +1716,7 @@ def run_one(
         ping_finished = max(ping_finished, ping_started)
         iperf_started = max(iperf_started, ping_finished)
         success = False
+        failure_stage = current_stage
         failure_reason = f"{type(error).__name__}:{error}"
     finally:
         background_result = topology.stop_background_traffic(background)
@@ -1447,14 +1735,15 @@ def run_one(
         run_sequence=run_sequence,
         block_index=block_index,
         order_position=order_position,
+        method_order_position=method_order_position,
         seed=seed,
         method_id=method_id,
         method_label=method_labels[method_id],
         num_agents=num_agents,
         num_gateways=topology.num_gateways,
         num_business_edges=len(edges),
-        control_messages=route_commands,
-        rules_installed=route_commands,
+        control_messages=control_messages,
+        rules_installed=rules_installed,
         scenario_fingerprint=scenario_fingerprint(num_agents, topology.num_gateways, edges),
         result_mode="real_linux_netns_veth_tc_data_plane",
         configuration_sha256=_configuration_sha256(config),
@@ -1476,7 +1765,11 @@ def run_one(
         ping_verification_latency_s=ping_finished - ping_started,
         iperf3_verification_latency_s=verified_at - iperf_started,
         verification_latency_s=verified_at - verification_started,
-        verified_formation_latency_s=verified_at - task_received,
+        verified_formation_latency_s=measured_formation_latency(
+            task_received_at=task_received,
+            verified_at=verified_at,
+            failure_stage=failure_stage,
+        ),
         ping_edges_total=len(edges),
         ping_edges_passed=ping_passed,
         ping_attempts=ping_attempts,
@@ -1502,6 +1795,8 @@ def run_one(
         background_utilization=background.utilization,
         background_target_mbps=background.target_mbps,
         tc_profile_count=len(profiles),
+        failure_stage=failure_stage,
+        formation_timing_valid=failure_stage != "PREPARATION",
         formation_failed=not success,
         success=success,
         failure_reason=failure_reason,
@@ -1512,6 +1807,7 @@ def run_one(
             "run_sequence": run_sequence,
             "block_index": block_index,
             "order_position": order_position,
+            "method_order_position": method_order_position,
             "seed": seed,
             "method_id": method_id,
             "num_agents": num_agents,
@@ -1522,7 +1818,9 @@ def run_one(
         for timestamp, stage, details in (
             (
                 background_prepared_at,
-                "BACKGROUND_PREPARED",
+                "BACKGROUND_PREPARATION_FAILED"
+                if preparation_error is not None
+                else "BACKGROUND_PREPARED",
                 {
                     "enabled": background.enabled,
                     "source_gateway_index": background.source_gateway_index,
@@ -1559,7 +1857,15 @@ def run_one(
                 install_started,
                 "ROUTE_INSTALL_STARTED",
                 {
-                    "route_commands": route_commands,
+                    "control_messages": control_messages,
+                    "rules_installed": rules_installed,
+                    "deployment_batches": [
+                        {
+                            "label": batch.label,
+                            "command_count": len(batch.commands),
+                        }
+                        for batch in deployment_plan.batches
+                    ],
                     "commands": topology.last_install_commands,
                 },
             ),
@@ -1651,14 +1957,15 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
     rows: list[NetnsFormationRun] = []
     events: list[dict[str, object]] = []
     task_sizes = tuple(int(value) for value in config["simulation"]["task_sizes"])
-    schedule = build_counterbalanced_schedule(task_sizes, seeds)
+    schedule = build_experiment_schedule(config, seeds)
     methods = tuple(config.get("methods", ("proposed",)))
     if methods not in {("proposed",), ("proposed", "cspf", "global_sfc_embedding")}:
         raise ValueError("canonical Exp1 requires proposed,cspf,global_sfc_embedding")
     for scheduled_run in schedule:
         # Recreating the process topology makes size-order counterbalancing
         # explicit and prevents qdisc state from leaking across size points.
-        for method_offset, method_id in enumerate(methods):
+        method_order = counterbalanced_method_order(methods, scheduled_run.seed)
+        for method_offset, method_id in enumerate(method_order):
             with ProcessNetnsTopology(
                 scheduled_run.num_agents, int(config["task"]["num_gateways"])
             ) as topology:
@@ -1666,6 +1973,7 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
                     "run_sequence": (scheduled_run.run_sequence - 1) * len(methods) + method_offset + 1,
                     "block_index": scheduled_run.block_index,
                     "order_position": scheduled_run.order_position,
+                    "method_order_position": method_offset,
                 }
                 if len(methods) > 1:
                     kwargs["method_id"] = method_id
@@ -1675,7 +1983,16 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
                 )
                 rows.append(row)
                 events.extend(run_events)
-                print(f"{row.run_id}: success={row.success} T_form={row.verified_formation_latency_s:.6f}s", flush=True)
+                latency = (
+                    f"{row.verified_formation_latency_s:.6f}s"
+                    if row.verified_formation_latency_s is not None
+                    else "N/A"
+                )
+                print(
+                    f"{row.run_id}: success={row.success} "
+                    f"failure_stage={row.failure_stage or 'NONE'} T_form={latency}",
+                    flush=True,
+                )
     _write_csv(raw_dir / "runs.csv", rows)
     _write_jsonl(raw_dir / "events.jsonl", events)
     metadata = {
@@ -1699,6 +2016,7 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
         "methods": list(methods),
         "schedule": [asdict(item) for item in schedule],
         "schedule_policy": "five-seed blocks with Latin task-size rotation",
+        "method_schedule_policy": "paired-seed deterministic Latin rotation",
     }
     (raw_dir / "measurement_scope.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
@@ -1710,49 +2028,92 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
 def _plan_canonical_formation(
     method_id: str, edges: Sequence[FormationEdge], num_gateways: int
 ) -> dict[str, object]:
-    """Execute deterministic baseline planning before the shared netns backend.
-
-    The returned plan is audit evidence; every method subsequently uses the
-    identical route installer and ping/iperf3 verifier.
-    """
+    """Return deterministic planner evidence independent of kernel execution."""
+    ordered = _ordered_formation_edges(method_id, edges, num_gateways)
     if method_id == "proposed":
-        ordered = sorted(edges, key=lambda item: (item.source_index // num_gateways, item.edge_id))
         policy = "task_dag_batch_parallel_deployment"
-        chains = 0
+        chains = ()
     elif method_id == "cspf":
-        ordered = sorted(
-            edges,
-            key=lambda item: (
-                abs((item.target_index % num_gateways) - (item.source_index % num_gateways)),
-                item.edge_id,
-            ),
-        )
         policy = "failed_or_insufficient_links_pruned_then_deterministic_te_shortest_path"
-        chains = 0
-    else:
-        outgoing = {index: [] for index in range(max((e.target_index for e in edges), default=-1) + 1)}
-        incoming = {index: 0 for index in outgoing}
-        for edge in edges:
-            outgoing.setdefault(edge.source_index, []).append(edge)
-            incoming[edge.target_index] = incoming.get(edge.target_index, 0) + 1
-        chains_list: list[tuple[str, ...]] = []
-        def walk(node: int, path: tuple[str, ...]) -> None:
-            next_edges = sorted(outgoing.get(node, ()), key=lambda item: item.edge_id)
-            if not next_edges:
-                chains_list.append(path)
-            for edge in next_edges:
-                walk(edge.target_index, path + (edge.edge_id,))
-        for source in sorted(key for key, degree in incoming.items() if degree == 0):
-            walk(source, ())
-        ordered = sorted(edges, key=lambda item: item.edge_id)
+        chains = ()
+    elif method_id == "global_sfc_embedding":
         policy = "task_dag_source_to_sink_chain_embedding_heuristic"
-        chains = len(chains_list)
+        chains = _service_chains(edges)
+    else:
+        raise ValueError(f"unsupported canonical Exp1 method: {method_id}")
     return {
         "planning_policy": policy,
         "tie_break": "canonical_edge_id",
         "planned_edge_count": len(ordered),
-        "service_chain_count": chains,
+        "ordered_edge_ids": [edge.edge_id for edge in ordered],
+        "service_chain_count": len(chains),
     }
+
+
+def _ordered_formation_edges(
+    method_id: str, edges: Sequence[FormationEdge], num_gateways: int
+) -> tuple[FormationEdge, ...]:
+    if method_id == "proposed":
+        return tuple(
+            sorted(
+                edges,
+                key=lambda item: (
+                    item.source_index % num_gateways,
+                    item.target_index % num_gateways,
+                    item.edge_id,
+                ),
+            )
+        )
+    if method_id == "cspf":
+        return tuple(
+            sorted(
+                edges,
+                key=lambda item: (
+                    item.source_index % num_gateways != item.target_index % num_gateways,
+                    abs(
+                        (item.target_index % num_gateways)
+                        - (item.source_index % num_gateways)
+                    ),
+                    item.edge_id,
+                ),
+            )
+        )
+    if method_id == "global_sfc_embedding":
+        return tuple(sorted(edges, key=lambda item: item.edge_id))
+    raise ValueError(f"unsupported canonical Exp1 method: {method_id}")
+
+
+def _service_chains(
+    edges: Sequence[FormationEdge],
+) -> tuple[tuple[FormationEdge, ...], ...]:
+    """Return a deterministic edge-disjoint chain cover of the Task DAG."""
+    ordered = tuple(sorted(edges, key=lambda item: item.edge_id))
+    incoming = {edge.target_index for edge in ordered}
+    starts = [edge for edge in ordered if edge.source_index not in incoming]
+    starts.extend(edge for edge in ordered if edge not in starts)
+    outgoing: dict[int, list[FormationEdge]] = {}
+    for edge in ordered:
+        outgoing.setdefault(edge.source_index, []).append(edge)
+    used: set[str] = set()
+    chains: list[tuple[FormationEdge, ...]] = []
+    for start in starts:
+        if start.edge_id in used:
+            continue
+        chain: list[FormationEdge] = []
+        current = start
+        while current.edge_id not in used:
+            used.add(current.edge_id)
+            chain.append(current)
+            remaining = [
+                edge
+                for edge in outgoing.get(current.target_index, ())
+                if edge.edge_id not in used
+            ]
+            if not remaining:
+                break
+            current = remaining[0]
+        chains.append(tuple(chain))
+    return tuple(chains)
 
 
 def _ping_template(config: dict[str, Any]) -> str:
@@ -1858,23 +2219,112 @@ def _parse_seeds(value: str) -> tuple[int, ...]:
     return tuple(int(item) for item in value.split(",") if item.strip())
 
 
+def measured_formation_latency(
+    *, task_received_at: float, verified_at: float, failure_stage: str
+) -> float | None:
+    if failure_stage == "PREPARATION":
+        return None
+    return verified_at - task_received_at
+
+
+def formal_run_exit_code(
+    config: Mapping[str, object],
+    rows: Sequence[object],
+    *,
+    seeds: Sequence[int],
+    require_all_success: bool = False,
+) -> int:
+    if (
+        config.get("experiment", {}).get("phase") != "formal"  # type: ignore[union-attr]
+        and not require_all_success
+    ):
+        return 0
+    simulation = config["simulation"]  # type: ignore[index]
+    task_sizes = simulation["task_sizes"]  # type: ignore[index]
+    methods = config.get("methods", ("proposed",))
+    expected = len(task_sizes) * len(seeds) * len(methods)  # type: ignore[arg-type]
+    if len(rows) != expected:
+        return 1
+    return int(any(not bool(getattr(row, "success", False)) for row in rows))
+
+
 def _inside_user_namespace() -> bool:
     return os.environ.get("WCNC_EXP1_INSIDE_USERNS") == "1"
+
+
+def _network_namespace_inode() -> int:
+    return os.stat("/proc/self/ns/net").st_ino
+
+
+def _init_network_namespace_inode() -> int:
+    return os.stat("/proc/1/ns/net").st_ino
+
+
+def _network_interface_names() -> set[str]:
+    return {path.name for path in Path("/sys/class/net").iterdir()}
+
+
+def validate_isolated_outer_namespace(
+    environment: Mapping[str, str] | None = None,
+    *,
+    current_inode: int | None = None,
+    init_inode: int | None = None,
+    interface_names: set[str] | None = None,
+) -> None:
+    values = os.environ if environment is None else environment
+    if values.get("WCNC_EXP1_INSIDE_USERNS") != "1":
+        raise RuntimeError("Exp1 outer namespace sentinel is missing")
+    parent_value = values.get("WCNC_EXP1_PARENT_NETNS_INODE")
+    if not parent_value:
+        raise RuntimeError("Exp1 outer namespace provenance is missing; do not set the sentinel manually")
+    try:
+        parent_inode = int(parent_value)
+    except ValueError as error:
+        raise RuntimeError("Exp1 outer namespace provenance is invalid") from error
+    actual_inode = _network_namespace_inode() if current_inode is None else current_inode
+    if actual_inode == parent_inode:
+        raise RuntimeError("Exp1 outer network namespace is not isolated from its launcher")
+    pid_one_inode = (
+        _init_network_namespace_inode() if init_inode is None else init_inode
+    )
+    if actual_inode == pid_one_inode:
+        raise RuntimeError("Exp1 outer network namespace still matches PID 1")
+    actual_interfaces = (
+        _network_interface_names() if interface_names is None else interface_names
+    )
+    if actual_interfaces != {"lo"}:
+        raise RuntimeError(
+            "Exp1 outer network namespace is not fresh; expected only lo, got "
+            + ",".join(sorted(actual_interfaces))
+        )
+
+
+def namespace_reexec_command(
+    argv: Sequence[str], *, euid: int, python: str
+) -> tuple[str, ...]:
+    namespace_options = (
+        ("--net", "--fork")
+        if euid == 0
+        else ("--user", "--map-root-user", "--net", "--fork")
+    )
+    return (
+        "unshare",
+        *namespace_options,
+        python,
+        "-m",
+        "experiments.exp1_netns_verified_formation",
+        *argv,
+    )
 
 
 def _reexec_in_user_namespace(argv: Sequence[str]) -> int:
     environment = dict(os.environ)
     environment["WCNC_EXP1_INSIDE_USERNS"] = "1"
-    command = (
-        "unshare",
-        "--user",
-        "--map-root-user",
-        "--net",
-        "--fork",
-        sys.executable,
-        "-m",
-        "experiments.exp1_netns_verified_formation",
-        *argv,
+    environment["WCNC_EXP1_PARENT_NETNS_INODE"] = str(_network_namespace_inode())
+    command = namespace_reexec_command(
+        argv,
+        euid=os.geteuid(),
+        python=sys.executable,
     )
     return subprocess.run(command, env=environment, check=False).returncode
 
@@ -1886,6 +2336,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seeds", default="")
     parser.add_argument("--task-sizes", default="")
     parser.add_argument("--methods", default="")
+    parser.add_argument(
+        "--require-all-success",
+        action="store_true",
+        help="return non-zero when a smoke/pilot trial fails or is missing",
+    )
     return parser
 
 
@@ -1906,9 +2361,18 @@ def main() -> None:
     if not _inside_user_namespace():
         return_code = _reexec_in_user_namespace(sys.argv[1:])
         raise SystemExit(return_code)
+    validate_isolated_outer_namespace()
     rows = run_experiment(config, Path(args.output_dir), seeds)
     successful = sum(row.success for row in rows)
     print(f"Exp1 netns completed: {successful}/{len(rows)} successful runs")
+    exit_code = formal_run_exit_code(
+        config,
+        rows,
+        seeds=seeds,
+        require_all_success=args.require_all_success,
+    )
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

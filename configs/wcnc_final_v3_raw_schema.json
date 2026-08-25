@@ -17,6 +17,8 @@
     "success": {"type": "boolean"},
     "timeout": {"type": "boolean"},
     "failure_reason": {"type": "string"},
+    "failure_stage": {"type": ["string", "null"]},
+    "formation_timing_valid": {"type": ["boolean", "null"]},
     "pre_verification_correct_decision": {"type": ["boolean", "null"]},
     "pre_verification_feasible": {"type": ["boolean", "null"]},
     "unsafe_proposal_before_verification": {"type": ["boolean", "null"]},

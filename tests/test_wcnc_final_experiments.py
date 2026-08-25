@@ -203,6 +203,7 @@ class RealFormationScenarioTests(unittest.TestCase):
                 SimpleNamespace(
                     run_id=f"{num_agents}:{seed}",
                     success=True,
+                    failure_stage="",
                     verified_formation_latency_s=0.0,
                 ),
                 [],
@@ -243,6 +244,7 @@ class RealFormationScenarioTests(unittest.TestCase):
                                 "run_sequence": len(expected) + 1,
                                 "block_index": block_index,
                                 "order_position": order_position,
+                                "method_order_position": 0,
                             },
                         )
                     )
@@ -270,8 +272,32 @@ class RealFormationScenarioTests(unittest.TestCase):
                 traffic.target_up0_rx_bytes_after = 235
                 return traffic
 
-            def install_task_routes(self) -> int:
-                return 1
+            def plan_task_routes(
+                self, method_id: str, edges: object, **_kwargs: object
+            ) -> exp1_netns.FormationDeploymentPlan:
+                edge_ids = tuple(edge.edge_id for edge in edges)
+                command = exp1_netns.DeploymentCommand(
+                    "outer", None, ("ip", "route", "replace", "default", "dev", "lo")
+                )
+                return exp1_netns.FormationDeploymentPlan(
+                    method_id=method_id,
+                    planning_policy="test_fixture",
+                    tie_break="canonical_edge_id",
+                    ordered_edge_ids=edge_ids,
+                    service_chain_count=0,
+                    planning_work_units=len(edge_ids),
+                    batches=(exp1_netns.DeploymentBatch("fixture", (command,)),),
+                )
+
+            def install_deployment_plan(
+                self, plan: exp1_netns.FormationDeploymentPlan
+            ) -> tuple[int, int]:
+                self.last_install_commands = [
+                    {"namespace": command.namespace, "command": list(command.argv)}
+                    for batch in plan.batches
+                    for command in batch.commands
+                ]
+                return plan.control_messages, plan.rules_installed
 
             def verify_ping(self, edges: object, **_kwargs: object) -> tuple[int, list[dict[str, object]]]:
                 rows = [

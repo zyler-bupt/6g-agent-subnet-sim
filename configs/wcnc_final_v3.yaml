@@ -11,8 +11,16 @@ formal:
   exp2_exp4_seeds: "0:99"
 
 exp1:
+  formal_config: configs/exp1_netns_verified_formation_v3.yaml
+  pilot_config: configs/exp1_netns_verified_formation_pilot_v3.yaml
   num_agents: [4, 8, 12, 16, 20]
   methods: [proposed, cspf, global_sfc_embedding]
+  deployment_policies:
+    proposed: parallel_single_batch
+    cspf: sequential_flow_batches
+    global_sfc_embedding: sequential_hop_route_then_activation_batches
+  require_isolated_outer_network_namespace: true
+  require_all_formal_trials_successful: true
   timeout_s: 45
   result_mode: measured_netns
 

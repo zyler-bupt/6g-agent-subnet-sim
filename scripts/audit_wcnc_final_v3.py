@@ -27,7 +27,10 @@ SCOPED_SOURCES = (
     "src/controller/cross_layer_coordinator.py", "src/controller/business_reconfiguration.py",
     "src/controller/paper_failure_recovery.py", "src/simulation/demand_capacity_ratio.py",
     "src/simulation/demand_capacity_ratio_v3.py",
+    "src/simulation/paper_failure_scenarios.py",
     "scripts/aggregate_wcnc_final_v3.py", "scripts/plot_wcnc_final_v3.py",
+    "scripts/normalize_wcnc_final_v3_exp1.py",
+    "scripts/run_wcnc_final_v3_remote.sh",
 )
 
 
@@ -42,7 +45,15 @@ def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
     return {
         "protocol_id": PROTOCOL_ID, "git_commit": commit,
         "source_hashes": {name: sha(repo / name) for name in SCOPED_SOURCES},
-        "config_hashes": {str(config_path): sha(config_path)},
+        "config_hashes": {
+            str(path): sha(path)
+            for path in (
+                config_path,
+                repo / "configs/exp1_netns_verified_formation_v3.yaml",
+                repo / "configs/exp1_netns_verified_formation_pilot_v3.yaml",
+                repo / "configs/wcnc_final_v3_raw_schema.json",
+            )
+        },
         "baseline_method_set": {"exp1": list(EXPERIMENT_METHODS["exp1"]), "exp2": list(EXPERIMENT_METHODS["exp2"]), "exp3": list(EXPERIMENT_METHODS["exp3"]), "exp4": EXPERIMENT_FAILURE_METHODS["exp4"]},
         "baseline_display_labels": {key: value.label for key, value in METHODS.items()},
         "adapted_references": {key: {"adapted": value.adapted, "reference": value.reference, "note": value.why_included} for key, value in METHODS.items() if value.adapted},
@@ -58,6 +69,17 @@ def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
 
 def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
     checks: dict[str, object] = {}; errors: list[str] = []
+    if "git_commit" in manifest:
+        current_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        commit_match = current_commit == manifest["git_commit"]
+        checks["git_commit_matches"] = commit_match
+        if not commit_match:
+            errors.append("git commit drift")
     current_raw = {str(path.relative_to(root)): sha(path) for path in sorted((root / "raw").glob("**/*")) if path.is_file()}
     checks["raw_hashes_match"] = current_raw == manifest["raw_artifact_hashes"]
     if not checks["raw_hashes_match"]: errors.append("raw artifact drift")

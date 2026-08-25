@@ -1,0 +1,62 @@
+experiment:
+  phase: pilot
+  frozen: false
+  protocol_id: wcnc_final_v3
+  provenance: wcnc_final_v3_exp1_pilot_protocol
+  formal_config: configs/exp1_netns_verified_formation_v3.yaml
+
+methods: [proposed, cspf, global_sfc_embedding]
+
+simulation:
+  repetitions: 5
+  seeds: "9000:9004"
+  task_sizes: [4, 8, 12, 16, 20]
+  schedule:
+    block_size: 5
+    blocks: 1
+    task_size_order: latin_rotation
+  timeout_s: 45
+  result_mode: real_linux_netns_veth_tc_data_plane
+
+task:
+  edge_ratio: 1.25
+  num_gateways: 4
+  required_throughput_mbps: 0.5
+
+traffic_control:
+  netem:
+    base_delay_ms: [5.0, 20.0]
+    jitter_ms: [1.0, 5.0]
+    packet_loss_percent: [0.0, 1.0]
+    queue_limit_packets: [100, 300]
+  htb:
+    bandwidth_mbps: [40.0, 100.0]
+  background_traffic:
+    enabled_probability: 0.30
+    utilization_range: [0.10, 0.35]
+    duration_s: 8
+    readiness_timeout_s: 2
+    minimum_payload_bytes: 65536
+    protocol: udp
+    port: 5099
+
+verification:
+  parallel: true
+  max_attempts: 2
+  retry_backoff_ms: 200
+  ping:
+    count: 3
+    timeout_s: 1
+    interval_s: 0.2
+    packet_loss_record_only: true
+    max_average_rtt_ms: 300.0
+  iperf3:
+    duration_s: 1
+    omit_s: 0
+    client_timeout_s: 6
+    base_port: 5201
+
+audit:
+  path_bottleneck:
+    relative_tolerance: 0.10
+    short_tcp_min_tolerance_mbps: 0.25
