@@ -437,7 +437,7 @@ class RegisteredV5ProtocolTests(unittest.TestCase):
             Path(config["experiment"]["output_dir"]),
         )
 
-    def test_v5_formal_config_is_frozen_from_accepted_pilot(self) -> None:
+    def test_v5_formal_binding_detects_post_pilot_source_drift(self) -> None:
         path = Path("configs/exp2_demand_capacity_ratio_v5.yaml")
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
 
@@ -446,12 +446,13 @@ class RegisteredV5ProtocolTests(unittest.TestCase):
             config["demand_capacity"]["ratios"],
             [0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.3],
         )
-        exp2_v5.validate_protocol(
-            config,
-            tuple(exp2_v5.METHOD_TO_ENGINE),
-            tuple(range(100)),
-            Path("results/exp2_demand_capacity_v5"),
-        )
+        with self.assertRaisesRegex(ValueError, "formal execution source differs"):
+            exp2_v5.validate_protocol(
+                config,
+                tuple(exp2_v5.METHOD_TO_ENGINE),
+                tuple(range(100)),
+                Path("results/exp2_demand_capacity_v5"),
+            )
 
     def test_v5_protocol_constants_do_not_reuse_v4_output(self) -> None:
         self.assertEqual(exp2_v5.GENERATOR_VERSION, "wcnc-final-gamma-v5")

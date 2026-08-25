@@ -75,6 +75,22 @@ class PaperTrial:
     control_bytes: int | None = None
     rollback_count: int | None = None
     stale_state_detected: bool | None = None
+    protocol_id: str | None = None
+    observation_fingerprint: str | None = None
+    oracle_fingerprint: str | None = None
+    true_state_schema_version: str | None = None
+    observed_state_schema_version: str | None = None
+    pre_verification_decision_correct: bool | None = None
+    pre_verification_feasible: bool | None = None
+    unsafe_proposal_before_verification: bool | None = None
+    verification_rescued: bool | None = None
+    search_timeout: bool | None = None
+    evaluated_combinations: int | None = None
+    applicable: bool | None = None
+    timeout: bool | None = None
+    affected_flow_ratio: float | None = None
+    dependency_closure_ratio: float | None = None
+    post_fault_capacity_ratio: float | None = None
 
 
 PAPER_TRIAL_FIELDS = tuple(item.name for item in fields(PaperTrial))

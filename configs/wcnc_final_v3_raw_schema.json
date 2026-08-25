@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wcnc_final_v3_raw_trial_v1",
+  "type": "object",
+  "required": [
+    "protocol_id", "seed", "method_id", "scenario_fingerprint",
+    "result_mode", "success", "timeout", "failure_reason"
+  ],
+  "properties": {
+    "protocol_id": {"const": "wcnc_final_v3"},
+    "seed": {"type": "integer"},
+    "method_id": {"type": "string"},
+    "scenario_fingerprint": {"type": "string", "minLength": 32},
+    "observation_fingerprint": {"type": ["string", "null"]},
+    "oracle_fingerprint": {"type": ["string", "null"]},
+    "result_mode": {"enum": ["measured_netns", "transactional_simulation", "deterministic_cost_model", "real_linux_netns_veth_tc_data_plane", "in_memory_transactional_control_plane_gamma_simulation"]},
+    "success": {"type": "boolean"},
+    "timeout": {"type": "boolean"},
+    "failure_reason": {"type": "string"},
+    "pre_verification_correct_decision": {"type": ["boolean", "null"]},
+    "pre_verification_feasible": {"type": ["boolean", "null"]},
+    "unsafe_proposal_before_verification": {"type": ["boolean", "null"]},
+    "verification_rescued": {"type": ["boolean", "null"]}
+  }
+}

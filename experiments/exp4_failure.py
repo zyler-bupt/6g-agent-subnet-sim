@@ -25,12 +25,9 @@ from src.simulation.paper_failure_scenarios import (
 )
 
 
-MAIN_FAILURE_POINTS = (
-    ("agent_failure", 1.0),
-    ("link_failure", 1.0),
-    ("capacity_degradation", 0.30),
-)
-CAPACITY_REDUCTION_POINTS = (10, 20, 30, 40, 50)
+LINK_AFFECTED_FLOW_RATIOS = (0.03, 0.06, 0.10, 0.15, 0.25)
+AGENT_DEPENDENCY_CLOSURE_RATIOS = (0.1, 0.2, 0.3, 0.4, 0.5)
+CAPACITY_RATIOS = (1.1, 1.0, 0.9, 0.75, 0.6)
 
 
 async def run_exp4(
@@ -39,7 +36,10 @@ async def run_exp4(
     *,
     seeds: tuple[int, ...] | None = None,
     event_ids: tuple[int, ...] | None = None,
-    capacity_reductions: tuple[int, ...] = CAPACITY_REDUCTION_POINTS,
+    link_ratios: tuple[float, ...] = LINK_AFFECTED_FLOW_RATIOS,
+    agent_ratios: tuple[float, ...] = AGENT_DEPENDENCY_CLOSURE_RATIOS,
+    capacity_ratios: tuple[float, ...] = CAPACITY_RATIOS,
+    capacity_reductions: tuple[int, ...] | None = None,
 ) -> list[PaperTrial]:
     """Run the final paired failure-type and capacity-stress Exp.4 grids."""
 
@@ -55,56 +55,58 @@ async def run_exp4(
         if event_ids is None
         else tuple(sorted(set(event_ids)))
     )
-    selected_reductions = tuple(sorted(set(int(value) for value in capacity_reductions)))
-    if not selected_seeds or not selected_events or not selected_reductions:
+    if capacity_reductions is not None:
+        rows: list[PaperTrial] = []
+        legacy_points = (("agent_failure", 1.0), ("link_failure", 1.0), ("capacity_degradation", 0.30))
+        for failure_type, severity in legacy_points:
+            for seed in selected_seeds:
+                for event_id in selected_events:
+                    snapshot = generate_paper_failure_snapshot(failure_type, severity, seed, event_id)
+                    rows.extend(await _run_paired_methods(selected_mode, snapshot,
+                        f"exp4:failure_type:{failure_type}:seed:{seed:04d}:event:{event_id:03d}", series="failure_type"))
+        for reduction in capacity_reductions:
+            for seed in selected_seeds:
+                for event_id in selected_events:
+                    snapshot = generate_paper_failure_snapshot("capacity_degradation", reduction / 100.0, seed, event_id)
+                    rows.extend(await _run_paired_methods(selected_mode, snapshot,
+                        f"exp4:capacity_stress:{reduction}:seed:{seed:04d}:event:{event_id:03d}", series="capacity_stress"))
+        rows.sort(key=lambda row: (row.series or "", row.failure_type or "", row.failure_severity or 0.0, row.seed, row.event_id, row.method_id))
+        write_paper_trials(output_root / "raw" / selected_mode.value / "exp4" / "trials.csv", rows)
+        return rows
+    grids = {
+        "link_failure": tuple(float(value) for value in link_ratios),
+        "agent_failure": tuple(float(value) for value in agent_ratios),
+        "capacity_degradation": tuple(float(value) for value in capacity_ratios),
+    }
+    if not selected_seeds or not selected_events or any(not values for values in grids.values()):
         raise ValueError("Exp.4 requires non-empty seeds, events, and stress points")
-    if any(value not in CAPACITY_REDUCTION_POINTS for value in selected_reductions):
-        raise ValueError("unsupported Exp.4 capacity reduction")
 
     rows: list[PaperTrial] = []
-    for failure_type, severity in MAIN_FAILURE_POINTS:
-        for seed in selected_seeds:
-            for event_id in selected_events:
-                snapshot = generate_paper_failure_snapshot(
-                    failure_type,
-                    severity,
-                    seed,
-                    event_id,
-                )
-                trial_id = (
-                    f"exp4:failure_type:{failure_type}:seed:{seed:04d}:"
-                    f"event:{event_id:03d}"
-                )
-                rows.extend(
-                    await _run_paired_methods(
-                        selected_mode,
-                        snapshot,
-                        trial_id,
-                        series="failure_type",
+    for failure_type, values in grids.items():
+        for value in values:
+            generator_severity = value
+            for seed in selected_seeds:
+                for event_id in selected_events:
+                    snapshot = generate_paper_failure_snapshot(
+                        failure_type, generator_severity, seed, event_id,
+                        capacity_ratio=(value if failure_type == "capacity_degradation" else None),
                     )
-                )
-
-    for reduction_percent in selected_reductions:
-        for seed in selected_seeds:
-            for event_id in selected_events:
-                snapshot = generate_paper_failure_snapshot(
-                    "capacity_degradation",
-                    reduction_percent / 100.0,
-                    seed,
-                    event_id,
-                )
-                trial_id = (
-                    f"exp4:capacity_stress:{reduction_percent}:seed:{seed:04d}:"
-                    f"event:{event_id:03d}"
-                )
-                rows.extend(
-                    await _run_paired_methods(
-                        selected_mode,
-                        snapshot,
-                        trial_id,
-                        series="capacity_stress",
+                    trial_id = (
+                        f"exp4:{failure_type}:{value:g}:seed:{seed:04d}:"
+                        f"event:{event_id:03d}"
                     )
-                )
+                    rows.extend(
+                        await _run_paired_methods(
+                            selected_mode,
+                            snapshot,
+                            trial_id,
+                            series={
+                                "link_failure": "affected_flow_ratio",
+                                "agent_failure": "dependency_closure_ratio",
+                                "capacity_degradation": "post_fault_capacity_ratio",
+                            }[failure_type],
+                        )
+                    )
     rows.sort(
         key=lambda row: (
             row.series or "",
@@ -170,6 +172,9 @@ def _paper_trial(
         num_gateways=len(snapshot.catalog.gateways),
         failure_type=snapshot.failure_type,
         failure_severity=snapshot.failure_severity,
+        affected_flow_ratio=snapshot.affected_flow_ratio,
+        dependency_closure_ratio=snapshot.dependency_closure_ratio,
+        post_fault_capacity_ratio=snapshot.post_fault_capacity_ratio,
         recovery_latency_ms=outcome.recovery_latency_ms,
         success=outcome.success,
         qos_satisfied=outcome.qos_satisfied,

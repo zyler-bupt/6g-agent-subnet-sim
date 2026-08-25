@@ -36,7 +36,9 @@ from src.simulation.conflict_robustness import (
 from src.simulation.conflict_scenario_generator import ConflictScenarioConfig
 
 
-METHODS = ("proposed", "independent", "adjacent", "no_verification")
+METHODS = (
+    "proposed", "sanet_dw", "weighted_sum", "independent", "adjacent", "no_verification"
+)
 
 
 async def run_case(
@@ -47,6 +49,7 @@ async def run_case(
     coordination_timeout_ms: float,
     execute_transaction: bool = True,
     post_evaluator: Callable[..., Any] = evaluate_cross_layer_combination,
+    max_combinations: int | None = None,
 ) -> tuple[RobustnessRunMetrics, list[dict[str, object]], dict[str, object]]:
     if method not in METHODS:
         raise ValueError(f"unsupported robustness method: {method}")
@@ -67,6 +70,7 @@ async def run_case(
         method,
         snapshot,
         coordination_timeout_ms,
+        max_combinations=max_combinations,
     )
     transaction = None
     post = None
@@ -204,6 +208,8 @@ async def run_case(
             "no_verification": "global_declared_score_without_feasibility",
             "independent": "layer_local_candidates",
             "adjacent": "adjacent_pair_candidates",
+            "weighted_sum": "layer_local_soft_weighted_sum",
+            "sanet_dw": "observed_state_dynamic_weight_soft_objective",
         }[method],
         selected_proposal_ids=";".join(selected_ids),
         selected_action_set=";".join(
@@ -262,7 +268,21 @@ async def run_case(
             snapshot.ground_truth.best_feasible_combination
         ),
         "post_execution_violations": list(post.violations),
+        "pre_verification_feasible": bool(
+            coordination.selected_proposals
+            and post_evaluator(snapshot.true_state, coordination.selected_proposals).feasible
+        ),
     }
+    decision["pre_verification_correct_decision"] = bool(
+        (snapshot.conflict_class != UNRESOLVABLE_CONFLICT and decision["pre_verification_feasible"])
+        or (snapshot.conflict_class == UNRESOLVABLE_CONFLICT and decision_rejected)
+    )
+    decision["unsafe_proposal_before_verification"] = bool(
+        coordination.selected_proposals and not decision["pre_verification_feasible"]
+    )
+    decision["verification_rescued"] = bool(
+        decision["unsafe_proposal_before_verification"] and not transaction_success
+    )
     if not event_rows:
         event_rows.append(
             {
@@ -412,6 +432,8 @@ def _coordinate_measured(
     method: str,
     snapshot: RobustnessScenarioSnapshot,
     timeout_ms: float,
+    *,
+    max_combinations: int | None = None,
 ) -> tuple[CoordinationResult, float, bool]:
     timed_out = False
 
@@ -427,6 +449,8 @@ def _coordinate_measured(
             method,
             snapshot.observed_state,
             snapshot.proposals,
+            max_combinations=max_combinations,
+            coordination_timeout_ms=timeout_ms,
         )
     except TimeoutError:
         timed_out = True
@@ -473,7 +497,7 @@ def _raw_combination_count(proposals) -> int:
 def _evaluated_count(method: str, proposals, result: CoordinationResult) -> int:
     if method in {"proposed", "no_verification"}:
         return result.candidate_combinations
-    if method == "independent":
+    if method in {"independent", "weighted_sum", "sanet_dw"}:
         return len(result.selected_proposals)
     counts: dict[tuple[str, str], int] = {}
     for proposal in proposals:

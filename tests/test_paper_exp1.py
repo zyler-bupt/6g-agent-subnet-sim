@@ -298,7 +298,7 @@ class PaperExp1RunnerTests(unittest.IsolatedAsyncioTestCase):
                 churn_points=(0,),
             )
 
-            self.assertEqual(len(rows), 5 * 2 * 4 * 2)
+            self.assertEqual(len(rows), 5 * 2 * 3 * 2)
             by_trial: dict[str, list] = defaultdict(list)
             for row in rows:
                 by_trial[row.trial_id].append(row)
@@ -320,9 +320,9 @@ class PaperExp1RunnerTests(unittest.IsolatedAsyncioTestCase):
             with raw_path.open(encoding="utf-8", newline="") as handle:
                 materialized = list(csv.DictReader(handle))
             self.assertEqual(len(materialized), len(rows))
-            adapted = next(row for row in materialized if row["method_id"] == "srd")
-            self.assertEqual(adapted["method_label"], "SRD")
-            self.assertEqual(adapted["method_source"], "Sequential Rule Deployment")
+            adapted = next(row for row in materialized if row["method_id"] == "global_sfc_embedding")
+            self.assertEqual(adapted["method_label"], "Global SFC Embedding (Heuristic)")
+            self.assertIn("heuristic", adapted["method_source"].lower())
             self.assertEqual(adapted["adapted"], "False")
             self.assertEqual(adapted["reconfiguration_latency_ms"], "")
 

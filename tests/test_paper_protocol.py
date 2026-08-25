@@ -48,17 +48,16 @@ class PaperProtocolTests(unittest.TestCase):
                 load_and_validate_paper_config(candidate)
 
     def test_final_method_sets_and_adaptation_metadata_are_unambiguous(self) -> None:
-        # Frozen WCNC-2027 protocol (v3): Exp1 keeps only proposed / CSPF /
-        # SFC Re-optimization; the internal ablations (proposed_without_batch,
-        # srd) are excluded from the main figure set.
+        # Canonical wcnc_final_v3: initial formation uses a global embedding
+        # baseline, not the runtime-only "re-optimization" name.
         self.assertEqual(
             EXPERIMENT_METHODS["exp1"],
-            ("proposed", "cspf", "sfc_reoptimization"),
+            ("proposed", "cspf", "global_sfc_embedding"),
         )
         self.assertEqual(METHODS["srd"].label, "SRD")
         self.assertEqual(METHODS["srd"].reference, "Sequential Rule Deployment (internal)")
         self.assertFalse(METHODS["srd"].adapted)
-        self.assertEqual(METHODS["sanet_dw"].label, "SANet*")
+        self.assertEqual(METHODS["sanet_dw"].label, "SANet-DW*")
         self.assertEqual(METHODS["netren"].label, "NetRen*")
         self.assertEqual(METHODS["netkeeper"].label, "NetKeeper*")
         self.assertFalse(METHODS["proposed"].adapted)

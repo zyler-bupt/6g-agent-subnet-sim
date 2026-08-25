@@ -7,7 +7,6 @@ from typing import Iterable, Mapping, Sequence
 from experiments.paper_protocol import EXPERIMENT_METHODS, stable_fingerprint
 from src.core.models import BusinessEdge, TaskSubnet, to_jsonable
 from src.e2e.models import VerifyResult
-from src.simulation.latency_model import formation_latency_breakdown
 from src.simulation.paper_scenarios import FormationScenarioSnapshot, PaperLink
 
 
@@ -61,12 +60,12 @@ class FormationOutcome:
     formation_latency_ms: float
     # Explicit five-phase breakdown (see src/simulation/latency_model.py).
     # T_form = T_ctrl + T_dispatch + T_install + T_verify + T_activate.
-    t_ctrl_ms: float = 0.0
-    t_dispatch_ms: float = 0.0
-    t_install_ms: float = 0.0
-    t_verify_ms: float = 0.0
-    t_activate_ms: float = 0.0
-    deploy_mode: str = ""
+    t_ctrl_ms: float
+    t_dispatch_ms: float
+    t_install_ms: float
+    t_verify_ms: float
+    t_activate_ms: float
+    deploy_mode: str
     success: bool
     qos_satisfied: bool
     failure_reason: str
@@ -198,27 +197,15 @@ async def run_formation_method(
     churn_probability: float = 0.0,
     churn_trace: Sequence[ChurnEvent] | None = None,
 ) -> FormationOutcome:
-    if method_id not in EXPERIMENT_METHODS["exp1"]:
+    if method_id not in {
+        *EXPERIMENT_METHODS["exp1"], "proposed_without_batch", "srd", "sfc_reoptimization"
+    }:
         raise ValueError(f"unsupported Exp.1 method: {method_id}")
     if not 0.0 <= churn_probability <= 1.0:
         raise ValueError("churn_probability must be in [0, 1]")
 
     paths = _edge_paths(snapshot)
     costs = _primitive_costs(snapshot, paths)
-    edges_on_gateway = _gateway_edges(snapshot.task.biz_edges, paths)
-    path_lengths = {
-        edge.edge_id: len(paths[edge.edge_id]) for edge in snapshot.task.biz_edges
-    }
-    latency_breakdown = formation_latency_breakdown(
-        method_id=method_id,
-        num_agents=len(snapshot.task.app_agents),
-        num_edges=len(snapshot.task.biz_edges),
-        gateway_ids=snapshot.topology.gateway_ids,
-        edge_ids=[edge.edge_id for edge in snapshot.task.biz_edges],
-        edges_on_gateway=edges_on_gateway,
-        path_lengths=path_lengths,
-        topology_seed_str=snapshot.topology.fingerprint,
-    )
     shared_churn = tuple(churn_trace) if churn_trace is not None else _generate_churn(
         snapshot,
         costs,
@@ -274,18 +261,36 @@ async def run_formation_method(
         ),
         default=trace.total_ms,
     )
+    controller_kinds = {
+        "dag_analysis", "supporting_agent_binding", "endpoint_resolution",
+        "path_compute", "rule_generate",
+    }
+    t_ctrl_ms = sum(
+        item.duration_ms for item in trace.operations if item.kind in controller_kinds
+    )
+    t_install_ms = _covered_duration(
+        item for item in trace.operations if item.kind == "gateway_dispatch_install_ack"
+    )
+    t_verify_ms = _covered_duration(
+        item for item in trace.operations
+        if item.kind in {"gateway_verification_report_ack", "edge_verify", "gateway_post_activation_stable_report_ack", "stable_verify"}
+    )
+    t_activate_ms = _covered_duration(
+        item for item in trace.operations if item.kind == "gateway_activate_ack"
+    )
+    t_dispatch_ms = max(0.0, stable_verify_finished_ms - t_ctrl_ms - t_install_ms - t_verify_ms - t_activate_ms)
     success = bool(metrics.networking_success and stable_qos_ok)
     return FormationOutcome(
         method_id=method_id,
         trace=trace,
-        controller_processing_latency_ms=latency_breakdown.t_ctrl_ms,
-        formation_latency_ms=latency_breakdown.t_form_ms,
-        t_ctrl_ms=latency_breakdown.t_ctrl_ms,
-        t_dispatch_ms=latency_breakdown.t_dispatch_ms,
-        t_install_ms=latency_breakdown.t_install_ms,
-        t_verify_ms=latency_breakdown.t_verify_ms,
-        t_activate_ms=latency_breakdown.t_activate_ms,
-        deploy_mode=latency_breakdown.deploy_mode,
+        controller_processing_latency_ms=t_ctrl_ms,
+        formation_latency_ms=stable_verify_finished_ms,
+        t_ctrl_ms=t_ctrl_ms,
+        t_dispatch_ms=t_dispatch_ms,
+        t_install_ms=t_install_ms,
+        t_verify_ms=t_verify_ms,
+        t_activate_ms=t_activate_ms,
+        deploy_mode=trace.stage_mode,
         success=success,
         qos_satisfied=success,
         failure_reason=metrics.failure_reason,
@@ -309,6 +314,19 @@ async def run_formation_method(
         task_received_at=0.0,
         stable_verify_finished_at=stable_verify_finished_ms / 1000.0,
     )
+
+
+def _covered_duration(operations: Iterable[FormationOperation]) -> float:
+    intervals = sorted((item.start_ms, item.finish_ms) for item in operations)
+    if not intervals:
+        return 0.0
+    total = 0.0; start, finish = intervals[0]
+    for next_start, next_finish in intervals[1:]:
+        if next_start <= finish:
+            finish = max(finish, next_finish)
+        else:
+            total += finish - start; start, finish = next_start, next_finish
+    return total + finish - start
 
 
 def _primitive_costs(

@@ -52,6 +52,9 @@ METHOD_STYLES = {
         "w/o Global Verification", "#8064A2", (0, (3.0, 1.5)), "v", "--"
     ),
     "cspf": MethodStyle("CSPF", "#e74c3c", "--", "s", "//"),
+    "global_sfc_embedding": MethodStyle(
+        "Global SFC Embedding", "#8e44ad", "-.", "^", "xx"
+    ),
 }
 
 LINEWIDTH = 1.8

@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from experiments.paper_protocol import EXPERIMENT_METHODS
 from scripts.aggregate_results import aggregate_experiment
 
 
@@ -17,6 +16,12 @@ FIGURE_STEMS = (
     "Fig3_Elasticity",
     "Fig4_Recovery",
 )
+HISTORICAL_METHODS = {
+    "exp1": {"proposed", "proposed_without_batch", "cspf", "srd"},
+    "exp2": {"proposed", "sanet_dw", "adjacent_layer", "independent"},
+    "exp3": {"proposed", "netren", "local_only", "full_rebuild"},
+    "exp4": {"proposed", "full_rebuild", "netkeeper", "cspf"},
+}
 
 
 class PaperResultIntegrityTests(unittest.TestCase):
@@ -34,7 +39,7 @@ class PaperResultIntegrityTests(unittest.TestCase):
                     expected = RESULTS / "aggregated" / "paper" / experiment / "summary.csv"
                     self.assertEqual(reproduced.read_bytes(), expected.read_bytes())
 
-    def test_every_paper_instance_has_the_complete_method_set(self) -> None:
+    def test_every_historical_paper_instance_has_its_archived_method_set(self) -> None:
         expected_rows = {"exp1": 7800, "exp2": 4200, "exp3": 3000, "exp4": 4800}
         for experiment, row_count in expected_rows.items():
             with self.subTest(experiment=experiment):
@@ -48,7 +53,7 @@ class PaperResultIntegrityTests(unittest.TestCase):
                     paired.setdefault(row["trial_id"], set()).add(row["method_id"])
                 self.assertTrue(
                     all(
-                        methods == set(EXPERIMENT_METHODS[experiment])
+                        methods == HISTORICAL_METHODS[experiment]
                         for methods in paired.values()
                     )
                 )

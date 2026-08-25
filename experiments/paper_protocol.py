@@ -3,12 +3,15 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+
+PROTOCOL_ID = "wcnc_final_v3"
 
 
 class RunMode(str, Enum):
@@ -108,6 +111,56 @@ EXPECTED_PAPER_CONFIG: Mapping[str, Any] = {
 }
 
 
+EXPECTED_WCNC_V3_CONFIG: Mapping[str, Any] = {
+    "protocol": {
+        "id": PROTOCOL_ID,
+        "frozen": True,
+        "canonical_root": "results/paper/wcnc_final_v3",
+    },
+    "pilot": {"seeds": "9000:9019"},
+    "formal": {"exp1_seeds": "0:49", "exp2_exp4_seeds": "0:99"},
+    "exp1": {
+        "num_agents": [4, 8, 12, 16, 20],
+        "methods": ["proposed", "cspf", "global_sfc_embedding"],
+        "timeout_s": 45,
+        "result_mode": "measured_netns",
+    },
+    "exp2": {
+        "gamma": [0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.3],
+        "methods": ["proposed", "sanet_dw", "weighted_sum", "independent"],
+        "epsilon_min": 0.85,
+        "epsilon_max": 1.15,
+        "epsilon_distribution": "bounded_centered_seed_fixed",
+        "max_combinations": 4096,
+        "coordination_timeout_ms": 10000,
+        "result_mode": "transactional_simulation",
+    },
+    "exp3": {
+        "affected_dependency_scope_percent": [10, 20, 30, 40, 50],
+        "methods": ["proposed", "netren", "local_only", "full_rebuild"],
+        "result_mode": "transactional_simulation",
+    },
+    "exp4": {
+        "link_affected_flow_ratio": [0.03, 0.06, 0.1, 0.15, 0.25],
+        "agent_dependency_closure_ratio": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "capacity_ratio": [1.1, 1.0, 0.9, 0.75, 0.6],
+        "methods_by_failure": {
+            "link_failure": ["proposed", "cspf", "full_rebuild"],
+            "agent_failure": ["proposed", "sfc_restoration", "full_rebuild"],
+            "capacity_degradation": ["proposed", "te_reopt", "full_rebuild"],
+        },
+        "result_mode": "transactional_simulation",
+    },
+    "statistics": {
+        "bootstrap_iterations": 5000,
+        "cluster": "seed",
+        "rate_interval": "wilson_95",
+        "continuous_interval": "topology_cluster_bootstrap_95",
+        "comparison_interval": "paired_topology_cluster_bootstrap_95",
+    },
+}
+
+
 def mode_spec(mode: str | RunMode) -> ModeSpec:
     return _MODE_SPECS[RunMode(mode)]
 
@@ -142,6 +195,21 @@ def load_and_validate_paper_config(
     return loaded
 
 
+def load_and_validate_wcnc_v3_config(
+    path: str | Path = Path("configs/wcnc_final_v3.yaml"),
+) -> dict[str, Any]:
+    config_path = Path(path)
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise RuntimeError("wcnc_final_v3 protocol drift: configuration is not a mapping")
+    if stable_fingerprint(loaded) != stable_fingerprint(EXPECTED_WCNC_V3_CONFIG):
+        raise RuntimeError(
+            "wcnc_final_v3 protocol drift: configs/wcnc_final_v3.yaml no longer "
+            "matches the frozen canonical protocol"
+        )
+    return loaded
+
+
 @dataclass(frozen=True)
 class MethodMetadata:
     """Per-method metadata required by the WCNC-2027 final protocol (v3 §6).
@@ -162,6 +230,7 @@ class MethodMetadata:
     # where it appears in the paper: "main" | "appendix" | "ablation" | "pending"
     status: str = "main"
     adapted: bool = False
+    experiment_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 def _method(
@@ -173,9 +242,17 @@ def _method(
     *,
     status: str = "main",
     adapted: bool = False,
+    experiment_labels: Mapping[str, str] | None = None,
 ) -> MethodMetadata:
     return MethodMetadata(
-        method_id, label, category, reference, why_included, status, adapted
+        method_id,
+        label,
+        category,
+        reference,
+        why_included,
+        status,
+        adapted,
+        dict(experiment_labels or {}),
     )
 
 
@@ -192,7 +269,7 @@ def _method(
 #                implemented; runner uses an executable placeholder
 METHODS: Mapping[str, MethodMetadata] = {
     "proposed": _method(
-        "proposed", "Proposed", "proposed",
+        "proposed", "Ours", "proposed",
         "This work (task-driven cross-layer agent subnet)",
         "Task-aware cross-layer subnet compilation with verified execution "
         "and parallel gateway deployment. The method under evaluation.",
@@ -205,10 +282,14 @@ METHODS: Mapping[str, MethodMetadata] = {
         status="ablation",
     ),
     "cspf": _method(
-        "cspf", "CSPF", "literature-inspired",
+        "cspf", "CSPF Recovery", "literature-inspired",
         "Constraint-based Shortest Path First (RFC 2702 / MPLS-TE)",
         "Network-centric constrained path computation. Represents the "
         "traditional routing-oriented solution for Exp1.",
+        experiment_labels={
+            "exp1": "CSPF-based Formation",
+            "exp4": "CSPF Recovery",
+        },
     ),
     "srd": _method(
         "srd", "SRD", "internal-ablation",
@@ -230,9 +311,19 @@ METHODS: Mapping[str, MethodMetadata] = {
         "Complete service-chain reconstruction: recomputes path, rule set and "
         "deployment order on every change. Exp1 baseline for full recompute.",
     ),
+    "global_sfc_embedding": _method(
+        "global_sfc_embedding",
+        "Global SFC Embedding (Heuristic)",
+        "strategy",
+        "Deterministic global service-chain embedding heuristic",
+        "Converts Task-DAG source-to-sink paths to service chains and jointly "
+        "selects healthy Agent placements and constrained network paths.",
+    ),
     "sanet_dw": _method(
-        "sanet_dw", "SANet*", "literature-inspired",
-        "SANet (semantic-aware agent network), adapted",
+        "sanet_dw", "SANet-DW*", "literature-inspired",
+        "SANet-inspired Dynamic-Weight Coordination (adapted); "
+        "IEEE TMC 2026, DOI 10.1109/TMC.2026.3691804; upstream "
+        "60d9b3c1db02aa2018e67b0020a0feb57d9e3d73",
         "Closest existing semantic-aware agent coordination work. Literature "
         "baseline for Exp2 cross-layer coordination.",
         adapted=True,
@@ -245,20 +336,22 @@ METHODS: Mapping[str, MethodMetadata] = {
         status="ablation",
     ),
     "independent": _method(
-        "independent", "Independent", "strategy",
+        "independent", "Independent Layer Optimization", "strategy",
         "Independent layer optimization (oracle baseline)",
         "Each layer optimized independently with no cross-layer interaction. "
         "Shows why coordination is necessary (Exp2).",
     ),
     "weighted_sum": _method(
-        "weighted_sum", "Weighted-Sum", "literature-inspired",
+        "weighted_sum", "Weighted-Sum Coordination", "strategy",
         "Weighted-sum multi-objective optimization",
         "Classic soft cross-layer optimization baseline for Exp2: maximizes a "
         "weighted utility without hard feasibility verification.",
     ),
     "netren": _method(
         "netren", "NetRen*", "literature-inspired",
-        "NetRen (dynamic service/network reconfiguration), adapted",
+        "NetRen: Service Migration-Driven Network Renascence with Synthesizing "
+        "Updated Configuration (ASPLOS 2024), adapted; "
+        "DOI 10.1145/3620666.3651365",
         "Represents dynamic service/network reconfiguration. Literature "
         "baseline for Exp3 elastic reconfiguration.",
         adapted=True,
@@ -306,14 +399,14 @@ METHODS: Mapping[str, MethodMetadata] = {
         status="appendix",
     ),
     "te_reopt": _method(
-        "te_reopt", "TE-Reopt", "literature-inspired",
+        "te_reopt", "TE Re-optimization", "strategy",
         "Traffic Engineering Re-optimization",
         "TE re-optimization baseline for physical-capacity-degradation "
         "recovery (Exp4). Redistributes network resources without task-DAG "
         "semantic awareness, so it may modify unnecessary paths.",
     ),
     "sfc_restoration": _method(
-        "sfc_restoration", "SFC-Restore", "literature-inspired",
+        "sfc_restoration", "SFC Restoration", "strategy",
         "SFC Restoration",
         "Service-chain restoration baseline for agent-failure recovery (Exp4). "
         "Replaces the failed function and rebuilds the chain around it; correct "
@@ -332,9 +425,9 @@ METHODS: Mapping[str, MethodMetadata] = {
 #   Exp4 Recovery    : heterogeneous failures, compared PER failure type
 #                       (see EXPERIMENT_FAILURE_METHODS) -- never all together.
 EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
-    "exp1": ("proposed", "cspf", "sfc_reoptimization"),
-    "exp2": ("proposed", "independent", "weighted_sum", "sanet_dw"),
-    "exp3": ("proposed", "local_only", "netren", "full_rebuild"),
+    "exp1": ("proposed", "cspf", "global_sfc_embedding"),
+    "exp2": ("proposed", "sanet_dw", "weighted_sum", "independent"),
+    "exp3": ("proposed", "netren", "local_only", "full_rebuild"),
     # Executable union of recovery strategies currently implemented (failure
     # type specific). The runner iterates EXPERIMENT_FAILURE_METHODS[exp4]
     # per failure type; this tuple is only a convenience for callers that need
@@ -358,7 +451,7 @@ EXPERIMENT_METHODS: Mapping[str, tuple[str, ...]] = {
 # near-duplicate of CSPF for our path-recovery scenario (see audit).
 EXPERIMENT_FAILURE_METHODS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "exp4": {
-        "link_failure": ("proposed", "cspf"),
+        "link_failure": ("proposed", "cspf", "full_rebuild"),
         "agent_failure": ("proposed", "sfc_restoration", "full_rebuild"),
         "capacity_degradation": ("proposed", "te_reopt", "full_rebuild"),
     }

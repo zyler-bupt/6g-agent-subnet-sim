@@ -27,6 +27,7 @@ METHOD_ALIASES = {
     "without_cross_layer_verification": "no_verification",
     "weighted_sum": "weighted_sum",
     "weighted_sum_multi_objective": "weighted_sum",
+    "sanet_dw": "sanet_dw",
     "without_application": "without_application",
     "without_transport": "without_transport",
     "without_network": "without_network",
@@ -63,6 +64,9 @@ class CrossLayerCoordinator:
         method: str,
         state: CrossLayerTaskState,
         proposals: tuple[LayerProposal, ...],
+        *,
+        max_combinations: int | None = None,
+        coordination_timeout_ms: float | None = None,
     ) -> CoordinationResult:
         normalized = METHOD_ALIASES.get(method)
         if normalized is None:
@@ -74,7 +78,13 @@ class CrossLayerCoordinator:
             elapsed = (self.clock() - started) * 1000.0
             return replace(result, coordination_latency_ms=max(0.0, elapsed))
         if normalized == "proposed":
-            result = self._proposed(state, proposals, normalized)
+            result = self._proposed(
+                state,
+                proposals,
+                normalized,
+                max_combinations=max_combinations,
+                coordination_timeout_ms=coordination_timeout_ms,
+            )
         elif normalized == "independent":
             result = self._independent(state, proposals, normalized)
         elif normalized == "adjacent":
@@ -83,6 +93,8 @@ class CrossLayerCoordinator:
             result = self._no_verification(state, proposals, normalized)
         elif normalized == "weighted_sum":
             result = self._weighted_sum(state, proposals, normalized)
+        elif normalized == "sanet_dw":
+            result = self._sanet_dynamic_weight(state, proposals, normalized)
         else:
             excluded = normalized.removeprefix("without_")
             filtered = tuple(
@@ -103,9 +115,21 @@ class CrossLayerCoordinator:
         state: CrossLayerTaskState,
         proposals: tuple[LayerProposal, ...],
         method: str,
+        *,
+        max_combinations: int | None = None,
+        coordination_timeout_ms: float | None = None,
     ) -> CoordinationResult:
         groups = proposal_groups(proposals)
-        combinations = tuple(product(*(groups[key] for key in sorted(groups))))
+        group_values = tuple(groups[key] for key in sorted(groups))
+        total_combinations = 1
+        for values in group_values:
+            total_combinations *= len(values)
+        budget = total_combinations if max_combinations is None else max(0, int(max_combinations))
+        deadline = (
+            None
+            if coordination_timeout_ms is None
+            else self.clock() + max(0.0, coordination_timeout_ms) / 1000.0
+        )
         common_objective = _uses_common_objective(state)
         local_best = (
             _local_objective_best(state, groups)
@@ -130,7 +154,15 @@ class CrossLayerCoordinator:
         ] = []
         rejected_combinations = 0
         reasons_by_proposal: dict[str, set[str]] = {}
-        for raw_combination in combinations:
+        evaluated_combinations = 0
+        search_timed_out = False
+        for raw_combination in product(*group_values):
+            if evaluated_combinations >= budget:
+                break
+            if deadline is not None and self.clock() >= deadline:
+                search_timed_out = True
+                break
+            evaluated_combinations += 1
             combination = tuple(raw_combination)
             result = evaluate_cross_layer_combination(state, combination)
             ids = tuple(item.proposal_id for item in combination)
@@ -186,7 +218,7 @@ class CrossLayerCoordinator:
             conflict_resolved=resolved,
             global_check_performed=True,
             pairwise_checks=0,
-            candidate_combinations=len(combinations),
+            candidate_combinations=evaluated_combinations,
             rejected_combinations=rejected_combinations,
             selected_feasibility=selected_result,
             coordination_latency_ms=0.0,
@@ -209,6 +241,9 @@ class CrossLayerCoordinator:
                     if common_objective
                     else "descending_canonical_proposal_ids"
                 ),
+                "total_combinations": total_combinations,
+                "search_budget_exhausted": evaluated_combinations < total_combinations,
+                "search_timed_out": search_timed_out,
             },
         )
 
@@ -450,11 +485,15 @@ class CrossLayerCoordinator:
         if not groups:
             return _empty_rejection(method, "no_layer_observations")
         layer_weight = {"application": 1.0, "transport": 1.0, "network": 1.0, "physical": 1.0}
+        pressure = _observed_pressure(state)
 
         def _score(proposal: LayerProposal) -> float:
-            base = proposal.utility * layer_weight.get(proposal.layer, 1.0)
-            # soft optimization: lightly favor feasibility-preserving keep actions
-            return base + (0.05 if proposal.is_keep else 0.0)
+            if _uses_common_objective(state):
+                base = -_local_layer_objective(state, proposal)[0]
+            else:
+                base = proposal.utility * layer_weight.get(proposal.layer, 1.0)
+            status_quo = 2.0 * max(0.0, 1.0 - pressure) if proposal.is_keep else 0.0
+            return base + status_quo
 
         selected = tuple(
             max(items, key=lambda item: (_score(item), item.proposal_id))
@@ -482,6 +521,63 @@ class CrossLayerCoordinator:
             details={"selection_policy": "weighted_sum_multi_objective"},
         )
 
+    def _sanet_dynamic_weight(
+        self,
+        state: CrossLayerTaskState,
+        proposals: tuple[LayerProposal, ...],
+        method: str,
+    ) -> CoordinationResult:
+        """SANet-inspired observed-state dynamic-weight soft coordination.
+
+        This adapted baseline deliberately ranks declared actions only.  It
+        never invokes the hard feasibility evaluator used by Proposed.
+        """
+        groups = proposal_groups(proposals, require_all_layers=False)
+        if not groups:
+            return _empty_rejection(method, "no_layer_observations")
+        pressure = _observed_pressure(state)
+        weights = {
+            "application": 1.0 + max(0.0, pressure - 1.0),
+            "transport": 1.0 + sum(item.retransmission_rate for item in state.transport.values()),
+            "network": 1.0 + sum(item.utilization for item in state.network.values()) / max(len(state.network), 1),
+            "physical": 1.0 + sum(item.resource_utilization for item in state.physical.values()) / max(len(state.physical), 1),
+        }
+
+        def score(item: LayerProposal) -> tuple[float, str]:
+            benefit = item.expected_qos_gain * item.confidence
+            cost = float(item.parameters.get("normalized_action_cost", item.expected_cost))
+            stress = pressure - 1.0
+            state_adaptation = (
+                -4.0 * stress
+                if item.is_keep
+                else 4.0 * stress * max(0.25, benefit)
+            )
+            return (
+                weights.get(item.layer, 1.0) * benefit - cost + state_adaptation,
+                item.proposal_id,
+            )
+
+        selected = tuple(max(items, key=score) for _, items in sorted(groups.items()))
+        selected_ids = {item.proposal_id for item in selected}
+        return CoordinationResult(
+            method=method,
+            selected_proposals=selected,
+            rejected_proposals={
+                item.proposal_id: "lower_sanet_dynamic_weight_score"
+                for item in proposals if item.proposal_id not in selected_ids
+            },
+            conflicts=(), conflict_detected=False, conflict_resolved=False,
+            global_check_performed=False, pairwise_checks=0,
+            candidate_combinations=len(selected), rejected_combinations=0,
+            selected_feasibility=None, coordination_latency_ms=0.0,
+            feasibility_latency_ms=0.0,
+            details={
+                "selection_policy": "sanet_inspired_dynamic_weight_soft_objective",
+                "weights": weights,
+                "adapted": True,
+            },
+        )
+
 
 def _local_best(
     groups: dict[tuple[str, str], tuple[LayerProposal, ...]],
@@ -496,6 +592,21 @@ def _uses_common_objective(state: CrossLayerTaskState) -> bool:
     return state.metadata.get("common_objective_version") == (
         "normalized-deficit-cost-v1"
     )
+
+
+def _observed_pressure(state: CrossLayerTaskState) -> float:
+    demands = [item.required_rate_mbps for item in state.application.values()]
+    capacities = [
+        min(
+            state.transport[key].admissible_capacity_mbps
+            if state.transport[key].admissible_capacity_mbps is not None
+            else state.transport[key].send_rate_mbps,
+            state.network[key].available_bandwidth_mbps,
+            state.physical[key].available_capacity_mbps,
+        )
+        for key in state.application
+    ]
+    return sum(demands) / max(sum(capacities), 1e-9)
 
 
 def _local_objective_best(

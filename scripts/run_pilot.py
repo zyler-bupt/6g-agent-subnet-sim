@@ -19,7 +19,12 @@ from experiments.exp1_initial_formation import run_exp1
 from experiments.exp2_conflict import run_exp2
 from experiments.exp3_business_elasticity import run_exp3
 from experiments.exp4_failure import run_exp4
-from experiments.paper_protocol import METHODS, load_and_validate_paper_config
+from experiments.paper_protocol import (
+    EXPERIMENT_FAILURE_METHODS,
+    EXPERIMENT_METHODS,
+    METHODS,
+    load_and_validate_paper_config,
+)
 from scripts.aggregate_results import aggregate_experiment
 from scripts.plot_final_paper_figures import plot_exp1, plot_exp2, plot_exp3, plot_exp4
 from scripts.sanity_check_results import SanityFinding, check_results
@@ -259,7 +264,7 @@ def _exp2_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
         "",
         f"- Raw trials: {payload['raw_trial_count']}",
         f"- Topology seeds: {payload['topology_seed_count']}",
-        f"- Oracle-solvable instances: {payload['solvable_instance_count']} / {payload['instance_count']} ({payload['solvable_rate_percent']:.1f}%)",
+        f"- Oracle-solvable instances: {payload['solvable_instance_count']} / {payload['instance_count']} ({_format_optional(payload['solvable_rate_percent'])}%)",
         f"- Sanity errors: {payload['error_count']}",
         f"- Sanity warnings: {payload['warning_count']}",
         "",
@@ -270,10 +275,10 @@ def _exp2_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
     ]
     for item in payload["method_results"]:
         lines.append(
-            f"| {item['method_label']} | {item['feasible_solution_rate_percent']:.1f} "
-            f"| {item['qos_satisfaction_rate_percent']:.1f} "
+            f"| {item['method_label']} | {_format_optional(item['feasible_solution_rate_percent'])} "
+            f"| {_format_optional(item['qos_satisfaction_rate_percent'])} "
             f"| {_format_optional(item['safe_rejection_rate_percent'])} "
-            f"| {item['p95_resolution_latency_ms']:.3f} |"
+            f"| {_format_optional(item['p95_resolution_latency_ms'])} |"
         )
     lines.extend(("", "## Sanity Findings", ""))
     if findings:
@@ -303,7 +308,7 @@ def _exp2_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
     for row in rows:
         unique_instances.setdefault(row.trial_id, row)
     method_results = []
-    for method_id in ("proposed", "sanet_dw", "adjacent_layer", "independent"):
+    for method_id in EXPERIMENT_METHODS["exp2"]:
         selected = [row for row in rows if row.method_id == method_id]
         solvable = [row for row in selected if row.ground_truth_feasible]
         infeasible = [row for row in selected if not row.ground_truth_feasible]
@@ -312,20 +317,18 @@ def _exp2_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
             {
                 "method_id": method_id,
                 "method_label": METHODS[method_id].label,
-                "feasible_solution_rate_percent": 100.0
-                * sum(bool(row.success) for row in solvable)
-                / len(solvable),
-                "qos_satisfaction_rate_percent": 100.0
-                * sum(bool(row.qos_satisfied) for row in solvable)
-                / len(solvable),
-                "safe_rejection_rate_percent": (
-                    100.0
-                    * sum(bool(row.safe_rejection) for row in infeasible)
-                    / len(infeasible)
-                    if infeasible
-                    else None
+                "feasible_solution_rate_percent": _safe_rate_percent(
+                    sum(bool(row.success) for row in solvable), len(solvable)
                 ),
-                "p95_resolution_latency_ms": float(np.percentile(latencies, 95.0)),
+                "qos_satisfaction_rate_percent": _safe_rate_percent(
+                    sum(bool(row.qos_satisfied) for row in solvable), len(solvable)
+                ),
+                "safe_rejection_rate_percent": _safe_rate_percent(
+                    sum(bool(row.safe_rejection) for row in infeasible), len(infeasible)
+                ),
+                "p95_resolution_latency_ms": (
+                    float(np.percentile(latencies, 95.0)) if latencies else None
+                ),
             }
         )
     solvable_count = sum(
@@ -339,7 +342,9 @@ def _exp2_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
         "topology_seed_count": len({row.seed for row in rows}),
         "instance_count": len(unique_instances),
         "solvable_instance_count": solvable_count,
-        "solvable_rate_percent": 100.0 * solvable_count / len(unique_instances),
+        "solvable_rate_percent": _safe_rate_percent(
+            solvable_count, len(unique_instances)
+        ),
         "error_count": sum(item.level == "ERROR" for item in findings),
         "warning_count": sum(item.level == "WARNING" for item in findings),
         "method_results": method_results,
@@ -445,6 +450,12 @@ def _format_optional(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.3f}"
 
 
+def _safe_rate_percent(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return 100.0 * numerator / denominator
+
+
 def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) -> str:
     payload = _exp4_pilot_summary_payload(rows, aggregate_rows, findings)
     lines = [
@@ -466,7 +477,7 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
         lines.append(
             f"| {item['failure_type']} | {item['method_label']} "
             f"| {_format_optional(item['mean_recovery_latency_ms'])} "
-            f"| {item['success_rate_percent']:.1f} "
+            f"| {_format_optional(item['success_rate_percent'])} "
             f"| {_format_optional(item['modification_scope_percent'])} |"
         )
     lines.extend(("", "## Capacity Stress", ""))
@@ -474,7 +485,8 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
         lines.append(
             f"- {item['method_label']}: "
             + ", ".join(
-                f"{point['reduction_percent']:.0f}%={point['success_rate_percent']:.1f}%"
+                f"{point['reduction_percent']:.0f}%="
+                f"{_format_optional(point['success_rate_percent'])}%"
                 for point in item["points"]
             )
         )
@@ -503,7 +515,7 @@ def _exp4_pilot_report(rows, aggregate_rows, findings: Sequence[SanityFinding]) 
 def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, object]:
     failure_results = []
     for failure_type in ("agent_failure", "link_failure", "capacity_degradation"):
-        for method_id in ("proposed", "netkeeper", "cspf", "full_rebuild"):
+        for method_id in EXPERIMENT_FAILURE_METHODS["exp4"][failure_type]:
             selected = [
                 row
                 for row in rows
@@ -525,9 +537,9 @@ def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
                     "mean_recovery_latency_ms": (
                         mean(latencies) if latencies else None
                     ),
-                    "success_rate_percent": 100.0
-                    * sum(bool(row.success) for row in selected)
-                    / len(selected),
+                    "success_rate_percent": _safe_rate_percent(
+                        sum(bool(row.success) for row in selected), len(selected)
+                    ),
                     "rule_change_ratio_percent": 100.0
                     * mean(row.rule_change_ratio for row in selected),
                     "modification_scope_percent": (
@@ -539,7 +551,7 @@ def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
                 }
             )
     stress = []
-    for method_id in ("proposed", "netkeeper", "cspf", "full_rebuild"):
+    for method_id in EXPERIMENT_FAILURE_METHODS["exp4"]["capacity_degradation"]:
         points = []
         selected = [
             row
@@ -551,9 +563,9 @@ def _exp4_pilot_summary_payload(rows, aggregate_rows, findings) -> dict[str, obj
             points.append(
                 {
                     "reduction_percent": 100.0 * severity,
-                    "success_rate_percent": 100.0
-                    * sum(bool(row.success) for row in point_rows)
-                    / len(point_rows),
+                    "success_rate_percent": _safe_rate_percent(
+                        sum(bool(row.success) for row in point_rows), len(point_rows)
+                    ),
                 }
             )
         stress.append(

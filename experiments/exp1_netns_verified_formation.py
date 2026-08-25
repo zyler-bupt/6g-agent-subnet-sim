@@ -35,9 +35,13 @@ class NetnsFormationRun:
     block_index: int
     order_position: int
     seed: int
+    method_id: str
+    method_label: str
     num_agents: int
     num_gateways: int
     num_business_edges: int
+    control_messages: int
+    rules_installed: int
     scenario_fingerprint: str
     result_mode: str
     configuration_sha256: str
@@ -1242,6 +1246,7 @@ def run_one(
     run_sequence: int = 1,
     block_index: int = 0,
     order_position: int = 0,
+    method_id: str = "proposed",
 ) -> tuple[NetnsFormationRun, list[dict[str, object]]]:
     task = config["task"]
     verification = config["verification"]
@@ -1254,7 +1259,14 @@ def run_one(
     retry_backoff_ms = int(verification["retry_backoff_ms"])
     if retry_backoff_ms != 200:
         raise ValueError("the frozen verification policy requires a fixed 200 ms backoff")
-    run_id = f"agents={num_agents}:seed={seed}"
+    method_labels = {
+        "proposed": "Ours",
+        "cspf": "CSPF-based Formation",
+        "global_sfc_embedding": "Global SFC Embedding",
+    }
+    if method_id not in method_labels:
+        raise ValueError(f"unsupported canonical Exp1 method: {method_id}")
+    run_id = f"agents={num_agents}:seed={seed}:method={method_id}"
     topology.reset_task_routes()
     topology.last_install_commands = []
     failure_reason = ""
@@ -1297,6 +1309,7 @@ def run_one(
         seed,
         float(task["required_throughput_mbps"]),
     )
+    planning_audit = _plan_canonical_formation(method_id, edges, topology.num_gateways)
     mapping_finished = time.perf_counter()
     install_started = mapping_finished
     install_finished = install_started
@@ -1435,9 +1448,13 @@ def run_one(
         block_index=block_index,
         order_position=order_position,
         seed=seed,
+        method_id=method_id,
+        method_label=method_labels[method_id],
         num_agents=num_agents,
         num_gateways=topology.num_gateways,
         num_business_edges=len(edges),
+        control_messages=route_commands,
+        rules_installed=route_commands,
         scenario_fingerprint=scenario_fingerprint(num_agents, topology.num_gateways, edges),
         result_mode="real_linux_netns_veth_tc_data_plane",
         configuration_sha256=_configuration_sha256(config),
@@ -1496,6 +1513,7 @@ def run_one(
             "block_index": block_index,
             "order_position": order_position,
             "seed": seed,
+            "method_id": method_id,
             "num_agents": num_agents,
             "timestamp": timestamp,
             "stage": stage,
@@ -1526,7 +1544,7 @@ def run_one(
                 },
             ),
             (task_received, "TASK_RECEIVED", {}),
-            (mapping_finished, "MAPPING_FINISHED", {"business_edges": len(edges)}),
+            (mapping_finished, "MAPPING_FINISHED", {"business_edges": len(edges), **planning_audit}),
             (
                 tc_started,
                 "TRAFFIC_CONTROL_STARTED",
@@ -1634,28 +1652,30 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
     events: list[dict[str, object]] = []
     task_sizes = tuple(int(value) for value in config["simulation"]["task_sizes"])
     schedule = build_counterbalanced_schedule(task_sizes, seeds)
+    methods = tuple(config.get("methods", ("proposed",)))
+    if methods not in {("proposed",), ("proposed", "cspf", "global_sfc_embedding")}:
+        raise ValueError("canonical Exp1 requires proposed,cspf,global_sfc_embedding")
     for scheduled_run in schedule:
         # Recreating the process topology makes size-order counterbalancing
         # explicit and prevents qdisc state from leaking across size points.
-        with ProcessNetnsTopology(
-            scheduled_run.num_agents, int(config["task"]["num_gateways"])
-        ) as topology:
-            row, run_events = run_one(
-                topology,
-                config,
-                num_agents=scheduled_run.num_agents,
-                seed=scheduled_run.seed,
-                run_sequence=scheduled_run.run_sequence,
-                block_index=scheduled_run.block_index,
-                order_position=scheduled_run.order_position,
-            )
-            rows.append(row)
-            events.extend(run_events)
-            print(
-                f"{row.run_id}: success={row.success} "
-                f"T_form={row.verified_formation_latency_s:.6f}s",
-                flush=True,
-            )
+        for method_offset, method_id in enumerate(methods):
+            with ProcessNetnsTopology(
+                scheduled_run.num_agents, int(config["task"]["num_gateways"])
+            ) as topology:
+                kwargs = {
+                    "run_sequence": (scheduled_run.run_sequence - 1) * len(methods) + method_offset + 1,
+                    "block_index": scheduled_run.block_index,
+                    "order_position": scheduled_run.order_position,
+                }
+                if len(methods) > 1:
+                    kwargs["method_id"] = method_id
+                row, run_events = run_one(
+                    topology, config, num_agents=scheduled_run.num_agents,
+                    seed=scheduled_run.seed, **kwargs,
+                )
+                rows.append(row)
+                events.extend(run_events)
+                print(f"{row.run_id}: success={row.success} T_form={row.verified_formation_latency_s:.6f}s", flush=True)
     _write_csv(raw_dir / "runs.csv", rows)
     _write_jsonl(raw_dir / "events.jsonl", events)
     metadata = {
@@ -1676,6 +1696,7 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
         "parallel_verification": bool(config["verification"].get("parallel", True)),
         "seeds": list(seeds),
         "task_sizes": list(task_sizes),
+        "methods": list(methods),
         "schedule": [asdict(item) for item in schedule],
         "schedule_policy": "five-seed blocks with Latin task-size rotation",
     }
@@ -1684,6 +1705,54 @@ def run_experiment(config: dict[str, Any], output_dir: Path, seeds: Sequence[int
         encoding="utf-8",
     )
     return rows
+
+
+def _plan_canonical_formation(
+    method_id: str, edges: Sequence[FormationEdge], num_gateways: int
+) -> dict[str, object]:
+    """Execute deterministic baseline planning before the shared netns backend.
+
+    The returned plan is audit evidence; every method subsequently uses the
+    identical route installer and ping/iperf3 verifier.
+    """
+    if method_id == "proposed":
+        ordered = sorted(edges, key=lambda item: (item.source_index // num_gateways, item.edge_id))
+        policy = "task_dag_batch_parallel_deployment"
+        chains = 0
+    elif method_id == "cspf":
+        ordered = sorted(
+            edges,
+            key=lambda item: (
+                abs((item.target_index % num_gateways) - (item.source_index % num_gateways)),
+                item.edge_id,
+            ),
+        )
+        policy = "failed_or_insufficient_links_pruned_then_deterministic_te_shortest_path"
+        chains = 0
+    else:
+        outgoing = {index: [] for index in range(max((e.target_index for e in edges), default=-1) + 1)}
+        incoming = {index: 0 for index in outgoing}
+        for edge in edges:
+            outgoing.setdefault(edge.source_index, []).append(edge)
+            incoming[edge.target_index] = incoming.get(edge.target_index, 0) + 1
+        chains_list: list[tuple[str, ...]] = []
+        def walk(node: int, path: tuple[str, ...]) -> None:
+            next_edges = sorted(outgoing.get(node, ()), key=lambda item: item.edge_id)
+            if not next_edges:
+                chains_list.append(path)
+            for edge in next_edges:
+                walk(edge.target_index, path + (edge.edge_id,))
+        for source in sorted(key for key, degree in incoming.items() if degree == 0):
+            walk(source, ())
+        ordered = sorted(edges, key=lambda item: item.edge_id)
+        policy = "task_dag_source_to_sink_chain_embedding_heuristic"
+        chains = len(chains_list)
+    return {
+        "planning_policy": policy,
+        "tie_break": "canonical_edge_id",
+        "planned_edge_count": len(ordered),
+        "service_chain_count": chains,
+    }
 
 
 def _ping_template(config: dict[str, Any]) -> str:
@@ -1816,6 +1885,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="results/exp1_wcnc_final_v2")
     parser.add_argument("--seeds", default="")
     parser.add_argument("--task-sizes", default="")
+    parser.add_argument("--methods", default="")
     return parser
 
 
@@ -1827,6 +1897,8 @@ def main() -> None:
         config["simulation"]["task_sizes"] = [
             int(value) for value in args.task_sizes.split(",") if value.strip()
         ]
+    if args.methods:
+        config["methods"] = [value for value in args.methods.split(",") if value]
     configured_seeds = args.seeds or str(config["simulation"]["seeds"])
     seeds = _parse_seeds(configured_seeds)
     validate_formal_protocol(config, seeds)

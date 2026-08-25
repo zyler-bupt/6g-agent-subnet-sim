@@ -13,6 +13,7 @@ from experiments.paper_protocol import EXPERIMENT_METHODS, figure_min_topology_c
 from scripts.paper_style import (
     CI_ALPHA,
     METHOD_STYLES,
+    MethodStyle,
     apply_paper_style,
     method_bar_kwargs,
     method_line_kwargs,
@@ -22,6 +23,24 @@ from scripts.paper_style import (
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+METHOD_STYLES.setdefault(
+    "sfc_reoptimization",
+    MethodStyle("SFC Re-opt", "#f39c12", ":", "^", ".."),
+)
+METHOD_STYLES.setdefault(
+    "weighted_sum",
+    MethodStyle("Weighted-Sum", "#f39c12", ":", "^", ".."),
+)
+METHOD_STYLES.setdefault(
+    "sfc_restoration",
+    MethodStyle("SFC-Restore", "#f39c12", ":", "^", ".."),
+)
+METHOD_STYLES.setdefault(
+    "te_reopt",
+    MethodStyle("TE-Reopt", "#e74c3c", "--", "s", "//"),
+)
 
 
 def plot_exp1(
@@ -45,7 +64,7 @@ def plot_exp1(
         and row["series"] == "task_size"
         and row["metric"] == "success_rate_percent"
     ]
-    methods = ("proposed", "cspf", "srd")
+    methods = EXPERIMENT_METHODS["exp1"]
     latency = [row for row in latency if row["method_id"] in methods]
     success = [row for row in success if row["method_id"] in methods]
     _require_complete_methods(latency, methods, "Exp.1 latency")

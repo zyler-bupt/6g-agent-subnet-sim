@@ -82,6 +82,28 @@ class PaperFailureSnapshot:
         return frozenset(affected)
 
     @property
+    def affected_flow_ratio(self) -> float:
+        return len(self.affected_business_edge_ids) / max(len(self.task.biz_edges), 1)
+
+    @property
+    def dependency_closure_ratio(self) -> float:
+        target = self.base.target_agent_id
+        adjacent: dict[str, set[str]] = {agent: set() for agent in self.task.app_agents}
+        for edge in self.task.biz_edges:
+            adjacent.setdefault(edge.source, set()).add(edge.target)
+        closure = {target}; frontier = [target]
+        while frontier:
+            node = frontier.pop()
+            for neighbor in adjacent.get(node, ()):
+                if neighbor not in closure:
+                    closure.add(neighbor); frontier.append(neighbor)
+        return len(closure) / max(len(self.task.app_agents), 1)
+
+    @property
+    def post_fault_capacity_ratio(self) -> float:
+        return self.post_capacity_mbps / max(self.pre_capacity_mbps, 1e-9)
+
+    @property
     def topology_fingerprint(self) -> str:
         return stable_fingerprint(
             {
@@ -237,13 +259,19 @@ def generate_paper_failure_snapshot(
     severity: float,
     seed: int,
     event_id: int,
+    *,
+    capacity_ratio: float | None = None,
 ) -> PaperFailureSnapshot:
     normalized = failure_type.strip().lower()
     if normalized not in PAPER_FAILURE_TYPES:
         raise ValueError(f"unsupported paper failure type: {failure_type}")
     if seed < 0 or event_id < 0:
         raise ValueError("seed and event_id must be non-negative")
-    if normalized == "capacity_degradation" and not 0.0 < severity < 1.0:
+    if capacity_ratio is not None:
+        if normalized != "capacity_degradation" or capacity_ratio <= 0.0:
+            raise ValueError("capacity_ratio is valid only for positive capacity scenarios")
+        severity = 1.0 - float(capacity_ratio)
+    elif normalized == "capacity_degradation" and not 0.0 < severity < 1.0:
         raise ValueError("capacity reduction must be within (0, 1)")
 
     if normalized == "agent_failure":
@@ -257,7 +285,7 @@ def generate_paper_failure_snapshot(
     else:
         old_type = "LINK_DEGRADATION"
         old_level = f"capacity_reduction_{100.0 * severity:.0f}pct"
-        old_severity = 1.0 - severity
+        old_severity = min(0.999, max(0.001, 1.0 - severity))
 
     generated = FailureScenarioGenerator().generate(
         FailureScenarioConfig(
@@ -272,7 +300,27 @@ def generate_paper_failure_snapshot(
         ),
         seed,
     )
-    generated = _select_independent_event(generated, seed, event_id)
+    if normalized in {"link_failure", "agent_failure"}:
+        candidates = [
+            _select_independent_event(
+                generated, seed, event_id,
+                selection_salt=f"{normalized}:candidate:{index}",
+            )
+            for index in range(64)
+        ]
+        measure = _base_affected_flow_ratio if normalized == "link_failure" else _base_dependency_closure_ratio
+        generated = min(
+            candidates,
+            key=lambda candidate: (
+                abs(measure(candidate) - severity),
+                stable_fingerprint({"target": candidate.target_edge_id, "agent": candidate.target_agent_id}),
+            ),
+        )
+    else:
+        ratio_for_salt = capacity_ratio if capacity_ratio is not None else 1.0 - severity
+        generated = _select_independent_event(
+            generated, seed, event_id, selection_salt=f"capacity:{ratio_for_salt:g}"
+        )
     affected_demand = sum(
         edge.data_rate_mbps
         for edge in generated.task.biz_edges
@@ -305,6 +353,8 @@ def _select_independent_event(
     snapshot: FaultScenarioSnapshot,
     seed: int,
     event_id: int,
+    *,
+    selection_salt: str = "",
 ) -> FaultScenarioSnapshot:
     app_specs = {
         item.agent_id: item
@@ -320,7 +370,7 @@ def _select_independent_event(
         key=lambda edge: edge.edge_id,
     )
     event_digest = stable_fingerprint(
-        {"seed": seed, "event_id": event_id, "namespace": "paper-exp4-event"}
+        {"seed": seed, "event_id": event_id, "selection_salt": selection_salt, "namespace": "paper-exp4-event"}
     )
     selected = cross_edges[int(event_digest[:16], 16) % len(cross_edges)]
     source_gateway = app_specs[selected.source].gateway_id
@@ -397,3 +447,28 @@ def _select_independent_event(
         failure_detected_at=snapshot.failure_detected_at + time_shift,
         monitor_samples=monitor,
     )
+
+
+def _base_affected_flow_ratio(snapshot: FaultScenarioSnapshot) -> float:
+    gateway_by_agent = {
+        item.agent_id: item.gateway_id for item in snapshot.catalog.agents
+        if item.layer == AgentLayer.APPLICATION
+    }
+    affected = 0
+    for edge in snapshot.task.biz_edges:
+        path = snapshot.gateway_paths[(gateway_by_agent[edge.source], gateway_by_agent[edge.target])]
+        affected += snapshot.failed_link in set(zip(path, path[1:]))
+    return affected / max(len(snapshot.task.biz_edges), 1)
+
+
+def _base_dependency_closure_ratio(snapshot: FaultScenarioSnapshot) -> float:
+    outgoing: dict[str, set[str]] = {agent: set() for agent in snapshot.task.app_agents}
+    for edge in snapshot.task.biz_edges:
+        outgoing.setdefault(edge.source, set()).add(edge.target)
+    closure = {snapshot.target_agent_id}; frontier = [snapshot.target_agent_id]
+    while frontier:
+        node = frontier.pop()
+        for neighbor in outgoing.get(node, ()):
+            if neighbor not in closure:
+                closure.add(neighbor); frontier.append(neighbor)
+    return len(closure) / max(len(snapshot.task.app_agents), 1)

@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib.metadata
+import json
+import platform
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from experiments.paper_protocol import (
+    EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS, METHODS, PROTOCOL_ID,
+    load_and_validate_wcnc_v3_config,
+)
+
+
+SCOPED_SOURCES = (
+    "experiments/paper_protocol.py", "experiments/run_wcnc_final_v3.py",
+    "experiments/exp1_netns_verified_formation.py", "experiments/exp2_cross_layer_robustness.py",
+    "experiments/exp3_business_elasticity.py", "experiments/exp4_failure.py",
+    "src/controller/cross_layer_coordinator.py", "src/controller/business_reconfiguration.py",
+    "src/controller/paper_failure_recovery.py", "src/simulation/demand_capacity_ratio.py",
+    "src/simulation/demand_capacity_ratio_v3.py",
+    "scripts/aggregate_wcnc_final_v3.py", "scripts/plot_wcnc_final_v3.py",
+)
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
+    config_path = repo / "configs/wcnc_final_v3.yaml"; config = load_and_validate_wcnc_v3_config(config_path)
+    raw_hashes = {str(path.relative_to(root)): sha(path) for path in sorted((root / "raw").glob("**/*")) if path.is_file()}
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True).stdout.strip()
+    return {
+        "protocol_id": PROTOCOL_ID, "git_commit": commit,
+        "source_hashes": {name: sha(repo / name) for name in SCOPED_SOURCES},
+        "config_hashes": {str(config_path): sha(config_path)},
+        "baseline_method_set": {"exp1": list(EXPERIMENT_METHODS["exp1"]), "exp2": list(EXPERIMENT_METHODS["exp2"]), "exp3": list(EXPERIMENT_METHODS["exp3"]), "exp4": EXPERIMENT_FAILURE_METHODS["exp4"]},
+        "baseline_display_labels": {key: value.label for key, value in METHODS.items()},
+        "adapted_references": {key: {"adapted": value.adapted, "reference": value.reference, "note": value.why_included} for key, value in METHODS.items() if value.adapted},
+        "seed_ranges": config["formal"], "environment": {"python": platform.python_version(), "platform": platform.platform(),
+            "dependencies": {name: importlib.metadata.version(name) for name in ("numpy", "matplotlib", "PyYAML")}},
+        "state_schema_versions": {"true_state": "exp2-true-v1", "observed_state": "exp2-observed-v1"},
+        "result_modes": {exp: config[exp]["result_mode"] for exp in ("exp1", "exp2", "exp3", "exp4")},
+        "raw_artifact_hashes": raw_hashes,
+        "aggregation_rule": config["statistics"],
+        "plotting_script_hash": sha(repo / "scripts/plot_wcnc_final_v3.py"),
+    }
+
+
+def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
+    checks: dict[str, object] = {}; errors: list[str] = []
+    current_raw = {str(path.relative_to(root)): sha(path) for path in sorted((root / "raw").glob("**/*")) if path.is_file()}
+    checks["raw_hashes_match"] = current_raw == manifest["raw_artifact_hashes"]
+    if not checks["raw_hashes_match"]: errors.append("raw artifact drift")
+    if "source_hashes" in manifest:
+        source_match = all(Path(name).is_file() and sha(Path(name)) == expected for name, expected in manifest["source_hashes"].items())
+        checks["source_hashes_match"] = source_match
+        if not source_match: errors.append("scoped source drift")
+    if "config_hashes" in manifest:
+        config_match = all(Path(name).is_file() and sha(Path(name)) == expected for name, expected in manifest["config_hashes"].items())
+        checks["config_hashes_match"] = config_match
+        if not config_match: errors.append("config drift")
+    if "plotting_script_hash" in manifest:
+        plot_match = sha(Path("scripts/plot_wcnc_final_v3.py")) == manifest["plotting_script_hash"]
+        checks["plotting_script_hash_matches"] = plot_match
+        if not plot_match: errors.append("plotting source drift")
+    for exp in ("exp1", "exp2", "exp3", "exp4"):
+        path = root / "raw" / exp / "trials.csv"
+        if not path.exists(): errors.append(f"missing {path}"); continue
+        with path.open(encoding="utf-8", newline="") as handle: rows = list(csv.DictReader(handle))
+        grouped = defaultdict(set)
+        for row in rows:
+            grouped[row.get("scenario_fingerprint", row.get("trial_id", ""))].add(row.get("method_id") or row.get("method"))
+        expected_sets = [set(EXPERIMENT_FAILURE_METHODS["exp4"][row["failure_type"]]) for row in rows] if exp == "exp4" else [set(EXPERIMENT_METHODS[exp])]
+        valid = all(methods in expected_sets for methods in grouped.values())
+        checks[f"{exp}_paired_method_set"] = valid
+        if not valid: errors.append(f"{exp} method/fingerprint pairing drift")
+        checks[f"{exp}_failure_rows_retained"] = all("success" in row and "failure_reason" in row for row in rows)
+        if any("demo" in value.lower() or "synthetic" in value.lower() for row in rows for value in row.values()):
+            errors.append(f"{exp} contains demo/synthetic provenance")
+    for exp in ("exp1", "exp2", "exp3", "exp4"):
+        aggregated = root / "aggregated" / exp / "metrics.csv"
+        if aggregated.exists():
+            with aggregated.open(encoding="utf-8", newline="") as handle: rows = list(csv.DictReader(handle))
+            checks[f"{exp}_all_points_have_raw_provenance"] = all(row.get("raw_path") and row.get("raw_sha256") for row in rows)
+    status = "PASS" if not errors and all(value is True for value in checks.values()) else "FAIL"
+    return {"protocol_id": PROTOCOL_ID, "status": status, "checks": checks, "errors": errors}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(); parser.add_argument("--root", default="results/paper/wcnc_final_v3"); parser.add_argument("--write-manifest", action="store_true")
+    args = parser.parse_args(); root = Path(args.root)
+    if args.write_manifest:
+        manifest = build_manifest(root); (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    report = audit(root, manifest); (root / "integrity_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if report["status"] != "PASS": raise SystemExit(json.dumps(report["errors"]))
+
+
+if __name__ == "__main__": main()
