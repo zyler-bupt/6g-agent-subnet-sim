@@ -1377,7 +1377,6 @@ _FORMAL_BINDING_VALUES: dict[tuple[str, ...], object] = {
     ("verification", "ping", "interval_s"): 0.2,
     ("verification", "ping", "packet_loss_record_only"): True,
     ("verification", "ping", "max_average_rtt_ms"): 300.0,
-    ("verification", "iperf3", "duration_s"): 1,
     ("verification", "iperf3", "omit_s"): 0,
     ("verification", "iperf3", "client_timeout_s"): 6,
     ("verification", "iperf3", "base_port"): 5201,
@@ -1400,7 +1399,12 @@ _FORMAL_V3_BINDING_VALUES: dict[tuple[str, ...], object] = {
     ("execution_gate", "require_isolated_outer_network_namespace"): True,
     ("execution_gate", "reject_manual_namespace_sentinel"): True,
     ("execution_gate", "require_all_formal_trials_successful"): True,
+    ("verification", "iperf3", "duration_s"): 2,
 }
+_FORMAL_LEGACY_BINDING_VALUES: dict[tuple[str, ...], object] = {
+    ("verification", "iperf3", "duration_s"): 1,
+}
+_FORMAL_LEGACY_PROVENANCE = "wcnc_v2_fig1_formal_protocol"
 _PROTECTED_V1_OUTPUT_ROOTS = (
     Path("results/exp1_netns"),
     Path("results/exp1_wcnc_final"),
@@ -1425,9 +1429,20 @@ def validate_formal_protocol(config: dict[str, Any], seeds: Sequence[int]) -> No
         raise ValueError("formal Exp1 schedule task_size_order must be latin_rotation")
     for path, expected in _FORMAL_BINDING_VALUES.items():
         _validate_formal_binding_value(config, path, expected)
-    if config.get("experiment", {}).get("protocol_id") == "wcnc_final_v3":
+    experiment = config.get("experiment", {})
+    protocol_id = experiment.get("protocol_id")
+    provenance = experiment.get("provenance")
+    if protocol_id == "wcnc_final_v3":
         for path, expected in _FORMAL_V3_BINDING_VALUES.items():
             _validate_formal_binding_value(config, path, expected)
+    elif protocol_id is None and provenance == _FORMAL_LEGACY_PROVENANCE:
+        for path, expected in _FORMAL_LEGACY_BINDING_VALUES.items():
+            _validate_formal_binding_value(config, path, expected)
+    else:
+        raise ValueError(
+            "unsupported formal Exp1 protocol identity: "
+            f"protocol_id={protocol_id!r}, provenance={provenance!r}"
+        )
 
 
 def _validate_formal_binding_value(

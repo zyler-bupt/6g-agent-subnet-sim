@@ -146,7 +146,9 @@ run_step exp1 "$protocol_root/exp1_netns_staging_v3/raw" run_exp1 \
   0:49 4,8,12,16,20
 run_step exp1_normalize "$protocol_root/raw/exp1/trials.csv" \
   .venv/bin/python scripts/normalize_wcnc_final_v3_exp1.py \
-  --source "$protocol_root/exp1_netns_staging_v3/raw/runs.csv" --target "$protocol_root/raw/exp1/trials.csv"
+  --source "$protocol_root/exp1_netns_staging_v3/raw/runs.csv" \
+  --target "$protocol_root/raw/exp1/trials.csv" \
+  --config configs/exp1_netns_verified_formation_v3.yaml
 run_step exp2 "$protocol_root/raw/exp2" \
   .venv/bin/python -m experiments.run_wcnc_final_v3 --experiment exp2 --seeds 0:99 --output-root "$protocol_root"
 run_step exp3 "$protocol_root/raw/exp3" \

@@ -23,11 +23,20 @@ Exp1 uses method-owned deployment plans rather than a shared route installer:
 - `global_sfc_embedding`: a deterministic source-to-sink chain cover installed in sequential chain batches.
 
 All three plans operate on the same Agent/Gateway mapping and finish with the same ping/iperf3 verifier. No sleep or formula-derived latency is added.
+
 The outer namespace gate enumerates interfaces through the current netns
 netlink view (`ip -j link show`), not the host-visible sysfs mount. Global SFC
 installs a connected `/30` route in each per-Agent policy table and activates
 each chain hop with a deterministic destination-specific rule before shared
 verification.
+
+The v3 verifier uses a two-second TCP iperf3 measurement window at the
+unchanged 0.5 Mbps requirement. This reduces one-second slow-start/reporting
+instability under netem loss and background traffic. Reported verified
+latencies remain the measured values; no fixed duration is subtracted.
+Because the verifier window is part of `T_form`, absolute v3 latency values are
+not directly comparable with historical v2 runs that used a one-second window.
+
 `Control Messages` counts controller deployment transactions (one sequential
 batch is one transaction); `Rules Installed` counts the netlink route/rule
 commands actually executed. Planning work units and every batch/command are

@@ -11,6 +11,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -36,6 +38,12 @@ SCOPED_SOURCES = (
 
 def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def configuration_sha(path: Path) -> str:
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
@@ -109,6 +117,19 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
         checks[f"{exp}_failure_rows_retained"] = all("success" in row and "failure_reason" in row for row in rows)
         if any("demo" in value.lower() or "synthetic" in value.lower() for row in rows for value in row.values()):
             errors.append(f"{exp} contains demo/synthetic provenance")
+        if exp == "exp1":
+            expected_configuration_hash = configuration_sha(
+                Path("configs/exp1_netns_verified_formation_v3.yaml")
+            )
+            observed_configuration_hashes = {
+                row.get("configuration_sha256", "") for row in rows
+            }
+            configuration_match = observed_configuration_hashes == {
+                expected_configuration_hash
+            }
+            checks["exp1_configuration_hash_matches"] = configuration_match
+            if not configuration_match:
+                errors.append("Exp1 configuration hash drift")
     for exp in ("exp1", "exp2", "exp3", "exp4"):
         aggregated = root / "aggregated" / exp / "metrics.csv"
         if aggregated.exists():

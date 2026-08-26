@@ -292,6 +292,45 @@ class Exp1FailureContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deployment.proposed.scheduling"):
             exp1.validate_formal_protocol(config, tuple(range(50)))
 
+    def test_v3_freezes_two_second_iperf_without_changing_v2_history(self) -> None:
+        with Path("configs/exp1_netns_verified_formation_v3.yaml").open(
+            encoding="utf-8"
+        ) as handle:
+            v3 = yaml.safe_load(handle)
+        v3["verification"]["iperf3"]["duration_s"] = 2
+        try:
+            exp1.validate_formal_protocol(v3, tuple(range(50)))
+        except ValueError as error:
+            self.fail(f"v3 rejected its required two-second iperf window: {error}")
+        v3["verification"]["iperf3"]["duration_s"] = 1
+        with self.assertRaisesRegex(ValueError, "verification.iperf3.duration_s"):
+            exp1.validate_formal_protocol(v3, tuple(range(50)))
+
+        with Path("configs/exp1_netns_verified_formation_v2.yaml").open(
+            encoding="utf-8"
+        ) as handle:
+            v2 = yaml.safe_load(handle)
+        exp1.validate_formal_protocol(v2, tuple(range(50)))
+        v2["verification"]["iperf3"]["duration_s"] = 2
+        with self.assertRaisesRegex(ValueError, "verification.iperf3.duration_s"):
+            exp1.validate_formal_protocol(v2, tuple(range(50)))
+
+        with Path("configs/exp1_netns_verified_formation_pilot_v3.yaml").open(
+            encoding="utf-8"
+        ) as handle:
+            pilot_v3 = yaml.safe_load(handle)
+        self.assertEqual(pilot_v3["verification"]["iperf3"]["duration_s"], 2)
+
+    def test_unknown_formal_protocol_id_cannot_fall_back_to_legacy(self) -> None:
+        with Path("configs/exp1_netns_verified_formation_v3.yaml").open(
+            encoding="utf-8"
+        ) as handle:
+            config = yaml.safe_load(handle)
+        config["experiment"]["protocol_id"] = "wcnc_final_v3_drift"
+        config["verification"]["iperf3"]["duration_s"] = 1
+        with self.assertRaisesRegex(ValueError, "unsupported formal Exp1 protocol"):
+            exp1.validate_formal_protocol(config, tuple(range(50)))
+
     def test_nonformal_smoke_accepts_two_seeds_and_one_task_size(self) -> None:
         config = {
             "experiment": {"phase": "pilot"},

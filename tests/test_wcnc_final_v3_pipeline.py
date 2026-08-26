@@ -61,6 +61,57 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "measured"):
                 normalize(source, target)
 
+    def test_exp1_normalizer_rejects_rows_from_a_different_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "runs.csv"; target = Path(directory) / "out.csv"
+            fields = (
+                "result_mode", "scenario_fingerprint", "seed", "method_id",
+                "failure_reason", "configuration_sha256",
+            )
+            with source.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
+                for method in ("proposed", "cspf", "global_sfc_embedding"):
+                    writer.writerow({
+                        "result_mode": "real_linux_netns_veth_tc_data_plane",
+                        "scenario_fingerprint": "paired", "seed": 0,
+                        "method_id": method, "failure_reason": "",
+                        "configuration_sha256": "0" * 64,
+                    })
+            with self.assertRaisesRegex(ValueError, "configuration hash"):
+                normalize(source, target)
+
+    def test_final_audit_rejects_exp1_rows_from_a_different_configuration(self) -> None:
+        methods = {
+            "exp1": ("proposed", "cspf", "global_sfc_embedding"),
+            "exp2": ("proposed", "sanet_dw", "weighted_sum", "independent"),
+            "exp3": ("proposed", "netren", "local_only", "full_rebuild"),
+            "exp4": ("proposed", "cspf", "full_rebuild"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for exp, method_set in methods.items():
+                path = root / "raw" / exp / "trials.csv"; path.parent.mkdir(parents=True)
+                fields = (
+                    "scenario_fingerprint", "method_id", "success", "failure_reason",
+                    "failure_type", "configuration_sha256",
+                )
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader()
+                    for method in method_set:
+                        writer.writerow({
+                            "scenario_fingerprint": "paired", "method_id": method,
+                            "success": True, "failure_reason": "",
+                            "failure_type": "link_failure",
+                            "configuration_sha256": "0" * 64 if exp == "exp1" else "",
+                        })
+            hashes = {
+                str(path.relative_to(root)): __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+                for path in (root / "raw").glob("**/*") if path.is_file()
+            }
+            report = audit(root, {"raw_artifact_hashes": hashes})
+            self.assertEqual(report["status"], "FAIL")
+            self.assertIn("Exp1 configuration hash drift", report["errors"])
+
     def test_manifest_hash_detects_raw_data_drift(self) -> None:
         methods = {
             "exp1": ("proposed", "cspf", "global_sfc_embedding"),

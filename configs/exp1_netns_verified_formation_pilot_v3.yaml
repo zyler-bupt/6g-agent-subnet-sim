@@ -51,7 +51,7 @@ verification:
     packet_loss_record_only: true
     max_average_rtt_ms: 300.0
   iperf3:
-    duration_s: 1
+    duration_s: 2
     omit_s: 0
     client_timeout_s: 6
     base_port: 5201
