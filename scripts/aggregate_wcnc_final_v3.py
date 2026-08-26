@@ -72,10 +72,34 @@ def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[di
         groups[(method, x_name, x_value, series)].append(row)
     out: list[dict[str, object]] = []
     for (method, x_name, x_value, series), items in sorted(groups.items()):
+        raw_items = items
+        if exp == "exp1":
+            items = [
+                row
+                for row in raw_items
+                if truth(row.get("paired_analysis_eligible", "true"))
+            ]
         rate_metrics: dict[str, tuple[int, int]] = {
             "success_rate": (sum(truth(row.get("success")) for row in items), len(items)),
             "timeout_rate": (sum(truth(row.get("timeout")) for row in items), len(items)),
         }
+        if exp == "exp1":
+            rate_metrics.update({
+                "paired_scenario_retention_rate": (
+                    sum(
+                        truth(row.get("paired_analysis_eligible", "true"))
+                        for row in raw_items
+                    ),
+                    len(raw_items),
+                ),
+                "preparation_failure_rate": (
+                    sum(
+                        not truth(row.get("paired_analysis_eligible", "true"))
+                        for row in raw_items
+                    ),
+                    len(raw_items),
+                ),
+            })
         if exp == "exp2":
             feasible = [row for row in items if row.get("conflict_class") != "UNRESOLVABLE_CONFLICT"]
             unresolvable = [row for row in items if row.get("conflict_class") == "UNRESOLVABLE_CONFLICT"]
@@ -91,7 +115,7 @@ def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[di
             estimate, low, high = wilson(num, den)
             out.append(_aggregate_row(exp, method, series, x_name, x_value, metric, estimate, low, high, num, den, raw_path, raw_sha, "wilson_95"))
         continuous = {
-            "exp1": (("conditional_verified_latency_ms", "verified_formation_latency_s", 1000.0), ("control_messages", "control_messages", 1.0), ("rules_installed", "rules_installed", 1.0)),
+            "exp1": (("conditional_verified_latency_ms", "verified_formation_latency_s", 1000.0), ("route_install_latency_ms", "route_install_latency_s", 1000.0), ("control_messages", "control_messages", 1.0), ("rules_installed", "rules_installed", 1.0)),
             "exp2": (("coordination_latency_ms", "coordination_latency_ms", 1.0),),
             "exp3": (("conditional_verified_latency_ms", "reconfiguration_latency_ms", 1.0), ("modification_scope_ratio", "modification_scope_ratio", 1.0), ("unaffected_flow_disturbance", "unaffected_disturbance_ratio", 1.0)),
             "exp4": (("conditional_verified_latency_ms", "recovery_latency_ms", 1.0), ("modification_scope_ratio", "modification_scope_ratio", 1.0), ("unaffected_flow_interruption", "unaffected_disturbance_ratio", 1.0)),
@@ -114,21 +138,52 @@ def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[di
 
 
 def _write_paired_differences(exp: str, rows: list[dict[str, str]], path: Path, raw_path: Path, raw_sha: str) -> None:
+    if exp == "exp1":
+        rows = [
+            row
+            for row in rows
+            if truth(row.get("paired_analysis_eligible", "true"))
+        ]
     indexed: dict[tuple[str, float, str, str, str], dict[str, str]] = {}
     for row in rows:
         method = row.get("method_id") or row.get("method") or ""; x_name, x_value = _x(exp, row)
         series = row.get("failure_type", "") if exp == "exp4" else row.get("series", "")
-        trial = row.get("scenario_fingerprint") or row.get("trial_id") or f"seed={row['seed']}"
+        trial_identity = row.get("trial_id") or row.get("scenario_fingerprint") or ""
+        # A scenario fingerprint identifies scenario content, not a unique
+        # repeated trial.  Keep the topology seed in the pairing key so that
+        # multiple seeds sharing identical content cannot overwrite each other.
+        trial = f"{trial_identity}|seed={row['seed']}"
         indexed[(x_name, x_value, series, trial, method)] = row
     comparisons: dict[tuple[str, float, str, str, str], list[tuple[int, float]]] = defaultdict(list)
     metrics = [("success_rate", "success")]
     if exp == "exp2": metrics.append(("pre_verification_correct_decision_rate", "pre_verification_correct_decision"))
+    continuous_metrics = (
+        (
+            ("conditional_verified_latency_ms", "verified_formation_latency_s", 1000.0, True),
+            ("route_install_latency_ms", "route_install_latency_s", 1000.0, False),
+        )
+        if exp == "exp1"
+        else ()
+    )
     for (x_name, x_value, series, trial, method), row in indexed.items():
         if method == "proposed": continue
         reference = indexed.get((x_name, x_value, series, trial, "proposed"))
         if reference is None: continue
         for metric, field in metrics:
             comparisons[(x_name, x_value, series, method, metric)].append((int(row["seed"]), float(truth(row.get(field))) - float(truth(reference.get(field)))))
+        for metric, field, factor, successful_runs_only in continuous_metrics:
+            if successful_runs_only and not (
+                truth(row.get("success")) and truth(reference.get("success"))
+            ):
+                continue
+            if row.get(field, "") in {"", None} or reference.get(field, "") in {"", None}:
+                continue
+            difference = (
+                float(row[field]) - float(reference[field])
+            ) * factor
+            comparisons[(x_name, x_value, series, method, metric)].append(
+                (int(row["seed"]), difference)
+            )
     output = []
     for (x_name, x_value, series, method, metric), values in sorted(comparisons.items()):
         estimate, low, high = cluster_bootstrap(values)

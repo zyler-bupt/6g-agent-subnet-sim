@@ -20,6 +20,7 @@ from experiments.paper_protocol import (
     EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS, METHODS, PROTOCOL_ID,
     load_and_validate_wcnc_v3_config,
 )
+from scripts.normalize_wcnc_final_v3_exp1 import exp1_canonical_grid_errors
 
 
 SCOPED_SOURCES = (
@@ -44,6 +45,46 @@ def configuration_sha(path: Path) -> str:
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _truth(value: object) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def exp1_paired_eligibility_errors(rows: list[dict[str, str]]) -> list[str]:
+    grouped: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped[(row.get("scenario_fingerprint", ""), row.get("seed", ""))].append(row)
+    errors: list[str] = []
+    for (fingerprint, seed), items in grouped.items():
+        expected_methods = {"proposed", "cspf", "global_sfc_embedding"}
+        observed_methods = [row.get("method_id", "") for row in items]
+        if len(observed_methods) != len(expected_methods) or set(observed_methods) != expected_methods:
+            errors.append(
+                f"Exp1 canonical method set is incomplete or duplicated for "
+                f"{fingerprint}:{seed}"
+            )
+        preparation_failed = any(
+            row.get("failure_stage") == "PREPARATION" for row in items
+        )
+        expected_eligible = not preparation_failed
+        expected_reason = "paired_preparation_failure" if preparation_failed else ""
+        for row in items:
+            infrastructure_valid = row.get("failure_stage") != "PREPARATION"
+            if _truth(row.get("infrastructure_valid")) != infrastructure_valid:
+                errors.append(
+                    f"Exp1 infrastructure validity is inconsistent for "
+                    f"{fingerprint}:{seed}:{row.get('method_id', '')}"
+                )
+            if (
+                _truth(row.get("paired_analysis_eligible")) != expected_eligible
+                or row.get("paired_exclusion_reason", "") != expected_reason
+            ):
+                errors.append(
+                    f"Exp1 paired eligibility is inconsistent for "
+                    f"{fingerprint}:{seed}:{row.get('method_id', '')}"
+                )
+    return errors
 
 
 def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
@@ -107,17 +148,34 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
         path = root / "raw" / exp / "trials.csv"
         if not path.exists(): errors.append(f"missing {path}"); continue
         with path.open(encoding="utf-8", newline="") as handle: rows = list(csv.DictReader(handle))
-        grouped = defaultdict(set)
+        grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
         for row in rows:
-            grouped[row.get("scenario_fingerprint", row.get("trial_id", ""))].add(row.get("method_id") or row.get("method"))
-        expected_sets = [set(EXPERIMENT_FAILURE_METHODS["exp4"][row["failure_type"]]) for row in rows] if exp == "exp4" else [set(EXPERIMENT_METHODS[exp])]
-        valid = all(methods in expected_sets for methods in grouped.values())
+            key = (
+                row.get("scenario_fingerprint", row.get("trial_id", "")),
+                row.get("seed", ""),
+                row.get("failure_type", "") if exp == "exp4" else "",
+            )
+            grouped[key].append(row.get("method_id") or row.get("method") or "")
+        valid = True
+        for (_, _, failure_type), methods in grouped.items():
+            expected = set(
+                EXPERIMENT_FAILURE_METHODS["exp4"][failure_type]
+                if exp == "exp4"
+                else EXPERIMENT_METHODS[exp]
+            )
+            if len(methods) != len(expected) or set(methods) != expected:
+                valid = False
+                break
         checks[f"{exp}_paired_method_set"] = valid
         if not valid: errors.append(f"{exp} method/fingerprint pairing drift")
         checks[f"{exp}_failure_rows_retained"] = all("success" in row and "failure_reason" in row for row in rows)
         if any("demo" in value.lower() or "synthetic" in value.lower() for row in rows for value in row.values()):
             errors.append(f"{exp} contains demo/synthetic provenance")
         if exp == "exp1":
+            grid_errors = exp1_canonical_grid_errors(rows)
+            grid_complete = not grid_errors
+            checks["exp1_canonical_grid_complete"] = grid_complete
+            errors.extend(grid_errors)
             expected_configuration_hash = configuration_sha(
                 Path("configs/exp1_netns_verified_formation_v3.yaml")
             )
@@ -130,6 +188,10 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
             checks["exp1_configuration_hash_matches"] = configuration_match
             if not configuration_match:
                 errors.append("Exp1 configuration hash drift")
+            eligibility_errors = exp1_paired_eligibility_errors(rows)
+            eligibility_match = not eligibility_errors
+            checks["exp1_paired_analysis_eligibility_consistent"] = eligibility_match
+            errors.extend(eligibility_errors)
     for exp in ("exp1", "exp2", "exp3", "exp4"):
         aggregated = root / "aggregated" / exp / "metrics.csv"
         if aggregated.exists():

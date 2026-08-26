@@ -33,6 +33,12 @@ def load(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def display_label(experiment: str, method: str) -> str:
+    if method == "cspf" and experiment == "exp1":
+        return "CSPF-based Formation"
+    return LABELS.get(method, method)
+
+
 def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
     selected = [row for row in rows if row["metric"] == metric and (not series or row["series"] == series)]
     if not selected:
@@ -44,7 +50,7 @@ def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
         x = [float(row["x_value"]) for row in data]; y = [float(row["estimate"]) for row in data]
         low = [max(0.0, yv - float(row["ci_low"])) for yv, row in zip(y, data)]
         high = [max(0.0, float(row["ci_high"]) - yv) for yv, row in zip(y, data)]
-        ax.errorbar(x, y, yerr=[low, high], label=LABELS.get(method, method), color=COLORS.get(method),
+        ax.errorbar(x, y, yerr=[low, high], label=display_label(selected[0]["experiment"], method), color=COLORS.get(method),
                     marker=MARKERS[index % len(MARKERS)], linewidth=1.5, markersize=4, capsize=2)
     axis_labels = {
         "gamma": r"Load factor $\gamma$", "num_agents": "Number of Agents",
@@ -54,6 +60,7 @@ def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
     }
     metric_labels = {
         "success_rate": "Success rate", "conditional_verified_latency_ms": "Conditional verified latency (ms)",
+        "route_install_latency_ms": "Route-installation latency (ms)",
         "feasible_qos_satisfaction_rate": "Feasible-scenario QoS rate",
         "pre_verification_correct_decision_rate": "Pre-verification correct decision rate",
         "modification_scope_ratio": "Modification scope", "unaffected_flow_interruption": "Unaffected-flow interruption",
@@ -73,7 +80,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--root", default="results/paper/wcnc_final_v3"); parser.add_argument("--experiment", choices=("all", "exp1", "exp2", "exp3", "exp4"), default="all")
     args = parser.parse_args(); root = Path(args.root)
     requests = {
-        "exp1": (("success_rate", ""), ("conditional_verified_latency_ms", "")),
+        "exp1": (("conditional_verified_latency_ms", ""), ("route_install_latency_ms", "")),
         "exp2": (("feasible_qos_satisfaction_rate", ""), ("pre_verification_correct_decision_rate", "")),
         "exp3": (("success_rate", ""), ("conditional_verified_latency_ms", ""), ("modification_scope_ratio", "")),
         "exp4": tuple((metric, series) for series in ("link_failure", "agent_failure", "capacity_degradation") for metric in ("success_rate", "conditional_verified_latency_ms", "modification_scope_ratio")),

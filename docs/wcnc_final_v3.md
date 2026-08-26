@@ -42,6 +42,45 @@ batch is one transaction); `Rules Installed` counts the netlink route/rule
 commands actually executed. Planning work units and every batch/command are
 retained in the raw event log for audit.
 
+## Exp1 analysis cohort and figures
+
+The immutable Exp1 raw table retains every attempted method run.  A failure in
+the `PREPARATION` stage is classified as infrastructure invalid because it
+occurs before the method-owned formation work (for example, failure to start
+the shared background-traffic fixture).  If any method has such a failure,
+all three methods for that `(scenario_fingerprint, seed)` pair remain in raw
+data but are excluded from paired method analysis.  The normalized rows record
+this explicitly through `infrastructure_valid`,
+`paired_analysis_eligible`, and `paired_exclusion_reason`.
+
+Failures after preparation, including ping/iperf3 data-plane verification
+failures, remain in the paired cohort and count against unconditional success.
+The aggregate table also reports the paired-scenario retention rate and the
+preparation-failure rate, so attrition cannot be hidden.  This paired
+infrastructure rule is a documented post-run analysis amendment; it does not
+alter, delete, or overwrite raw measurements.
+
+Normalization and final integrity audit both require the exact frozen grid:
+five task sizes, seeds 0--49, and the three canonical methods (750 rows total).
+Validation is keyed by `(num_agents, seed, method_id)`, so deleting an entire
+triplet or replacing one method with a duplicate cannot be hidden by a repeated
+scenario fingerprint.
+
+The Exp1 main result consists of two measured latency views:
+
+- `Conditional Verified Latency (Successful Runs Only)` includes the common
+  ping/iperf3 verification window and must be shown next to unconditional
+  success counts in the table/report;
+- `Route-installation Latency` isolates the method-owned deployment stage and
+  is not formula-derived.
+
+Because verified latency is dominated by the shared data-plane verification
+window, it is used as the end-to-end scaling result rather than evidence of a
+pointwise speedup.  Paired baseline-minus-Ours confidence intervals are the
+primary method comparison.  Success is retained in the aggregate table with
+Wilson numerator/denominator intervals, but Exp1 does not create a standalone
+success-rate main figure when the methods are near saturation.
+
 ## Pilot
 
 ```bash
