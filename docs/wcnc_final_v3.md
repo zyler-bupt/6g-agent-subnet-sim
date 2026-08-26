@@ -23,6 +23,11 @@ Exp1 uses method-owned deployment plans rather than a shared route installer:
 - `global_sfc_embedding`: a deterministic source-to-sink chain cover installed in sequential chain batches.
 
 All three plans operate on the same Agent/Gateway mapping and finish with the same ping/iperf3 verifier. No sleep or formula-derived latency is added.
+The outer namespace gate enumerates interfaces through the current netns
+netlink view (`ip -j link show`), not the host-visible sysfs mount. Global SFC
+installs a connected `/30` route in each per-Agent policy table and activates
+each chain hop with a deterministic destination-specific rule before shared
+verification.
 `Control Messages` counts controller deployment transactions (one sequential
 batch is one transaction); `Rules Installed` counts the netlink route/rule
 commands actually executed. Planning work units and every batch/command are
@@ -47,10 +52,13 @@ scripts/run_wcnc_final_v3_remote.sh
 
 The script first runs a `4 agents × 2 seeds × 3 methods` netns smoke. It stops before the formal run if any smoke trial fails. When unprivileged user namespaces cannot configure veth/netlink, it requests `sudo` and still creates a fresh outer network namespace automatically.
 
-To run the smoke manually, do not set `WCNC_EXP1_INSIDE_USERNS`:
+To run the smoke manually, explicitly remove any inherited internal sentinel:
 
 ```bash
-sudo -E .venv/bin/python -m experiments.exp1_netns_verified_formation \
+sudo env \
+  -u WCNC_EXP1_INSIDE_USERNS \
+  -u WCNC_EXP1_PARENT_NETNS_INODE \
+  .venv/bin/python -m experiments.exp1_netns_verified_formation \
   --config configs/exp1_netns_verified_formation_pilot_v3.yaml \
   --output-dir results/paper/wcnc_final_v3/pilot/exp1_netns_smoke_v3 \
   --seeds 9000:9001 --task-sizes 4 \

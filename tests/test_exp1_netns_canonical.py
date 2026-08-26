@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import yaml
 
@@ -10,6 +11,23 @@ import experiments.exp1_netns_verified_formation as exp1
 
 
 class Exp1NamespaceIsolationTests(unittest.TestCase):
+    def test_interface_enumeration_uses_current_netns_netlink_view(self) -> None:
+        ip_result = SimpleNamespace(
+            stdout='[{"ifname":"lo"}]',
+        )
+        host_sysfs_entries = [Path("/sys/class/net/lo"), Path("/sys/class/net/docker0")]
+        with (
+            patch.object(exp1.subprocess, "run", return_value=ip_result) as run,
+            patch.object(Path, "iterdir", return_value=host_sysfs_entries),
+        ):
+            self.assertEqual(exp1._network_interface_names(), {"lo"})
+        run.assert_called_once_with(
+            ("ip", "-j", "link", "show"),
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
     def test_manual_sentinel_without_parent_namespace_provenance_is_rejected(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "provenance"):
             exp1.validate_isolated_outer_namespace(
@@ -37,6 +55,37 @@ class Exp1NamespaceIsolationTests(unittest.TestCase):
             interface_names={"lo"},
         )
 
+    def test_pid_one_inode_access_errors_do_not_override_other_evidence(self) -> None:
+        for error_type in (PermissionError, FileNotFoundError):
+            with self.subTest(error_type=error_type.__name__), patch.object(
+                exp1,
+                "_init_network_namespace_inode",
+                side_effect=error_type("unavailable PID 1 netns"),
+            ):
+                try:
+                    exp1.validate_isolated_outer_namespace(
+                        {
+                            "WCNC_EXP1_INSIDE_USERNS": "1",
+                            "WCNC_EXP1_PARENT_NETNS_INODE": "200",
+                        },
+                        current_inode=201,
+                        interface_names={"lo"},
+                    )
+                except (PermissionError, FileNotFoundError) as error:
+                    self.fail(f"optional PID 1 check leaked access error: {error}")
+
+    def test_non_loopback_netlink_interface_is_rejected(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "expected only lo"):
+            exp1.validate_isolated_outer_namespace(
+                {
+                    "WCNC_EXP1_INSIDE_USERNS": "1",
+                    "WCNC_EXP1_PARENT_NETNS_INODE": "200",
+                },
+                current_inode=201,
+                init_inode=200,
+                interface_names={"lo", "eth0"},
+            )
+
     def test_forged_parent_inode_cannot_authorize_the_host_namespace(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "PID 1"):
             exp1.validate_isolated_outer_namespace(
@@ -60,6 +109,18 @@ class Exp1NamespaceIsolationTests(unittest.TestCase):
             user,
             ("unshare", "--user", "--map-root-user", "--net", "--fork", "python", "-m", "experiments.exp1_netns_verified_formation", "--seeds", "0:49"),
         )
+
+    def test_internal_reexec_restores_sentinel_and_parent_provenance(self) -> None:
+        completed = SimpleNamespace(returncode=0)
+        with (
+            patch.dict(exp1.os.environ, {}, clear=True),
+            patch.object(exp1, "_network_namespace_inode", return_value=321),
+            patch.object(exp1.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(exp1._reexec_in_user_namespace(("--seeds", "0:1")), 0)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["WCNC_EXP1_INSIDE_USERNS"], "1")
+        self.assertEqual(environment["WCNC_EXP1_PARENT_NETNS_INODE"], "321")
 
 
 class Exp1DeploymentPlanTests(unittest.TestCase):
@@ -98,6 +159,58 @@ class Exp1DeploymentPlanTests(unittest.TestCase):
         self.assertEqual(plans["global_sfc_embedding"].control_messages, 6)
         self.assertEqual(plans["proposed"].rules_installed, plans["cspf"].rules_installed)
         self.assertLess(plans["cspf"].rules_installed, plans["global_sfc_embedding"].rules_installed)
+
+    def test_global_sfc_policy_tables_can_resolve_each_local_gateway(self) -> None:
+        plan = self.topology().plan_task_routes(
+            "global_sfc_embedding", self.edges()
+        )
+        commands = {
+            command.argv
+            for batch in plan.batches
+            for command in batch.commands
+        }
+        self.assertIn(
+            (
+                "ip", "route", "replace", "table", "100",
+                "10.100.0.0/30", "dev", "eth0", "scope", "link",
+            ),
+            commands,
+        )
+        self.assertIn(
+            (
+                "ip", "route", "replace", "table", "101",
+                "10.101.1.0/30", "dev", "eth0", "scope", "link",
+            ),
+            commands,
+        )
+        self.assertIn(
+            (
+                "ip", "route", "replace", "table", "102",
+                "10.100.2.0/30", "dev", "eth0", "scope", "link",
+            ),
+            commands,
+        )
+
+    def test_global_sfc_activates_each_hop_by_destination_before_source_selection(self) -> None:
+        plan = self.topology().plan_task_routes(
+            "global_sfc_embedding", self.edges()
+        )
+        rule_commands = [
+            command.argv
+            for batch in plan.batches
+            for command in batch.commands
+            if command.argv[:2] == ("ip", "rule")
+        ]
+        self.assertTrue(rule_commands)
+        self.assertTrue(all("to" in command for command in rule_commands))
+        self.assertTrue(all("from" not in command for command in rule_commands))
+        self.assertIn(
+            (
+                "ip", "rule", "add", "priority", "10001",
+                "to", "10.101.1.2/32", "lookup", "100",
+            ),
+            rule_commands,
+        )
 
     def test_cspf_prunes_a_path_when_an_observed_link_lacks_bandwidth(self) -> None:
         topology = self.topology()

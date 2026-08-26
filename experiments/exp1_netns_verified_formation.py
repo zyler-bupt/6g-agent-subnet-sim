@@ -291,12 +291,16 @@ class ProcessNetnsTopology:
         commands: list[tuple[int | None, tuple[str, ...]]] = []
         for index, namespace in enumerate(self.agents):
             commands.append((namespace.pid, ("ip", "route", "del", "default")))
-            commands.append(
-                (
-                    namespace.pid,
-                    ("ip", "rule", "del", "priority", str(10_000 + index)),
+            for target_index in range(self.num_agents):
+                commands.append(
+                    (
+                        namespace.pid,
+                        (
+                            "ip", "rule", "del", "priority",
+                            str(10_000 + index * self.num_agents + target_index),
+                        ),
+                    )
                 )
-            )
             commands.append(
                 (
                     namespace.pid,
@@ -554,8 +558,22 @@ class ProcessNetnsTopology:
                         f"agent-{source_index}",
                         self.agents[source_index].pid,
                         (
-                            "ip", "rule", "add", "priority", str(10_000 + source_index),
-                            "from", f"{self.agent_ips[source_index]}/32", "lookup", table,
+                            "ip", "route", "replace", "table", table,
+                            f"10.{100 + gateway_index}.{source_index}.0/30",
+                            "dev", "eth0", "scope", "link",
+                        ),
+                    ),
+                    DeploymentCommand(
+                        f"agent-{source_index}",
+                        self.agents[source_index].pid,
+                        (
+                            "ip", "rule", "add", "priority",
+                            str(
+                                10_000
+                                + source_index * self.num_agents
+                                + target_index
+                            ),
+                            "to", f"{self.agent_ips[target_index]}/32", "lookup", table,
                         ),
                     ),
                     DeploymentCommand(
@@ -2261,7 +2279,18 @@ def _init_network_namespace_inode() -> int:
 
 
 def _network_interface_names() -> set[str]:
-    return {path.name for path in Path("/sys/class/net").iterdir()}
+    result = subprocess.run(
+        ("ip", "-j", "link", "show"),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    return {
+        str(item["ifname"])
+        for item in payload
+        if isinstance(item, dict) and "ifname" in item
+    }
 
 
 def validate_isolated_outer_namespace(
@@ -2284,10 +2313,15 @@ def validate_isolated_outer_namespace(
     actual_inode = _network_namespace_inode() if current_inode is None else current_inode
     if actual_inode == parent_inode:
         raise RuntimeError("Exp1 outer network namespace is not isolated from its launcher")
-    pid_one_inode = (
-        _init_network_namespace_inode() if init_inode is None else init_inode
-    )
-    if actual_inode == pid_one_inode:
+    pid_one_inode = init_inode
+    if init_inode is None:
+        try:
+            pid_one_inode = _init_network_namespace_inode()
+        except (PermissionError, FileNotFoundError):
+            # Unprivileged user namespaces may not be allowed to inspect PID 1.
+            # Parent provenance and the current netlink view remain mandatory.
+            pid_one_inode = None
+    if pid_one_inode is not None and actual_inode == pid_one_inode:
         raise RuntimeError("Exp1 outer network namespace still matches PID 1")
     actual_interfaces = (
         _network_interface_names() if interface_names is None else interface_names

@@ -116,6 +116,7 @@ run_exp1() {
   local sizes="$4"
   shift 4
   local command=(
+    env -u WCNC_EXP1_INSIDE_USERNS -u WCNC_EXP1_PARENT_NETNS_INODE
     .venv/bin/python -m experiments.exp1_netns_verified_formation
     --config "$config" --output-dir "$output_dir" --seeds "$seeds"
     --task-sizes "$sizes" --methods proposed,cspf,global_sfc_embedding "$@"
