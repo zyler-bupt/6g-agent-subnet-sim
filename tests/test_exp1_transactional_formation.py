@@ -3,13 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
+import threading
+import time
 import unittest
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import experiments.exp1_netns_verified_formation as exp1
 from experiments.exp1_netns_verified_formation import FormationEdge
+from experiments.exp1_transactional_formation import (
+    TransactionalFormationRun,
+    build_transactional_schedule,
+    load_transactional_config,
+    run_transactional_experiment,
+    run_transactional_trial,
+)
+from experiments.paper_protocol import TRANSACTIONAL_EXP1_PROTOCOL
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -579,7 +591,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         topology.agent_gateways = [0, 1, 0]
         backend = exp1.NetnsPolicyTableBackend(topology)
         executed: list[tuple[tuple[int | None, tuple[str, ...]], ...]] = []
-        topology._parallel_commands = lambda commands, *, check, timeout=None: executed.append(tuple(commands))
+        topology._parallel_commands = lambda commands, *, check, timeout=None, deadline=None: executed.append(tuple(commands))
         topology._run_ns = lambda *_args, **_kwargs: SimpleNamespace(stdout="[]")
         command = exp1.DeploymentCommand(
             "agent-0",
@@ -607,6 +619,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
             self.routes: dict[tuple[int, str], list[dict[str, object]]] = {}
             self.rules: dict[int, list[dict[str, object]]] = {}
             self.executed: list[tuple[tuple[tuple[int | None, tuple[str, ...]], ...], bool, float | None]] = []
+            self.deadlines: list[float | None] = []
             self.readback_calls = 0
             self.fail_cleanup = False
             self.timeout_stage = False
@@ -621,11 +634,13 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
                 return SimpleNamespace(stdout=json.dumps(self.rules.get(pid, [])))
             raise AssertionError(f"unexpected readback command: {command}")
 
-        def _parallel_commands(self, commands, *, check, timeout=None):
+        def _parallel_commands(self, commands, *, check, timeout=None, deadline=None):
             items = tuple(commands)
             self.executed.append((items, check, timeout))
+            self.deadlines.append(deadline)
             if self.timeout_stage and any(item[1][:3] == ("ip", "route", "replace") for item in items):
-                raise subprocess.TimeoutExpired("ip", timeout)
+                remaining = max(0.0, deadline - time.perf_counter()) if deadline else timeout
+                raise subprocess.TimeoutExpired("ip", remaining)
             if self.fail_cleanup and any(item[1][:3] == ("ip", "route", "flush") for item in items):
                 raise subprocess.CalledProcessError(1, "ip")
             for pid, command in items:
@@ -717,7 +732,19 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
 
         self.assertFalse(staged.accepted)
         self.assertIn("TimeoutExpired", staged.reason)
-        self.assertTrue(all(timeout == 0.2 for _, _, timeout in topology.executed))
+        self.assertIsNotNone(topology.deadlines[0])
+        self.assertGreater(topology.deadlines[0], time.perf_counter())
+
+    def test_stage_uses_one_absolute_deadline_for_all_concrete_commands(self) -> None:
+        topology = self._KernelTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+
+        staged = backend.stage("txn-absolute", (self._command(),), ack_timeout_ms=200)
+
+        self.assertTrue(staged.accepted)
+        self.assertEqual(len(topology.deadlines), 1)
+        self.assertIsNotNone(topology.deadlines[0])
+        self.assertGreater(topology.deadlines[0], time.perf_counter())
 
     def test_abort_of_unactivated_prepare_skips_absent_rule_deletion_and_releases_table(self) -> None:
         topology = self._KernelTopology()
@@ -865,3 +892,437 @@ class FormationTransactionProtocolTests(unittest.TestCase):
                     ended_ns=overrides.get("ended_ns", 1),
                     commands_attempted=overrides.get("commands_attempted", 0),
                 )
+
+
+class _RecordingTransactionalTopology:
+    def __init__(
+        self, num_agents: int, num_gateways: int, *,
+        fail_verify: bool = False, pid_offset: int = 0,
+        common_delay_s: float = 0.0, cleanup_delay_s: float = 0.0,
+    ) -> None:
+        self.num_agents = num_agents
+        self.num_gateways = min(num_gateways, num_agents)
+        self.fail_verify = fail_verify
+        self.pid_offset = pid_offset
+        self.common_delay_s = common_delay_s
+        self.cleanup_delay_s = cleanup_delay_s
+        self.planner_inputs: list[dict[str, object]] = []
+        self.common_installs: list[tuple[exp1.DeploymentCommand, ...]] = []
+        self.staged: dict[str, tuple[object, ...]] = {}
+        self.activated: set[str] = set()
+        self.verifier_calls: list[tuple[str, dict[str, object]]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def reset_task_routes(self) -> None:
+        self.staged.clear()
+        self.activated.clear()
+
+    def configure_traffic_control(self, _config, *, seed):
+        return ()
+
+    def start_background_traffic(self, _config, _profiles, *, seed):
+        return object()
+
+    def stop_background_traffic(self, _background):
+        threading.Event().wait(self.cleanup_delay_s)
+        return {"enabled": False}
+
+    def common_infrastructure_commands(self):
+        return (
+            exp1.DeploymentCommand(
+                "gateway-0", 200 + self.pid_offset,
+                ("ip", "route", "replace", "default", "via", "10.200.0.1", "dev", "up0"),
+            ),
+            exp1.DeploymentCommand(
+                "outer", None,
+                ("ip", "route", "replace", "10.100.0.2/32", "via", "10.200.0.2", "dev", "og0"),
+            ),
+        )
+
+    def install_common_infrastructure(self, commands):
+        commands = tuple(commands)
+        self.assert_common(commands)
+        threading.Event().wait(self.common_delay_s)
+        self.common_installs.append(commands)
+        return len(commands)
+
+    def assert_common(self, commands):
+        if commands != self.common_infrastructure_commands():
+            raise AssertionError("method-specific common infrastructure")
+
+    def _route(self, edge: FormationEdge, owner: int) -> exp1.DeploymentCommand:
+        return exp1.DeploymentCommand(
+            f"agent-{owner}", 100 + owner + self.pid_offset,
+            (
+                "ip", "route", "replace", f"10.0.{edge.target_index}.2/32",
+                "via", f"10.0.{owner}.1", "dev", "eth0",
+            ),
+        )
+
+    def plan_task_routes(self, method_id, edges, *, profiles, max_path_delay_ms):
+        self.planner_inputs.append(
+            {
+                "method_id": method_id,
+                "edges": tuple(edge.edge_id for edge in edges),
+                "profiles": tuple(profiles),
+                "max_path_delay_ms": max_path_delay_ms,
+            }
+        )
+        ordered = tuple(sorted(edges, key=lambda edge: edge.edge_id))
+        common = self.common_infrastructure_commands()
+        if method_id == "proposed":
+            owned = tuple(self._route(edge, edge.source_index) for edge in ordered)
+            batches = (
+                exp1.DeploymentBatch(
+                    "task_dag_parallel_batch", common + owned,
+                    ("shared",) * len(common) + tuple(edge.edge_id for edge in ordered),
+                ),
+            )
+            chains = ()
+        elif method_id == "cspf":
+            batches = (
+                exp1.DeploymentBatch(
+                    "cspf_shared_infrastructure", common, ("shared",) * len(common)
+                ),
+                *(
+                    exp1.DeploymentBatch(
+                        f"cspf_flow:{edge.edge_id}",
+                        (self._route(edge, edge.source_index),),
+                        (edge.edge_id,),
+                    )
+                    for edge in ordered
+                ),
+            )
+            chains = ()
+        else:
+            chains = exp1._service_chains(ordered)
+            chain_batches = []
+            for chain_index, chain in enumerate(chains):
+                for hop_index, edge in enumerate(chain):
+                    owner = f"chain-{chain_index:03d}:hop:{hop_index:03d}"
+                    chain_batches.append(
+                        exp1.DeploymentBatch(
+                            f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:routes",
+                            (self._route(edge, edge.source_index),),
+                            (owner,),
+                        )
+                    )
+                    chain_batches.append(
+                        exp1.DeploymentBatch(
+                            f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:activate",
+                            (
+                                exp1.DeploymentCommand(
+                                    f"agent-{edge.source_index}",
+                                    100 + edge.source_index + self.pid_offset,
+                                    (
+                                        "ip", "rule", "add", "priority", "10000",
+                                        "to", f"10.0.{edge.target_index}.2/32",
+                                        "lookup", "100",
+                                    ),
+                                ),
+                            ),
+                            (owner,),
+                        )
+                    )
+            batches = (
+                exp1.DeploymentBatch(
+                    "sfc_shared_infrastructure", common, ("shared",) * len(common)
+                ),
+                *chain_batches,
+            )
+        placements = {index: index for index in range(self.num_agents)}
+        capacities = {f"agent-{index}": 2 for index in range(self.num_agents)}
+        path_records = tuple(
+            {
+                "edge_id": edge.edge_id,
+                "path": (f"agent-{edge.source_index}", "gateway-0", f"agent-{edge.target_index}"),
+                "path_endpoints": (
+                    f"agent-{edge.source_index}:eth0", "gateway-0:in",
+                    "gateway-0:out", f"agent-{edge.target_index}:eth0",
+                ),
+                "required_throughput_mbps": edge.required_throughput_mbps,
+                "bottleneck_mbps": edge.required_throughput_mbps + 1.0,
+                "residual_bottleneck_after_mbps": 1.0,
+                "delay_cost_ms": 1.0,
+                "max_path_delay_ms": max_path_delay_ms,
+                "tie_break": edge.edge_id,
+                "feasible": True,
+            }
+            for edge in ordered
+        )
+        evidence = None
+        if method_id == "global_sfc_embedding":
+            evidence = {
+                "service_availability": tuple(
+                    {"node": index, "agent": index, "available": True}
+                    for index in range(self.num_agents)
+                ),
+                "placement_capacity": capacities,
+                "placement_slot_inventory": capacities,
+                "placement_slot_demand": {
+                    f"agent-{index}": 1 for index in range(self.num_agents)
+                },
+                "placement_feasible": True,
+                "chain_order_valid": True,
+                "path_feasible": True,
+                "path_records": path_records,
+            }
+        return exp1.FormationDeploymentPlan(
+            method_id=method_id,
+            planning_policy=f"recording-{method_id}",
+            tie_break="canonical_edge_id",
+            ordered_edge_ids=tuple(edge.edge_id for edge in ordered),
+            service_chain_count=len(chains),
+            planning_work_units=len(ordered),
+            batches=batches,
+            path_records=path_records if method_id == "global_sfc_embedding" else (),
+            service_placements=placements if method_id == "global_sfc_embedding" else None,
+            placement_capacity=capacities if method_id == "global_sfc_embedding" else None,
+            sfc_evidence=evidence,
+        )
+
+    def stage_transaction_commands(self, transaction_id, commands, *, ack_timeout_ms):
+        commands = tuple(commands)
+        if any(
+            command.namespace in {"outer", "gateway-0"}
+            or command.argv[:3] != ("ip", "route", "replace")
+            for command in commands
+        ):
+            raise AssertionError("unsupported shared command reached policy backend")
+        self.staged[transaction_id] = commands
+        return StageResult(
+            accepted=True,
+            commands_attempted=len(commands),
+            readback_after=tuple({"command": str(command.argv)} for command in commands),
+        )
+
+    def activate_transaction(self, transaction_id):
+        if transaction_id not in self.staged:
+            return CommandResult(accepted=False, reason="not staged")
+        self.activated.add(transaction_id)
+        return CommandResult(accepted=True, commands_attempted=1, readback_after=self.read_transaction_state(transaction_id))
+
+    def abort_transaction(self, transaction_id):
+        self.staged.pop(transaction_id, None)
+        self.activated.discard(transaction_id)
+        return CommandResult(accepted=True, commands_attempted=1, readback_after=())
+
+    def read_transaction_state(self, transaction_id):
+        return tuple(
+            {"command": str(command.argv), "active": transaction_id in self.activated}
+            for command in self.staged.get(transaction_id, ())
+        )
+
+    def verify_ping(self, edges, **kwargs):
+        if self.fail_verify:
+            raise RuntimeError("verifier exploded")
+        self.verifier_calls.append(("ping", dict(kwargs)))
+        return len(edges), [
+            {"edge_id": edge.edge_id, "passed": True, "timeout": False}
+            for edge in edges
+        ]
+
+    def verify_iperf3(self, edges, **kwargs):
+        self.verifier_calls.append(("iperf3", dict(kwargs)))
+        return len(edges), float(len(edges)), [
+            {"edge_id": edge.edge_id, "passed": True, "timeout": False}
+            for edge in edges
+        ]
+
+
+class TransactionalRunnerContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.formal = load_transactional_config(
+            cls.root / "configs" / "exp1_transactional_formation_v1.yaml"
+        )
+        cls.pilot = load_transactional_config(
+            cls.root / "configs" / "exp1_transactional_formation_pilot_v1.yaml"
+        )
+
+    def test_frozen_grids_and_protocol_registration_are_exact(self) -> None:
+        self.assertEqual(len(build_transactional_schedule(self.formal)), 2250)
+        self.assertEqual(len(build_transactional_schedule(self.pilot)), 900)
+        self.assertEqual(self.formal["experiment"]["phase"], "formal")
+        self.assertEqual(self.pilot["experiment"]["phase"], "pilot")
+        self.assertEqual(self.formal["transaction"], self.pilot["transaction"])
+        self.assertEqual(self.formal["verification"], self.pilot["verification"])
+        self.assertEqual(
+            TRANSACTIONAL_EXP1_PROTOCOL["formal_config"],
+            "configs/exp1_transactional_formation_v1.yaml",
+        )
+
+    def test_pilot_differs_only_by_phase_seeds_and_output_provenance(self) -> None:
+        import yaml
+
+        formal_source = yaml.safe_load(
+            (self.root / "configs" / "exp1_transactional_formation_v1.yaml")
+            .read_text(encoding="utf-8")
+        )
+        pilot_source = yaml.safe_load(
+            (self.root / "configs" / "exp1_transactional_formation_pilot_v1.yaml")
+            .read_text(encoding="utf-8")
+        )
+
+        def differing_paths(left, right, prefix=()):
+            if isinstance(left, dict) and isinstance(right, dict):
+                return {
+                    path
+                    for key in left.keys() | right.keys()
+                    for path in differing_paths(left.get(key), right.get(key), prefix + (key,))
+                }
+            return set() if left == right else {prefix}
+
+        self.assertEqual(
+            differing_paths(formal_source, pilot_source),
+            {
+                ("experiment", "phase"),
+                ("simulation", "seeds"),
+                ("output", "provenance"),
+            },
+        )
+
+    def test_override_schedule_is_the_invocation_cartesian_grid(self) -> None:
+        schedule = build_transactional_schedule(
+            self.pilot,
+            seeds=(9000, 9001),
+            task_sizes=(4,),
+            methods=("proposed", "cspf", "global_sfc_embedding"),
+            scenario_classes=("command_rejection",),
+        )
+
+        self.assertEqual(len(schedule), 6)
+        self.assertEqual(
+            {
+                (item.seed, item.num_agents, item.method_id, item.scenario_class)
+                for item in schedule
+            },
+            {
+                (seed, 4, method, "command_rejection")
+                for seed in (9000, 9001)
+                for method in ("proposed", "cspf", "global_sfc_embedding")
+            },
+        )
+
+    def test_fault_is_hidden_shared_infrastructure_is_common_and_verifier_is_paired(self) -> None:
+        paired = []
+        topologies = []
+        for method_index, method in enumerate(
+            ("proposed", "cspf", "global_sfc_embedding")
+        ):
+            topology = _RecordingTransactionalTopology(4, 4, pid_offset=method_index * 1000)
+            row, events = run_transactional_trial(
+                topology,
+                self.formal,
+                method_id=method,
+                scenario_class="command_rejection",
+                seed=0,
+                num_agents=4,
+            )
+            paired.append(row)
+            topologies.append(topology)
+            self.assertTrue(row.success)
+            self.assertEqual(len(topology.common_installs), 1)
+            self.assertNotIn("fault_schedule", topology.planner_inputs[0])
+            self.assertEqual(
+                len([event for event in events if event["stage"] == "FAULT_INJECTED"]),
+                1,
+            )
+            self.assertTrue(topology.verifier_calls)
+
+        self.assertEqual(len({row.fault_schedule_fingerprint for row in paired}), 1)
+        self.assertEqual(len({row.verifier_fingerprint for row in paired}), 1)
+        self.assertEqual(len({row.common_infrastructure_fingerprint for row in paired}), 1)
+
+    def test_ack_timeout_waits_for_a_real_deadline_then_retries(self) -> None:
+        topology = _RecordingTransactionalTopology(4, 4)
+        started = time.perf_counter()
+
+        row, events = run_transactional_trial(
+            topology,
+            self.formal,
+            method_id="cspf",
+            scenario_class="prepare_ack_timeout",
+            seed=0,
+            num_agents=4,
+        )
+
+        self.assertTrue(row.success)
+        self.assertGreaterEqual(time.perf_counter() - started, 0.18)
+        injected = [event for event in events if event["stage"] == "FAULT_INJECTED"]
+        self.assertEqual(injected[0]["details"]["mechanism"], "threading.Event.wait")
+
+    def test_exception_is_retained_and_invocation_grid_is_persisted(self) -> None:
+        def topology_factory(num_agents, num_gateways):
+            return _RecordingTransactionalTopology(num_agents, num_gateways, fail_verify=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            rows = run_transactional_experiment(
+                self.formal,
+                Path(directory),
+                seeds=(7,),
+                task_sizes=(4,),
+                methods=("proposed",),
+                scenario_classes=("command_rejection",),
+                require_complete_grid=True,
+                topology_factory=topology_factory,
+            )
+            raw = Path(directory) / "raw"
+            scope = json.loads((raw / "measurement_scope.json").read_text(encoding="utf-8"))
+            attempt_lines = (raw / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+            run_lines = (raw / "runs.csv").read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0].success)
+        self.assertIn("verifier exploded", rows[0].failure_reason)
+        self.assertEqual(len(run_lines), 2)
+        self.assertTrue(attempt_lines)
+        self.assertEqual(scope["phase"], "formal")
+        self.assertEqual(scope["invocation_grid"]["seeds"], [7])
+        self.assertEqual(scope["invocation_grid"]["expected_rows"], 1)
+        self.assertNotEqual(scope["invocation_grid"], scope["frozen_config_grid"])
+
+    def test_measured_scopes_exclude_common_setup_and_post_verify_cleanup(self) -> None:
+        topology = _RecordingTransactionalTopology(
+            4, 4, common_delay_s=0.05, cleanup_delay_s=0.05
+        )
+        wall_started = time.perf_counter()
+
+        row, _events = run_transactional_trial(
+            topology, self.formal, method_id="cspf",
+            scenario_class="command_rejection", seed=3, num_agents=4,
+        )
+        wall_ms = (time.perf_counter() - wall_started) * 1000.0
+
+        self.assertTrue(row.success)
+        self.assertGreater(row.time_to_correct_formation_ms, row.method_owned_formation_latency_ms)
+        self.assertGreaterEqual(
+            row.time_to_correct_formation_ms - row.method_owned_formation_latency_ms,
+            40.0,
+        )
+        self.assertGreaterEqual(wall_ms - row.time_to_correct_formation_ms, 40.0)
+
+    def test_run_schema_is_immutable(self) -> None:
+        names = set(TransactionalFormationRun.__dataclass_fields__)
+        self.assertTrue(
+            {
+                "prepare_attempts", "commit_attempts", "rollback_scope_objects",
+                "wasted_rule_commands", "partial_state_exposure_ms",
+                "planning_latency_ms", "prepare_latency_ms", "commit_latency_ms",
+                "rollback_replan_latency_ms", "final_verification_latency_ms",
+                "configuration_sha256", "verifier_fingerprint",
+            }.issubset(names)
+        )
+        topology = _RecordingTransactionalTopology(4, 4)
+        row, _events = run_transactional_trial(
+            topology, self.formal, method_id="proposed",
+            scenario_class="command_rejection", seed=1, num_agents=4,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            row.success = False  # type: ignore[misc]

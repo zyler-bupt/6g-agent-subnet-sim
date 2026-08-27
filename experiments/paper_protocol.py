@@ -13,6 +13,21 @@ import yaml
 
 PROTOCOL_ID = "wcnc_final_v3"
 
+TRANSACTIONAL_EXP1_PROTOCOL: Mapping[str, Any] = {
+    "arm_id": "exp1_transactional_v1",
+    "formal_config": "configs/exp1_transactional_formation_v1.yaml",
+    "pilot_config": "configs/exp1_transactional_formation_pilot_v1.yaml",
+    "methods": ("proposed", "cspf", "global_sfc_embedding"),
+    "scenario_classes": (
+        "stale_version",
+        "prepare_ack_timeout",
+        "command_rejection",
+    ),
+    "formal_rows": 2250,
+    "pilot_rows": 900,
+    "nominal_arm": "configs/exp1_netns_verified_formation_v3.yaml",
+}
+
 
 class RunMode(str, Enum):
     PILOT = "pilot"

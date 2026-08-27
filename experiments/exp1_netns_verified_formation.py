@@ -328,8 +328,9 @@ class NetnsPolicyTableBackend:
                 readback_after=staged.snapshot,
             )
         try:
+            stage_deadline = time.perf_counter() + staged.timeout_s
             self._topology._parallel_commands(
-                tuple(staged_commands), check=True, timeout=staged.timeout_s
+                tuple(staged_commands), check=True, deadline=stage_deadline
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             cleanup = self._cleanup(staged)
@@ -867,6 +868,22 @@ class ProcessNetnsTopology:
                 for command in batch.commands
             )
         return plan.control_messages, plan.rules_installed
+
+    def common_infrastructure_commands(self) -> tuple[DeploymentCommand, ...]:
+        """Return the method-independent gateway and outer reachability setup."""
+        return tuple(self._gateway_default_commands()) + tuple(self._outer_agent_commands())
+
+    def install_common_infrastructure(
+        self, commands: Sequence[DeploymentCommand]
+    ) -> int:
+        """Install the reviewed common setup outside method-owned transactions."""
+        canonical = self.common_infrastructure_commands()
+        if tuple(commands) != canonical:
+            raise ValueError("common infrastructure differs from canonical topology setup")
+        self._parallel_commands(
+            tuple((command.pid, command.argv) for command in canonical), check=True
+        )
+        return len(canonical)
 
     def stage_transaction_commands(
         self,
@@ -1800,12 +1817,21 @@ class ProcessNetnsTopology:
         *,
         check: bool,
         timeout: float | None = None,
+        deadline: float | None = None,
     ) -> None:
+        if timeout is not None and deadline is not None:
+            raise ValueError("timeout and deadline are mutually exclusive")
+
         def execute(item: tuple[int | None, tuple[str, ...]]) -> subprocess.CompletedProcess[str]:
             pid, command = item
+            command_timeout = timeout
+            if deadline is not None:
+                command_timeout = deadline - time.perf_counter()
+                if command_timeout <= 0:
+                    raise subprocess.TimeoutExpired(command, 0.0)
             if pid is None:
-                return self._run_host(*command, check=check, timeout=timeout)
-            return self._run_ns(pid, *command, check=check, timeout=timeout)
+                return self._run_host(*command, check=check, timeout=command_timeout)
+            return self._run_ns(pid, *command, check=check, timeout=command_timeout)
 
         with ThreadPoolExecutor(max_workers=min(32, max(1, len(commands)))) as pool:
             futures = [pool.submit(execute, item) for item in commands]

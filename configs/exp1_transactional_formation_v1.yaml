@@ -1,0 +1,25 @@
+experiment:
+  protocol_id: wcnc_final_v3
+  arm_id: exp1_transactional_v1
+  phase: formal
+  frozen: true
+  provenance: wcnc_final_v3_exp1_transactional_protocol
+
+methods: [proposed, cspf, global_sfc_embedding]
+scenario_classes: [stale_version, prepare_ack_timeout, command_rejection]
+
+simulation:
+  seeds: "0:49"
+  task_sizes: [4, 8, 12, 16, 20]
+  timeout_s: 45
+  result_mode: real_linux_netns_transactional_formation
+
+transaction:
+  max_attempts: 2
+  prepare_ack_timeout_ms: 200
+
+verification:
+  inherit_from: configs/exp1_netns_verified_formation_v3.yaml
+
+output:
+  provenance: results/paper/wcnc_final_v3/raw/exp1_transactional
