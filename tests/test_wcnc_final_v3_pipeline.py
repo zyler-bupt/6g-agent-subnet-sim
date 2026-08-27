@@ -14,6 +14,7 @@ from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
 from scripts.normalize_wcnc_final_v3_exp1 import _configuration_sha256, normalize
+from scripts.normalize_wcnc_final_v3_exp1_transactional import normalize_transactional
 from scripts.plot_wcnc_final_v3 import load
 from scripts.audit_wcnc_final_v3 import (
     audit,
@@ -23,6 +24,74 @@ from scripts.audit_wcnc_final_v3 import (
 
 
 class WcncFinalV3PipelineTests(unittest.TestCase):
+    def test_transactional_normalizer_requires_exact_2250_grid(self) -> None:
+        """A formal transactional artifact cannot be normalized from a partial run."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            incomplete_runs = root / "runs.csv"
+            attempts = root / "attempts.jsonl"
+            target = root / "trials.csv"
+            fields = (
+                "protocol_id", "arm_id", "phase", "run_id", "scenario_class",
+                "seed", "num_agents", "method_id", "fault_schedule_fingerprint",
+                "configuration_sha256", "result_mode", "success", "timeout",
+                "failure_reason",
+            )
+            with incomplete_runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for method in ("proposed", "cspf", "global_sfc_embedding"):
+                    writer.writerow({
+                        "protocol_id": "wcnc_final_v3",
+                        "arm_id": "exp1_transactional_v1",
+                        "phase": "formal",
+                        "run_id": f"run-{method}",
+                        "scenario_class": "command_rejection",
+                        "seed": 0,
+                        "num_agents": 4,
+                        "method_id": method,
+                        "fault_schedule_fingerprint": "f" * 64,
+                        "configuration_sha256": "not-reached",
+                        "result_mode": "real_linux_netns_transactional_formation",
+                        "success": True,
+                        "timeout": False,
+                        "failure_reason": "",
+                    })
+            attempts.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "2250"):
+                normalize_transactional(
+                    incomplete_runs,
+                    target,
+                    Path("configs/exp1_transactional_formation_v1.yaml"),
+                )
+
+    def test_transactional_formal_aggregation_rejects_partial_raw(self) -> None:
+        """The paper aggregation path cannot be run directly on a partial raw file."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "trials.csv"
+            fields = (
+                "scenario_class", "num_agents", "seed", "method_id",
+                "fault_schedule_fingerprint", "success", "timeout",
+                "verified_correct", "attempt_count", "rollback_scope_objects",
+                "wasted_rule_commands", "partial_state_exposure_ms",
+            )
+            with raw.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for method in ("proposed", "cspf", "global_sfc_embedding"):
+                    writer.writerow({
+                        "scenario_class": "command_rejection", "num_agents": 4,
+                        "seed": 0, "method_id": method,
+                        "fault_schedule_fingerprint": "f" * 64,
+                        "success": True, "timeout": False,
+                        "verified_correct": True, "attempt_count": 1,
+                        "rollback_scope_objects": "[]", "wasted_rule_commands": 0,
+                        "partial_state_exposure_ms": 0,
+                    })
+            with self.assertRaisesRegex(ValueError, "2250"):
+                aggregate_experiment("exp1_transactional", raw, root / "metrics.csv")
+
     def test_paired_differences_do_not_collapse_repeated_scenario_fingerprints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

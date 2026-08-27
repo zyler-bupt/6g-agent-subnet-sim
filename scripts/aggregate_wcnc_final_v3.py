@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import math
 import random
 from collections import defaultdict
@@ -47,6 +48,236 @@ def cluster_bootstrap(values: list[tuple[int, float]], iterations: int = 5000) -
     return mean, samples[int(0.025 * (iterations - 1))], samples[int(0.975 * (iterations - 1))]
 
 
+TRANSACTIONAL_CONTINUOUS = (
+    ("method_owned_formation_latency_ms", False),
+    ("time_to_correct_formation_ms", True),
+    ("rollback_scope_objects", False),
+    ("wasted_rule_commands", False),
+    ("partial_state_exposure_ms", False),
+)
+TRANSACTIONAL_FORMAL_METHODS = ("proposed", "cspf", "global_sfc_embedding")
+TRANSACTIONAL_FORMAL_SCENARIOS = (
+    "stale_version", "prepare_ack_timeout", "command_rejection",
+)
+TRANSACTIONAL_FORMAL_SIZES = (4, 8, 12, 16, 20)
+TRANSACTIONAL_FORMAL_SEEDS = tuple(range(50))
+
+
+def _number(value: object) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return float(str(value))
+
+
+def _rollback_scope_size(value: object) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    decoded = json.loads(str(value))
+    if not isinstance(decoded, list):
+        raise ValueError("rollback_scope_objects must be a JSON array")
+    return float(len(decoded))
+
+
+def _transactional_value(row: dict[str, object], metric: str) -> float | None:
+    if metric == "rollback_scope_objects":
+        return _rollback_scope_size(row.get(metric))
+    return _number(row.get(metric))
+
+
+def _transactional_first_attempt_commit(row: dict[str, object]) -> bool:
+    if str(row.get("first_attempt_commit", "")).strip():
+        return truth(row["first_attempt_commit"])
+    try:
+        first_attempt = int(str(row.get("attempt_count", ""))) == 1
+    except ValueError:
+        return False
+    return first_attempt and truth(row.get("success"))
+
+
+def _transactional_group_key(row: dict[str, object]) -> tuple[str, str, int]:
+    return (
+        str(row.get("method_id", "")),
+        str(row.get("scenario_class", "")),
+        int(str(row["num_agents"])),
+    )
+
+
+def _transactional_formal_grid_errors(rows: list[dict[str, object]]) -> list[str]:
+    expected = {
+        (scenario_class, num_agents, seed, method_id)
+        for scenario_class in TRANSACTIONAL_FORMAL_SCENARIOS
+        for num_agents in TRANSACTIONAL_FORMAL_SIZES
+        for seed in TRANSACTIONAL_FORMAL_SEEDS
+        for method_id in TRANSACTIONAL_FORMAL_METHODS
+    }
+    try:
+        observed = [
+            (
+                str(row["scenario_class"]), int(str(row["num_agents"])),
+                int(str(row["seed"])), str(row["method_id"]),
+            )
+            for row in rows
+        ]
+    except (KeyError, ValueError) as error:
+        raise ValueError("transactional formal raw has an invalid grid key") from error
+    errors: list[str] = []
+    if len(observed) != len(expected):
+        errors.append(
+            f"transactional formal raw must contain exactly {len(expected)} rows; "
+            f"got {len(observed)}"
+        )
+    if set(observed) != expected:
+        errors.append("transactional formal raw does not match the frozen grid")
+    if len(observed) != len(set(observed)):
+        errors.append("transactional formal raw contains duplicate trial identities")
+    return errors
+
+
+def _validate_transactional_pairing(rows: list[dict[str, object]]) -> None:
+    paired: dict[tuple[str, int, int], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        try:
+            key = (
+                str(row["scenario_class"]), int(str(row["num_agents"])),
+                int(str(row["seed"])),
+            )
+        except (KeyError, ValueError) as error:
+            raise ValueError("transactional aggregation requires scenario, size, and seed") from error
+        paired[key].append(row)
+    for key, group in paired.items():
+        methods = [str(row.get("method_id", "")) for row in group]
+        fingerprints = {str(row.get("fault_schedule_fingerprint", "")) for row in group}
+        if len(methods) != len(set(methods)):
+            raise ValueError(f"transactional paired trial {key!r} has duplicate methods")
+        if set(methods) != {"proposed", "cspf", "global_sfc_embedding"}:
+            raise ValueError(f"transactional paired trial {key!r} lacks the canonical methods")
+        if len(fingerprints) != 1 or "" in fingerprints:
+            raise ValueError(f"transactional paired trial {key!r} has divergent fault fingerprints")
+
+
+def aggregate_transactional(
+    rows: list[dict[str, object]],
+    *,
+    raw_path: Path | str = Path("<in-memory>"),
+    raw_sha: str | None = None,
+) -> list[dict[str, object]]:
+    """Aggregate complete transactional trials while retaining failed attempts."""
+    raw_path = Path(raw_path)
+    raw_sha = raw_sha if raw_sha is not None else hashlib.sha256(
+        b"wcnc_final_v3_transactional_in_memory"
+    ).hexdigest()
+    _validate_transactional_pairing(rows)
+    groups: dict[tuple[str, str, int], list[dict[str, object]]] = defaultdict(list)
+    for raw_row in rows:
+        row = dict(raw_row)
+        groups[_transactional_group_key(row)].append(row)
+    out: list[dict[str, object]] = []
+    for (method, scenario_class, num_agents), items in sorted(groups.items()):
+        rate_metrics = (
+            ("success_rate", sum(truth(row.get("success")) for row in items)),
+            ("timeout_rate", sum(truth(row.get("timeout")) for row in items)),
+            (
+                "first_attempt_commit_rate",
+                sum(_transactional_first_attempt_commit(row) for row in items),
+            ),
+        )
+        for metric, numerator in rate_metrics:
+            estimate, low, high = wilson(numerator, len(items))
+            out.append(_aggregate_row(
+                "exp1_transactional", method, scenario_class, "num_agents",
+                num_agents, metric, estimate, low, high, numerator, len(items),
+                raw_path, raw_sha, "wilson_95",
+            ))
+        for metric, successful_verified_only in TRANSACTIONAL_CONTINUOUS:
+            samples: list[tuple[int, float]] = []
+            for row in items:
+                if successful_verified_only and not (
+                    truth(row.get("success")) and truth(row.get("verified_correct"))
+                ):
+                    continue
+                value = _transactional_value(row, metric)
+                if value is not None:
+                    samples.append((int(str(row["seed"])), value))
+            estimate, low, high = cluster_bootstrap(samples)
+            out.append(_aggregate_row(
+                "exp1_transactional", method, scenario_class, "num_agents",
+                num_agents, metric, estimate, low, high, len(samples), len(items),
+                raw_path, raw_sha, "topology_cluster_bootstrap_95",
+            ))
+    return out
+
+
+def _write_transactional_paired_differences(
+    rows: list[dict[str, object]], path: Path, raw_path: Path, raw_sha: str,
+) -> None:
+    indexed: dict[tuple[str, int, int, str, str], dict[str, object]] = {}
+    for raw_row in rows:
+        row = dict(raw_row)
+        key = (
+            str(row["scenario_class"]), int(str(row["num_agents"])),
+            int(str(row["seed"])), str(row["fault_schedule_fingerprint"]),
+            str(row["method_id"]),
+        )
+        if key in indexed:
+            raise ValueError("transactional paired analysis has duplicate trial identities")
+        indexed[key] = row
+    differences: dict[tuple[str, int, str, str], list[tuple[int, float]]] = defaultdict(list)
+    rate_metrics = (
+        ("success_rate", lambda row: float(truth(row.get("success")))),
+        ("timeout_rate", lambda row: float(truth(row.get("timeout")))),
+        ("first_attempt_commit_rate", lambda row: float(_transactional_first_attempt_commit(row))),
+    )
+    for (scenario_class, num_agents, seed, fingerprint, method), row in indexed.items():
+        if method == "proposed":
+            continue
+        proposed = indexed.get((scenario_class, num_agents, seed, fingerprint, "proposed"))
+        if proposed is None:
+            continue
+        for metric, value in rate_metrics:
+            differences[(scenario_class, num_agents, method, metric)].append(
+                (seed, value(row) - value(proposed))
+            )
+        for metric, successful_verified_only in TRANSACTIONAL_CONTINUOUS:
+            if successful_verified_only and not (
+                truth(row.get("success")) and truth(row.get("verified_correct"))
+                and truth(proposed.get("success")) and truth(proposed.get("verified_correct"))
+            ):
+                continue
+            baseline_value = _transactional_value(row, metric)
+            proposed_value = _transactional_value(proposed, metric)
+            if baseline_value is None or proposed_value is None:
+                continue
+            differences[(scenario_class, num_agents, method, metric)].append(
+                (seed, baseline_value - proposed_value)
+            )
+    output: list[dict[str, object]] = []
+    for (scenario_class, num_agents, method, metric), values in sorted(differences.items()):
+        estimate, low, high = cluster_bootstrap(values)
+        output.append({
+            "protocol_id": "wcnc_final_v3", "experiment": "exp1_transactional",
+            "series": scenario_class, "method_id": method,
+            "reference_method_id": "proposed", "x_name": "num_agents",
+            "x_value": num_agents, "metric": metric,
+            "paired_difference": estimate, "ci_low": low, "ci_high": high,
+            "paired_trials": len(values),
+            "interval": "paired_topology_cluster_bootstrap_95",
+            "raw_path": str(raw_path), "raw_sha256": raw_sha,
+        })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        fields = list(output[0]) if output else [
+            "protocol_id", "experiment", "series", "method_id",
+            "reference_method_id", "x_name", "x_value", "metric",
+            "paired_difference", "ci_low", "ci_high", "paired_trials",
+            "interval", "raw_path", "raw_sha256",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(output)
+
+
 def _x(exp: str, row: dict[str, str]) -> tuple[str, float]:
     if exp == "exp1":
         return "num_agents", float(row["num_agents"])
@@ -64,6 +295,21 @@ def _x(exp: str, row: dict[str, str]) -> tuple[str, float]:
 def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[dict[str, object]]:
     rows = read_rows(raw_path)
     raw_sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    if exp == "exp1_transactional":
+        grid_errors = _transactional_formal_grid_errors(rows)
+        if grid_errors:
+            raise ValueError("; ".join(grid_errors))
+        out = aggregate_transactional(rows, raw_path=raw_path, raw_sha=raw_sha)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fields = list(out[0]) if out else []
+        with output_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(out)
+        _write_transactional_paired_differences(
+            rows, output_path.with_name("paired_differences.csv"), raw_path, raw_sha,
+        )
+        return out
     groups: dict[tuple[str, str, float, str], list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         method = row.get("method_id") or row.get("method") or ""
@@ -205,9 +451,9 @@ def _aggregate_row(exp, method, series, x_name, x_value, metric, estimate, low, 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("--root", default="results/paper/wcnc_final_v3"); parser.add_argument("--experiment", choices=("all", "exp1", "exp2", "exp3", "exp4"), default="all")
+    parser = argparse.ArgumentParser(); parser.add_argument("--root", default="results/paper/wcnc_final_v3"); parser.add_argument("--experiment", choices=("all", "exp1", "exp1_transactional", "exp2", "exp3", "exp4"), default="all")
     args = parser.parse_args(); root = Path(args.root)
-    experiments = ("exp1", "exp2", "exp3", "exp4") if args.experiment == "all" else (args.experiment,)
+    experiments = ("exp1", "exp1_transactional", "exp2", "exp3", "exp4") if args.experiment == "all" else (args.experiment,)
     for exp in experiments:
         aggregate_experiment(exp, root / "raw" / exp / "trials.csv", root / "aggregated" / exp / "metrics.csv")
 

@@ -10,6 +10,45 @@
     "protocol_id": {"const": "wcnc_final_v3"},
     "seed": {"type": "integer"},
     "method_id": {"type": "string"},
+    "arm_id": {"type": ["string", "null"]},
+    "phase": {"type": ["string", "null"]},
+    "trial_id": {"type": ["string", "null"]},
+    "run_id": {"type": ["string", "null"]},
+    "run_sequence": {"type": ["integer", "null"]},
+    "scenario_class": {"type": ["string", "null"]},
+    "num_agents": {"type": ["integer", "null"]},
+    "num_gateways": {"type": ["integer", "null"]},
+    "num_business_edges": {"type": ["integer", "null"]},
+    "fault_schedule_fingerprint": {"type": ["string", "null"]},
+    "logical_fault_target": {"type": ["string", "null"]},
+    "observation_version_fingerprint": {"type": ["string", "null"]},
+    "verifier_fingerprint": {"type": ["string", "null"]},
+    "common_infrastructure_fingerprint": {"type": ["string", "null"]},
+    "common_infrastructure_provenance": {"type": ["string", "null"]},
+    "configuration_sha256": {"type": ["string", "null"]},
+    "execution_mode_detail": {"type": ["string", "null"]},
+    "first_attempt_commit": {"type": ["boolean", "null"]},
+    "attempt_count": {"type": ["integer", "null"]},
+    "prepare_attempts": {"type": ["integer", "null"]},
+    "commit_attempts": {"type": ["integer", "null"]},
+    "rollback_count": {"type": ["integer", "null"]},
+    "rollback_scope_objects": {"type": ["string", "null"]},
+    "wasted_rule_commands": {"type": ["integer", "null"]},
+    "partial_state_exposure_ms": {"type": ["number", "null"]},
+    "planning_latency_ms": {"type": ["number", "null"]},
+    "common_infrastructure_latency_ms": {"type": ["number", "null"]},
+    "prepare_latency_ms": {"type": ["number", "null"]},
+    "commit_latency_ms": {"type": ["number", "null"]},
+    "rollback_replan_latency_ms": {"type": ["number", "null"]},
+    "method_owned_formation_latency_ms": {"type": ["number", "null"]},
+    "final_verification_latency_ms": {"type": ["number", "null"]},
+    "time_to_correct_formation_ms": {"type": ["number", "null"]},
+    "verified_correct": {"type": ["boolean", "null"]},
+    "infrastructure_cleanup_success": {"type": ["boolean", "null"]},
+    "cleanup_failure_reason": {"type": ["string", "null"]},
+    "leaked_state_fingerprint": {"type": ["string", "null"]},
+    "source_runs_sha256": {"type": ["string", "null"]},
+    "source_attempts_sha256": {"type": ["string", "null"]},
     "scenario_fingerprint": {"type": "string", "minLength": 32},
     "observation_fingerprint": {"type": ["string", "null"]},
     "oracle_fingerprint": {"type": ["string", "null"]},
@@ -26,5 +65,30 @@
     "pre_verification_feasible": {"type": ["boolean", "null"]},
     "unsafe_proposal_before_verification": {"type": ["boolean", "null"]},
     "verification_rescued": {"type": ["boolean", "null"]}
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["arm_id"],
+        "properties": {"arm_id": {"const": "exp1_transactional_v1"}}
+      },
+      "then": {
+        "required": [
+          "phase", "trial_id", "run_id", "scenario_class", "num_agents",
+          "fault_schedule_fingerprint", "configuration_sha256",
+          "execution_mode_detail", "attempt_count", "prepare_attempts",
+          "commit_attempts", "rollback_count", "rollback_scope_objects",
+          "wasted_rule_commands", "partial_state_exposure_ms",
+          "method_owned_formation_latency_ms", "time_to_correct_formation_ms",
+          "verified_correct", "infrastructure_cleanup_success",
+          "cleanup_failure_reason", "leaked_state_fingerprint",
+          "source_runs_sha256", "source_attempts_sha256"
+        ],
+        "properties": {
+          "phase": {"const": "formal"},
+          "result_mode": {"const": "measured_netns"}
+        }
+      }
+    }
+  ]
 }

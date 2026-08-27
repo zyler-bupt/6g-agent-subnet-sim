@@ -24,6 +24,7 @@ from experiments.exp1_transactional_formation import (
     run_transactional_trial,
 )
 from experiments.paper_protocol import TRANSACTIONAL_EXP1_PROTOCOL
+from scripts.aggregate_wcnc_final_v3 import aggregate_transactional
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -2002,3 +2003,65 @@ class TransactionalRunnerContractTests(unittest.TestCase):
         )
         with self.assertRaises(FrozenInstanceError):
             row.success = False  # type: ignore[misc]
+
+
+class TransactionalAggregationTests(unittest.TestCase):
+    @staticmethod
+    def _rows() -> list[dict[str, object]]:
+        return [
+            {
+                "scenario_class": "command_rejection", "num_agents": 4,
+                "seed": seed, "fault_schedule_fingerprint": "shared-fault",
+                "method_id": method, "success": success, "timeout": timeout,
+                "verified_correct": success,
+                "attempt_count": attempts, "commit_attempts": 1,
+                "method_owned_formation_latency_ms": latency,
+                "time_to_correct_formation_ms": correct_time,
+                "rollback_scope_objects": rollback_scope,
+                "wasted_rule_commands": wasted, "partial_state_exposure_ms": exposure,
+            }
+            for seed, method, success, timeout, attempts, latency, correct_time,
+            rollback_scope, wasted, exposure in (
+                (0, "proposed", True, False, 1, 5.0, 8.0, '["edge-0"]', 0, 0.0),
+                (0, "cspf", True, False, 2, 7.0, 10.0, '["edge-0", "edge-1"]', 3, 2.0),
+                (0, "global_sfc_embedding", True, False, 1, 8.0, 12.0, '[]', 1, 1.0),
+                (1, "proposed", False, True, 2, 6.0, None, '["edge-1"]', 2, 3.0),
+                (1, "cspf", False, True, 2, 9.0, None, '["edge-0"]', 4, 4.0),
+                (1, "global_sfc_embedding", False, True, 2, 10.0, None, '["edge-0"]', 2, 5.0),
+            )
+        ]
+
+    def test_failed_attempt_time_and_waste_are_not_dropped(self) -> None:
+        """Removing failed trials would hide actual method-owned work and waste."""
+        rows = aggregate_transactional(self._rows())
+
+        def find(metric: str, method: str) -> dict[str, object]:
+            return next(
+                row for row in rows
+                if row["metric"] == metric and row["method_id"] == method
+            )
+
+        metric = find("method_owned_formation_latency_ms", "cspf")
+        self.assertEqual(metric["denominator"], 2)
+        self.assertGreater(float(find("wasted_rule_commands", "cspf")["estimate"]), 0)
+
+    def test_time_to_correct_is_conditional_and_adjacent_to_success(self) -> None:
+        """Correct-formation time excludes unverified failures but retains its base N."""
+        rows = aggregate_transactional(self._rows())
+
+        def find(metric: str, method: str) -> dict[str, object]:
+            return next(
+                row for row in rows
+                if row["metric"] == metric and row["method_id"] == method
+            )
+
+        self.assertEqual(find("success_rate", "proposed")["denominator"], 2)
+        self.assertEqual(find("time_to_correct_formation_ms", "proposed")["numerator"], 1)
+
+    def test_aggregation_rejects_divergent_paired_fault_fingerprints(self) -> None:
+        """A broken pairing key must not silently create a partial comparison."""
+        rows = self._rows()
+        rows[1]["fault_schedule_fingerprint"] = "different-fault"
+
+        with self.assertRaisesRegex(ValueError, "fault fingerprints"):
+            aggregate_transactional(rows)
