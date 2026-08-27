@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -97,6 +100,38 @@ class FormationTransactionEngineTests(unittest.TestCase):
         self.assertEqual(rolled_back.phase, TransactionPhase.ROLLED_BACK)
         self.assertEqual(executor.readback(self.transaction.transaction_id), ())
 
+    def test_prepare_audit_uses_backend_kernel_snapshot(self) -> None:
+        class SnapshotExecutor(RecordingExecutor):
+            def stage(self, transaction, ack_timeout_ms):
+                self.staged[transaction.transaction_id] = transaction.commands
+                return StageResult(
+                    accepted=True,
+                    readback_before=({"routes": ["before"]},),
+                    readback_after=({"routes": ["after"]},),
+                )
+
+        engine = FormationTransactionEngine(SnapshotExecutor(), ack_timeout_ms=200)
+        prepared = engine.prepare(self.transaction)
+
+        expected = hashlib.sha256(
+            json.dumps(({"routes": ["before"]},), sort_keys=True, separators=(",", ":"))
+            .encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(prepared.readback_before_fingerprint, expected)
+
+    def test_post_mutation_readback_failure_is_audited_as_rejected(self) -> None:
+        class ReadbackFailureExecutor(RecordingExecutor):
+            def readback(self, transaction_id):
+                raise RuntimeError("kernel readback unavailable")
+
+        engine = FormationTransactionEngine(ReadbackFailureExecutor(), ack_timeout_ms=200)
+        prepared = engine.prepare(self.transaction)
+
+        self.assertFalse(prepared.accepted)
+        self.assertEqual(prepared.phase, TransactionPhase.REJECTED)
+        self.assertIn("kernel readback unavailable", prepared.reason)
+        self.assertTrue(prepared.readback_after_fingerprint)
+
 
 class NetnsPolicyTableBackendTests(unittest.TestCase):
     def test_stages_routes_before_activation_and_flushes_table(self) -> None:
@@ -107,7 +142,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         topology.agent_gateways = [0, 1, 0]
         backend = exp1.NetnsPolicyTableBackend(topology)
         executed: list[tuple[tuple[int | None, tuple[str, ...]], ...]] = []
-        topology._parallel_commands = lambda commands, *, check: executed.append(tuple(commands))
+        topology._parallel_commands = lambda commands, *, check, timeout=None: executed.append(tuple(commands))
         topology._run_ns = lambda *_args, **_kwargs: SimpleNamespace(stdout="[]")
         command = exp1.DeploymentCommand(
             "agent-0",
@@ -130,6 +165,105 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         self.assertIn("lookup", executed[1][0][1])
         self.assertEqual(executed[2][0][1][:4], ("ip", "rule", "del", "priority"))
         self.assertEqual(executed[2][1][1][:4], ("ip", "route", "flush", "table"))
+
+    class _KernelTopology:
+        def __init__(self) -> None:
+            self.routes: dict[tuple[int, str], list[dict[str, object]]] = {}
+            self.rules: dict[int, list[dict[str, object]]] = {}
+            self.executed: list[tuple[tuple[tuple[int | None, tuple[str, ...]], ...], bool, float | None]] = []
+            self.readback_calls = 0
+            self.fail_cleanup = False
+            self.timeout_stage = False
+
+        def _run_ns(self, pid, *command, **_kwargs):
+            self.readback_calls += 1
+            if command[:5] == ("ip", "-j", "route", "show", "table"):
+                return SimpleNamespace(stdout=json.dumps(self.routes.get((pid, command[5]), [])))
+            if command == ("ip", "-j", "rule", "show"):
+                return SimpleNamespace(stdout=json.dumps(self.rules.get(pid, [])))
+            raise AssertionError(f"unexpected readback command: {command}")
+
+        def _parallel_commands(self, commands, *, check, timeout=None):
+            items = tuple(commands)
+            self.executed.append((items, check, timeout))
+            if self.timeout_stage and any(item[1][:3] == ("ip", "route", "replace") for item in items):
+                raise subprocess.TimeoutExpired("ip", timeout)
+            if self.fail_cleanup and any(item[1][:3] == ("ip", "route", "flush") for item in items):
+                raise subprocess.CalledProcessError(1, "ip")
+            for pid, command in items:
+                assert pid is not None
+                if command[:4] == ("ip", "route", "replace", "table"):
+                    table = command[4]
+                    self.routes.setdefault((pid, table), []).append({"dst": command[5]})
+                elif command[:3] == ("ip", "route", "flush"):
+                    self.routes[(pid, command[4])] = []
+                elif command[:3] == ("ip", "rule", "add"):
+                    self.rules.setdefault(pid, []).append(
+                        {"priority": int(command[4]), "to": command[6], "table": command[8]}
+                    )
+                elif command[:3] == ("ip", "rule", "del"):
+                    self.rules[pid] = [
+                        rule for rule in self.rules.get(pid, [])
+                        if not (str(rule.get("priority")) == command[4] and str(rule.get("table")) == command[8])
+                    ]
+
+    @staticmethod
+    def _command() -> exp1.DeploymentCommand:
+        return exp1.DeploymentCommand(
+            "agent-0", 100,
+            ("ip", "route", "replace", "10.101.1.2/32", "via", "10.100.0.1", "dev", "eth0"),
+        )
+
+    def test_flush_restores_snapshot_and_reads_kernel_after_cleanup(self) -> None:
+        topology = self._KernelTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+
+        staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+        backend.activate("txn-1")
+        reads_before_flush = topology.readback_calls
+        flushed = backend.flush("txn-1")
+
+        self.assertTrue(staged.accepted)
+        self.assertTrue(flushed.accepted)
+        self.assertEqual(flushed.readback_after, staged.readback_before)
+        self.assertGreater(topology.readback_calls, reads_before_flush)
+        self.assertEqual(backend.readback("txn-1"), staged.readback_before)
+
+    def test_cleanup_command_failure_is_reported_and_state_is_retained(self) -> None:
+        topology = self._KernelTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+        backend.activate("txn-1")
+        topology.fail_cleanup = True
+
+        flushed = backend.flush("txn-1")
+
+        self.assertFalse(flushed.accepted)
+        self.assertIn("CalledProcessError", flushed.reason)
+        self.assertTrue(backend.readback("txn-1")[0]["routes"])
+
+    def test_rule_only_collision_rejects_an_inactive_table(self) -> None:
+        topology = self._KernelTopology()
+        topology.rules[100] = [{"priority": 1, "table": "23456"}]
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        backend._allocate_table = lambda *_args: 23456
+
+        staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+
+        self.assertFalse(staged.accepted)
+        self.assertIn("not inactive", staged.reason)
+        self.assertEqual(len(topology.executed), 0)
+
+    def test_stage_deadline_reaches_commands_and_timeout_rejects_prepare(self) -> None:
+        topology = self._KernelTopology()
+        topology.timeout_stage = True
+        backend = exp1.NetnsPolicyTableBackend(topology)
+
+        staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+
+        self.assertFalse(staged.accepted)
+        self.assertIn("TimeoutExpired", staged.reason)
+        self.assertTrue(all(timeout == 0.2 for _, _, timeout in topology.executed))
 
 
 class FormationTransactionProtocolTests(unittest.TestCase):

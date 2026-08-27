@@ -73,9 +73,15 @@ class CommandResult:
     commands_attempted: int = 0
     reason: str = ""
     affected_objects: tuple[str, ...] = ()
+    readback_before: tuple[dict[str, object], ...] | None = None
+    readback_after: tuple[dict[str, object], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "affected_objects", tuple(self.affected_objects))
+        if self.readback_before is not None:
+            object.__setattr__(self, "readback_before", tuple(self.readback_before))
+        if self.readback_after is not None:
+            object.__setattr__(self, "readback_after", tuple(self.readback_after))
         if self.commands_attempted < 0:
             raise ValueError("commands_attempted must be nonnegative")
 
@@ -111,46 +117,92 @@ class FormationTransactionEngine:
         self.ack_timeout_ms = ack_timeout_ms
         self._states: dict[str, TransactionPhase] = {}
         self._transactions: dict[str, FormationTransaction] = {}
-        self._readback_before: dict[str, tuple[dict[str, object], ...]] = {}
         self.attempts: list[TransactionAttempt] = []
 
     def prepare(self, transaction: FormationTransaction) -> TransactionAttempt:
         self._require_new(transaction.transaction_id)
-        before = self.executor.readback(transaction.transaction_id)
         self._transactions[transaction.transaction_id] = transaction
-        self._readback_before[transaction.transaction_id] = before
         started_ns = time.monotonic_ns()
-        result = self.executor.stage(transaction, self.ack_timeout_ms)
+        try:
+            result = self.executor.stage(transaction, self.ack_timeout_ms)
+        except Exception as error:
+            result = StageResult(accepted=False, reason=_exception_reason(error))
         phase = TransactionPhase.PREPARED if result.accepted else TransactionPhase.REJECTED
-        self._states[transaction.transaction_id] = phase
-        return self._record(transaction, "prepare", phase, result, before, started_ns)
+        attempt = self._record(
+            transaction,
+            "prepare",
+            phase,
+            TransactionPhase.REJECTED,
+            result,
+            result.readback_before if result.readback_before is not None else (),
+            started_ns,
+        )
+        self._states[transaction.transaction_id] = attempt.phase
+        return attempt
 
     def commit(self, transaction_id: str) -> TransactionAttempt:
         transaction = self._require_phase(transaction_id, TransactionPhase.PREPARED)
-        before = self.executor.readback(transaction_id)
+        before = self._readback_before_operation(transaction_id)
         started_ns = time.monotonic_ns()
-        result = self.executor.activate(transaction_id)
+        try:
+            result = self.executor.activate(transaction_id)
+        except Exception as error:
+            result = CommandResult(accepted=False, reason=_exception_reason(error))
         phase = TransactionPhase.COMMITTED if result.accepted else TransactionPhase.REJECTED
-        self._states[transaction_id] = phase
-        return self._record(transaction, "commit", phase, result, before, started_ns)
+        attempt = self._record(
+            transaction,
+            "commit",
+            phase,
+            TransactionPhase.REJECTED,
+            result,
+            result.readback_before if result.readback_before is not None else before,
+            started_ns,
+        )
+        self._states[transaction_id] = attempt.phase
+        return attempt
 
     def abort(self, transaction_id: str) -> TransactionAttempt:
         transaction = self._require_abortable(transaction_id)
-        before = self.executor.readback(transaction_id)
+        previous_phase = self._states[transaction_id]
+        before = self._readback_before_operation(transaction_id)
         started_ns = time.monotonic_ns()
-        result = self.executor.flush(transaction_id)
-        phase = TransactionPhase.ABORTED if result.accepted else self._states[transaction_id]
-        self._states[transaction_id] = phase
-        return self._record(transaction, "abort", phase, result, before, started_ns)
+        try:
+            result = self.executor.flush(transaction_id)
+        except Exception as error:
+            result = CommandResult(accepted=False, reason=_exception_reason(error))
+        phase = TransactionPhase.ABORTED if result.accepted else previous_phase
+        attempt = self._record(
+            transaction,
+            "abort",
+            phase,
+            previous_phase,
+            result,
+            result.readback_before if result.readback_before is not None else before,
+            started_ns,
+        )
+        self._states[transaction_id] = attempt.phase
+        return attempt
 
     def rollback(self, transaction_id: str) -> TransactionAttempt:
         transaction = self._require_phase(transaction_id, TransactionPhase.COMMITTED)
-        before = self.executor.readback(transaction_id)
+        before = self._readback_before_operation(transaction_id)
         started_ns = time.monotonic_ns()
-        result = self.executor.flush(transaction_id)
+        try:
+            result = self.executor.flush(transaction_id)
+        except Exception as error:
+            result = CommandResult(accepted=False, reason=_exception_reason(error))
         phase = TransactionPhase.ROLLED_BACK if result.accepted else TransactionPhase.COMMITTED
-        self._states[transaction_id] = phase
-        return self._record(transaction, "rollback", phase, result, before, started_ns)
+        attempt = self._record(
+            transaction,
+            "rollback",
+            phase,
+            TransactionPhase.COMMITTED,
+            result,
+            result.readback_before if result.readback_before is not None else before,
+            started_ns,
+        )
+        self._states[transaction_id] = attempt.phase
+        return attempt
 
     def _require_new(self, transaction_id: str) -> None:
         if transaction_id in self._states:
@@ -175,33 +227,67 @@ class FormationTransactionEngine:
         transaction: FormationTransaction,
         operation: str,
         phase: TransactionPhase,
+        failure_phase: TransactionPhase,
         result: CommandResult,
         before: tuple[dict[str, object], ...],
         started_ns: int,
     ) -> TransactionAttempt:
-        after = self.executor.readback(transaction.transaction_id)
+        effective_phase = phase
+        accepted = result.accepted
+        reason = result.reason
+        after = result.readback_after
+        after_fingerprint = ""
+        if after is None:
+            try:
+                after = self.executor.readback(transaction.transaction_id)
+            except Exception as error:
+                accepted = False
+                effective_phase = failure_phase
+                reason = _combined_reason(reason, f"post-operation readback failed: {_exception_reason(error)}")
+                after_fingerprint = _error_fingerprint(error)
         ended_ns = time.monotonic_ns()
         attempt = TransactionAttempt(
             transaction_id=transaction.transaction_id,
             attempt_index=transaction.attempt_index,
             operation=operation,
-            phase=phase,
-            accepted=result.accepted,
+            phase=effective_phase,
+            accepted=accepted,
             started_ns=started_ns,
             ended_ns=ended_ns,
             affected_objects=result.affected_objects or transaction.affected_objects,
             commands_attempted=result.commands_attempted,
-            reason=result.reason,
+            reason=reason,
             readback_before_fingerprint=_readback_fingerprint(before),
-            readback_after_fingerprint=_readback_fingerprint(after),
+            readback_after_fingerprint=after_fingerprint or _readback_fingerprint(after or ()),
         )
         self.attempts.append(attempt)
         return attempt
+
+    def _readback_before_operation(
+        self, transaction_id: str
+    ) -> tuple[dict[str, object], ...]:
+        try:
+            return self.executor.readback(transaction_id)
+        except Exception:
+            return ()
 
 
 def _readback_fingerprint(readback: tuple[dict[str, object], ...]) -> str:
     payload = json.dumps(readback, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _error_fingerprint(error: Exception) -> str:
+    payload = {"error_type": type(error).__name__, "message": str(error)}
+    return _readback_fingerprint((payload,))
+
+
+def _exception_reason(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _combined_reason(existing: str, extra: str) -> str:
+    return f"{existing}; {extra}" if existing else extra
 
 
 @dataclass(frozen=True)

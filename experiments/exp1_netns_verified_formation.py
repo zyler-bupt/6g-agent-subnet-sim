@@ -227,6 +227,9 @@ class _StagedPolicyTransaction:
     table_by_pid: dict[int, int]
     activation_commands: tuple[tuple[int, tuple[str, ...]], ...]
     snapshot: tuple[dict[str, object], ...]
+    timeout_s: float
+    cleanup_applied: bool = False
+    cleaned: bool = False
 
 
 class NetnsPolicyTableBackend:
@@ -250,12 +253,18 @@ class NetnsPolicyTableBackend:
         self._used_tables: set[int] = set()
 
     def stage(
-        self, transaction_id: str, commands: Sequence[DeploymentCommand]
+        self,
+        transaction_id: str,
+        commands: Sequence[DeploymentCommand],
+        *,
+        ack_timeout_ms: int = 200,
     ) -> StageResult:
         if not transaction_id:
             return StageResult(accepted=False, reason="transaction_id must not be empty")
         if transaction_id in self._transactions:
             return StageResult(accepted=False, reason="transaction is already staged")
+        if ack_timeout_ms <= 0:
+            return StageResult(accepted=False, reason="ack_timeout_ms must be positive")
 
         table_by_pid: dict[int, int] = {}
         staged_commands: list[tuple[int | None, tuple[str, ...]]] = []
@@ -281,69 +290,128 @@ class NetnsPolicyTableBackend:
             table_by_pid=table_by_pid,
             activation_commands=tuple(activation_commands),
             snapshot=(),
+            timeout_s=ack_timeout_ms / 1000.0,
         )
         self._transactions[transaction_id] = staged
-        staged.snapshot = self.readback(transaction_id)
-        if any(record["routes"] for record in staged.snapshot):
+        try:
+            staged.snapshot = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            self._transactions.pop(transaction_id, None)
+            self._release_tables(staged.table_by_pid)
+            return StageResult(accepted=False, reason=_command_error(error))
+        if any(
+            record["routes"] or _rules_reference_table(record["rules"], record["table_id"])
+            for record in staged.snapshot
+        ):
             self._transactions.pop(transaction_id, None)
             self._release_tables(staged.table_by_pid)
             return StageResult(
                 accepted=False,
                 reason="allocated policy table was not inactive",
                 affected_objects=tuple(affected_objects),
+                readback_before=staged.snapshot,
+                readback_after=staged.snapshot,
             )
         try:
-            self._topology._parallel_commands(tuple(staged_commands), check=True)
+            self._topology._parallel_commands(
+                tuple(staged_commands), check=True, timeout=staged.timeout_s
+            )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            self._flush_staged(transaction_id, staged)
+            cleanup = self._cleanup(staged)
             return StageResult(
                 accepted=False,
                 commands_attempted=len(staged_commands),
-                reason=str(error),
+                reason=_combined_command_reason(_command_error(error), cleanup.reason),
                 affected_objects=tuple(affected_objects),
+                readback_before=staged.snapshot,
+                readback_after=cleanup.readback_after,
+            )
+        try:
+            after = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            cleanup = self._cleanup(staged)
+            return StageResult(
+                accepted=False,
+                commands_attempted=len(staged_commands),
+                reason=_combined_command_reason(
+                    f"post-stage readback failed: {_command_error(error)}", cleanup.reason
+                ),
+                affected_objects=tuple(affected_objects),
+                readback_before=staged.snapshot,
+                readback_after=cleanup.readback_after,
             )
         return StageResult(
             accepted=True,
             commands_attempted=len(staged_commands),
             affected_objects=tuple(affected_objects),
+            readback_before=staged.snapshot,
+            readback_after=after,
         )
 
     def activate(self, transaction_id: str) -> CommandResult:
         staged = self._transactions.get(transaction_id)
-        if staged is None:
+        if staged is None or staged.cleaned:
             return CommandResult(accepted=False, reason="transaction is not staged")
         commands = tuple(staged.activation_commands)
         try:
-            self._topology._parallel_commands(commands, check=True)
+            before = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            return CommandResult(accepted=False, reason=_command_error(error))
+        try:
+            self._topology._parallel_commands(
+                commands, check=True, timeout=staged.timeout_s
+            )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             return CommandResult(
                 accepted=False,
                 commands_attempted=len(commands),
-                reason=str(error),
+                reason=_command_error(error),
+                readback_before=before,
             )
-        return CommandResult(accepted=True, commands_attempted=len(commands))
+        try:
+            after = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            return CommandResult(
+                accepted=False,
+                commands_attempted=len(commands),
+                reason=f"post-activation readback failed: {_command_error(error)}",
+                readback_before=before,
+            )
+        return CommandResult(
+            accepted=True,
+            commands_attempted=len(commands),
+            readback_before=before,
+            readback_after=after,
+        )
 
     def flush(self, transaction_id: str) -> CommandResult:
         staged = self._transactions.get(transaction_id)
         if staged is None:
             return CommandResult(accepted=False, reason="transaction is not staged")
-        commands = self._flush_staged(transaction_id, staged)
-        return CommandResult(accepted=True, commands_attempted=len(commands))
+        return self._cleanup(staged)
 
     def readback(self, transaction_id: str) -> tuple[dict[str, object], ...]:
         staged = self._transactions.get(transaction_id)
         if staged is None:
             return ()
+        return self._readback(staged)
+
+    def _readback(
+        self, staged: _StagedPolicyTransaction
+    ) -> tuple[dict[str, object], ...]:
         records: list[dict[str, object]] = []
         for pid, table in sorted(staged.table_by_pid.items()):
             routes = _ip_json(
                 self._topology._run_ns(
-                    pid, "ip", "-j", "route", "show", "table", str(table)
+                    pid, "ip", "-j", "route", "show", "table", str(table),
+                    timeout=staged.timeout_s,
                 ).stdout,
                 f"policy table {table} routes",
             )
             rules = _ip_json(
-                self._topology._run_ns(pid, "ip", "-j", "rule", "show").stdout,
+                self._topology._run_ns(
+                    pid, "ip", "-j", "rule", "show", timeout=staged.timeout_s
+                ).stdout,
                 f"policy table {table} rules",
             )
             records.append(
@@ -385,9 +453,11 @@ class NetnsPolicyTableBackend:
     def _release_tables(self, table_by_pid: Mapping[int, int]) -> None:
         self._used_tables.difference_update(table_by_pid.values())
 
-    def _flush_staged(
-        self, transaction_id: str, staged: _StagedPolicyTransaction
-    ) -> tuple[tuple[int | None, tuple[str, ...]], ...]:
+    def _cleanup(self, staged: _StagedPolicyTransaction) -> CommandResult:
+        try:
+            before = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            return CommandResult(accepted=False, reason=_command_error(error))
         removal_rules = tuple(
             (pid, _delete_rule(command)) for pid, command in staged.activation_commands
         )
@@ -396,10 +466,43 @@ class NetnsPolicyTableBackend:
             for pid, table in sorted(staged.table_by_pid.items())
         )
         commands = removal_rules + flush_tables
-        self._topology._parallel_commands(commands, check=False)
-        self._transactions.pop(transaction_id, None)
-        self._release_tables(staged.table_by_pid)
-        return commands
+        if not staged.cleanup_applied:
+            try:
+                self._topology._parallel_commands(
+                    commands, check=True, timeout=staged.timeout_s
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                return CommandResult(
+                    accepted=False,
+                    commands_attempted=len(commands),
+                    reason=_command_error(error),
+                    readback_before=before,
+                )
+            staged.cleanup_applied = True
+        try:
+            after = self._readback(staged)
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            return CommandResult(
+                accepted=False,
+                commands_attempted=len(commands),
+                reason=f"post-cleanup readback failed: {_command_error(error)}",
+                readback_before=before,
+            )
+        if after != staged.snapshot:
+            return CommandResult(
+                accepted=False,
+                commands_attempted=len(commands),
+                reason="post-cleanup readback does not match pre-stage snapshot",
+                readback_before=before,
+                readback_after=after,
+            )
+        staged.cleaned = True
+        return CommandResult(
+            accepted=True,
+            commands_attempted=len(commands),
+            readback_before=before,
+            readback_after=after,
+        )
 
 
 def _route_in_table(command: tuple[str, ...], table: int) -> tuple[str, ...]:
@@ -441,6 +544,23 @@ def _ip_json(payload: str, context: str) -> list[object]:
     if not isinstance(decoded, list):
         raise RuntimeError(f"{context}: expected a JSON list")
     return decoded
+
+
+def _rules_reference_table(rules: Sequence[object], table_id: object) -> bool:
+    expected = str(table_id)
+    return any(
+        isinstance(rule, dict)
+        and str(rule.get("table", rule.get("lookup", ""))) == expected
+        for rule in rules
+    )
+
+
+def _command_error(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _combined_command_reason(primary: str, cleanup: str) -> str:
+    return f"{primary}; cleanup: {cleanup}" if cleanup else primary
 
 
 class ProcessNetnsTopology:
@@ -653,9 +773,15 @@ class ProcessNetnsTopology:
         return plan.control_messages, plan.rules_installed
 
     def stage_transaction_commands(
-        self, transaction_id: str, commands: Sequence[DeploymentCommand]
+        self,
+        transaction_id: str,
+        commands: Sequence[DeploymentCommand],
+        *,
+        ack_timeout_ms: int = 200,
     ) -> StageResult:
-        return self._transaction_backend.stage(transaction_id, tuple(commands))
+        return self._transaction_backend.stage(
+            transaction_id, tuple(commands), ack_timeout_ms=ack_timeout_ms
+        )
 
     def activate_transaction(self, transaction_id: str) -> CommandResult:
         return self._transaction_backend.activate(transaction_id)
@@ -1492,12 +1618,13 @@ class ProcessNetnsTopology:
         commands: Sequence[tuple[int | None, tuple[str, ...]]],
         *,
         check: bool,
+        timeout: float | None = None,
     ) -> None:
         def execute(item: tuple[int | None, tuple[str, ...]]) -> subprocess.CompletedProcess[str]:
             pid, command = item
             if pid is None:
-                return self._run_host(*command, check=check)
-            return self._run_ns(pid, *command, check=check)
+                return self._run_host(*command, check=check, timeout=timeout)
+            return self._run_ns(pid, *command, check=check, timeout=timeout)
 
         with ThreadPoolExecutor(max_workers=min(32, max(1, len(commands)))) as pool:
             futures = [pool.submit(execute, item) for item in commands]
