@@ -42,11 +42,25 @@ class MethodTransactionAdapterTests(unittest.TestCase):
             SimpleNamespace(label=label, commands=(label,), command_owners=(owner,))
             for label, owner in zip(labels, owners)
         )
+        edge_endpoints = {
+            "e-0": (0, 1),
+            "e-1": (1, 2),
+            "e-2": (3, 4),
+        }
         path_records = tuple(
             {
                 "edge_id": edge_id,
-                "path": ("source", "target"),
-                "path_endpoints": ("source:eth0", "target:eth0"),
+                "path": (
+                    f"agent-{edge_endpoints[edge_id][0]}",
+                    "gateway-0",
+                    f"agent-{edge_endpoints[edge_id][1]}",
+                ),
+                "path_endpoints": (
+                    f"agent-{edge_endpoints[edge_id][0]}:eth0",
+                    f"gateway-0:ga{edge_endpoints[edge_id][0]}",
+                    f"gateway-0:ga{edge_endpoints[edge_id][1]}",
+                    f"agent-{edge_endpoints[edge_id][1]}:eth0",
+                ),
                 "required_throughput_mbps": 1.0,
                 "bottleneck_mbps": 2.0,
                 "residual_bottleneck_after_mbps": 1.0,
@@ -81,6 +95,13 @@ class MethodTransactionAdapterTests(unittest.TestCase):
                 "path_records": path_records,
             } if method_id == "global_sfc_embedding" else None,
         )
+
+    @staticmethod
+    def _replace_sfc_path_records(
+        plan: SimpleNamespace, records: tuple[object, ...]
+    ) -> None:
+        plan.path_records = records
+        plan.sfc_evidence = {**plan.sfc_evidence, "path_records": records}
 
     @staticmethod
     def _edges() -> tuple[FormationEdge, ...]:
@@ -335,6 +356,82 @@ class MethodTransactionAdapterTests(unittest.TestCase):
                 plan.sfc_evidence = {**self._plan(
                     "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
                 ).sfc_evidence, "path_records": tuple(records)}
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_global_sfc_rejects_arbitrary_path_and_endpoint_evidence(self) -> None:
+        edges = self._edges()
+        plan = self._plan("global_sfc_embedding", ("sfc_chain:000:hop:000:routes",))
+        records = [dict(record) for record in plan.path_records]
+        records[0].update({"path": ("x",), "path_endpoints": ("y",)})
+        self._replace_sfc_path_records(plan, tuple(records))
+
+        with self.assertRaises(ValueError):
+            build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_global_sfc_rejects_reversed_or_mismatched_endpoint_order(self) -> None:
+        edges = self._edges()
+        valid_plan = self._plan(
+            "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+        )
+        for name, endpoints in (
+            ("reversed", tuple(reversed(valid_plan.path_records[0]["path_endpoints"]))),
+            (
+                "owner order mismatch",
+                (
+                    "agent-0:eth0",
+                    "agent-1:eth0",
+                    "gateway-0:ga0",
+                    "agent-1:eth0",
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
+                plan = self._plan(
+                    "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+                )
+                records = [dict(record) for record in plan.path_records]
+                records[0]["path_endpoints"] = endpoints
+                self._replace_sfc_path_records(plan, tuple(records))
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_global_sfc_rejects_duplicate_or_non_mapping_path_records(self) -> None:
+        edges = self._edges()
+        for name, extra_record in (
+            ("duplicate", dict(self._plan(
+                "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+            ).path_records[0])),
+            ("non-mapping", "not-a-path-record"),
+        ):
+            with self.subTest(name=name):
+                plan = self._plan(
+                    "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+                )
+                records = (*plan.path_records, extra_record)
+                self._replace_sfc_path_records(plan, records)
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_global_sfc_rejects_boolean_numeric_evidence(self) -> None:
+        edges = self._edges()
+        for name in ("path demand", "slot inventory"):
+            with self.subTest(name=name):
+                plan = self._plan(
+                    "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+                )
+                if name == "path demand":
+                    records = [dict(record) for record in plan.path_records]
+                    records[0]["required_throughput_mbps"] = True
+                    self._replace_sfc_path_records(plan, tuple(records))
+                else:
+                    plan.sfc_evidence = {
+                        **plan.sfc_evidence,
+                        "placement_slot_inventory": {
+                            **plan.sfc_evidence["placement_slot_inventory"],
+                            "agent-0": True,
+                        },
+                    }
                 with self.assertRaises(ValueError):
                     build_method_transactions("global_sfc_embedding", plan, edges)
 
