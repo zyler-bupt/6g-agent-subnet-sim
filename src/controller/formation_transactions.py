@@ -68,6 +68,7 @@ class TransactionAttempt:
     readback_after_fingerprint: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "affected_objects", tuple(self.affected_objects))
         if self.attempt_index < 0:
             raise ValueError("attempt_index must be nonnegative")
         if self.started_ns < 0:
@@ -146,16 +147,41 @@ def _global_chain_for_edge(
 
     selected = edge_by_id[logical_edge_id]
     predecessors_by_target: dict[int, list[FormationEdgeLike]] = {}
+    successors_by_source: dict[int, list[FormationEdgeLike]] = {}
     for edge in edges:
         predecessors_by_target.setdefault(edge.target_index, []).append(edge)
+        successors_by_source.setdefault(edge.source_index, []).append(edge)
 
-    ancestors = {logical_edge_id}
-    pending = [selected.source_index]
-    while pending:
-        target_index = pending.pop()
-        for predecessor in predecessors_by_target.get(target_index, ()):
-            if predecessor.edge_id not in ancestors:
-                ancestors.add(predecessor.edge_id)
-                pending.append(predecessor.source_index)
+    selected_ids = {logical_edge_id}
+    upstream: list[FormationEdgeLike] = []
+    target_index = selected.source_index
+    while candidates := _unselected_edges(
+        predecessors_by_target.get(target_index, ()), selected_ids
+    ):
+        predecessor = candidates[0]
+        upstream.append(predecessor)
+        selected_ids.add(predecessor.edge_id)
+        target_index = predecessor.source_index
 
-    return tuple(sorted(ancestors | set(task_descendant_closure(logical_edge_id, edges))))
+    downstream: list[FormationEdgeLike] = []
+    source_index = selected.target_index
+    while candidates := _unselected_edges(
+        successors_by_source.get(source_index, ()), selected_ids
+    ):
+        successor = candidates[0]
+        downstream.append(successor)
+        selected_ids.add(successor.edge_id)
+        source_index = successor.target_index
+
+    return tuple(
+        edge.edge_id for edge in reversed(upstream)
+    ) + (logical_edge_id,) + tuple(edge.edge_id for edge in downstream)
+
+
+def _unselected_edges(
+    edges: Sequence[FormationEdgeLike], selected_ids: set[str]
+) -> list[FormationEdgeLike]:
+    return sorted(
+        (edge for edge in edges if edge.edge_id not in selected_ids),
+        key=lambda edge: edge.edge_id,
+    )

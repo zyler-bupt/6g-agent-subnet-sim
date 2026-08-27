@@ -55,6 +55,22 @@ class FormationTransactionProtocolTests(unittest.TestCase):
             frozenset({"chain:e-a,e-b,e-d"}),
         )
 
+    def test_global_scope_selects_one_hop_ordered_path_at_forks_and_joins(self) -> None:
+        fork_join_edges = (
+            FormationEdge("z-input", 0, 1, 1.0),
+            FormationEdge("a-input", 5, 1, 1.0),
+            FormationEdge("m-failed", 1, 2, 1.0),
+            FormationEdge("z-output", 2, 3, 1.0),
+            FormationEdge("a-output", 2, 4, 1.0),
+            FormationEdge("z-tail", 3, 6, 1.0),
+            FormationEdge("a-tail", 4, 7, 1.0),
+        )
+
+        self.assertEqual(
+            retry_scope_for_method("global_sfc_embedding", "m-failed", fork_join_edges),
+            frozenset({"chain:a-input,m-failed,a-output,a-tail"}),
+        )
+
     def test_transaction_attempt_is_immutable_and_rejects_invalid_timing(self) -> None:
         attempt = TransactionAttempt(
             transaction_id="txn-1",
@@ -75,6 +91,22 @@ class FormationTransactionProtocolTests(unittest.TestCase):
             TransactionAttempt(
                 "txn-1", 0, "prepare", TransactionPhase.REJECTED, False, 12, 10
             )
+
+    def test_transaction_attempt_normalizes_mutable_affected_objects(self) -> None:
+        affected_objects = ["e-b"]
+        attempt = TransactionAttempt(
+            transaction_id="txn-1",
+            attempt_index=0,
+            operation="prepare",
+            phase=TransactionPhase.NEW,
+            accepted=False,
+            started_ns=0,
+            ended_ns=1,
+            affected_objects=affected_objects,  # type: ignore[arg-type]
+        )
+        affected_objects.append("e-d")
+
+        self.assertEqual(attempt.affected_objects, ("e-b",))
 
     def test_transaction_attempt_rejects_negative_counters_and_timestamps(self) -> None:
         cases = (
