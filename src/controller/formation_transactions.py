@@ -7,6 +7,7 @@ import json
 import random
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, Sequence
@@ -558,12 +559,16 @@ def _batch_commands(batch: object) -> tuple[object, ...]:
     return tuple(getattr(batch, "commands", ()))
 
 
-def _commands_for_edge(plan: object, edge_id: str, *, prefix: str) -> tuple[object, ...]:
+def _owned_commands(plan: object, owner: str) -> tuple[object, ...]:
     selected: list[object] = []
     for batch in _plan_batches(plan):
-        label = _batch_label(batch)
-        if label == f"{prefix}{edge_id}" or edge_id in label:
-            selected.extend(_batch_commands(batch))
+        commands = _batch_commands(batch)
+        owners = tuple(getattr(batch, "command_owners", ()))
+        if len(owners) != len(commands):
+            raise ValueError(
+                f"batch {_batch_label(batch)!r} lacks exact command ownership"
+            )
+        selected.extend(command for command, command_owner in zip(commands, owners) if command_owner == owner)
     return tuple(selected)
 
 
@@ -602,7 +607,9 @@ def _flow_wave(
 ) -> tuple[FormationTransaction, ...]:
     transactions = []
     for edge_id in edge_ids:
-        commands = _commands_for_edge(plan, edge_id, prefix="cspf_flow:")
+        commands = _owned_commands(plan, edge_id)
+        if not commands:
+            raise ValueError(f"CSPF flow {edge_id} has no owned commands")
         transactions.append(
             _transaction(
                 "cspf", f"flow:{edge_id}", attempt_index, commands, (edge_id,),
@@ -631,19 +638,21 @@ def _proposed_waves(
         )
         if not ready:
             raise ValueError("formation edges contain a dependency cycle")
-        # The canonical Proposed plan owns one batch for the complete wave.
-        # Preserve every command exactly once while allowing independent waves
-        # to be prepared and committed separately.
-        commands: tuple[object, ...] = tuple(
-            command
-            for batch in _plan_batches(plan)
-            for command in _batch_commands(batch)
-        )
-        transaction = _transaction(
-            "proposed", "wave:" + ",".join(ready), attempt_index, commands, ready,
-            scope_kind="task",
-        )
-        waves.append((transaction,))
+        transactions: list[FormationTransaction] = []
+        shared = _owned_commands(plan, "shared") if not waves else ()
+        for index, edge_id in enumerate(ready):
+            commands = _owned_commands(plan, edge_id)
+            if not commands:
+                raise ValueError(f"Proposed edge {edge_id} has no owned commands")
+            if index == 0:
+                commands = shared + commands
+            transactions.append(
+                _transaction(
+                    "proposed", f"edge:{edge_id}", attempt_index, commands,
+                    (edge_id,), scope_kind="task", logical_edge_id=edge_id,
+                )
+            )
+        waves.append(tuple(transactions))
         remaining.difference_update(ready)
     return tuple(waves)
 
@@ -666,8 +675,15 @@ def _sfc_waves(
             continue
         chain_index = int(match.group("chain"))
         hop_index = int(match.group("hop"))
+        owner = f"chain-{chain_index:03d}:hop:{hop_index:03d}"
+        commands = _batch_commands(batch)
+        owners = tuple(getattr(batch, "command_owners", ()))
+        if len(owners) != len(commands) or any(command_owner != owner for command_owner in owners):
+            raise ValueError(
+                f"batch {_batch_label(batch)!r} lacks exact chain-hop ownership"
+            )
         commands_by_key.setdefault((chain_index, hop_index), []).extend(
-            _batch_commands(batch)
+            commands
         )
     if not commands_by_key:
         raise ValueError("global SFC plan has no service-chain placement batches")
@@ -684,19 +700,63 @@ def _sfc_waves(
         expected = set(range(max(hops) + 1))
         if hops != expected:
             raise ValueError(f"global SFC chain {chain_index:03d} has invalid hop order")
+    chain_indices = set(chain_hops)
+    if chain_indices != set(range(max(chain_indices) + 1)):
+        raise ValueError("global SFC service-chain indices are not contiguous")
     declared_count = int(getattr(plan, "service_chain_count", 0) or 0)
     if declared_count and declared_count != len(chain_hops):
         raise ValueError("global SFC service placement count does not match plan")
-
-    # Explicit optional placement/path evidence is validated when supplied by
-    # a richer planner, while old canonical plans remain structurally valid.
+    chain_members = _chain_members(tuple(edge_map.values()))
     placements = getattr(plan, "service_placements", None)
-    if placements is not None and not placements:
+    if not placements:
         raise ValueError("global SFC plan is missing service placement")
-    if getattr(plan, "placement_feasible", True) is False:
+    declared_capacity = getattr(plan, "placement_capacity", None)
+    if not isinstance(declared_capacity, Mapping) or not declared_capacity:
+        raise ValueError("global SFC plan is missing placement capacity")
+
+    evidence = getattr(plan, "sfc_evidence", None)
+    required_evidence = {
+        "service_availability",
+        "placement_capacity",
+        "placement_feasible",
+        "chain_order_valid",
+        "path_feasible",
+    }
+    if not isinstance(evidence, Mapping) or not required_evidence.issubset(evidence):
+        raise ValueError("global SFC plan is missing required planning evidence")
+    availability = evidence["service_availability"]
+    if not isinstance(availability, (tuple, list)) or not availability or any(
+        item is not True
+        and not (isinstance(item, Mapping) and item.get("available") is True)
+        for item in availability
+    ):
+        raise ValueError("global SFC plan is missing service availability")
+    capacity = evidence["placement_capacity"]
+    if not isinstance(capacity, Mapping) or not capacity:
+        raise ValueError("global SFC plan is missing placement capacity")
+    for capacity_name, capacity_map in (
+        ("placement", declared_capacity), ("evidence", capacity)
+    ):
+        for chain_index, members in enumerate(chain_members):
+            key = f"chain-{chain_index:03d}"
+            if key not in capacity_map and chain_index not in capacity_map:
+                raise ValueError(f"global SFC plan is missing {capacity_name} capacity for {key}")
+            available = capacity_map.get(key, capacity_map.get(chain_index))
+            try:
+                available_value = float(available)
+            except (TypeError, ValueError):
+                raise ValueError("global SFC placement capacity is invalid") from None
+            demand = sum(
+                float(edge_map[edge_id].required_throughput_mbps) for edge_id in members
+            )
+            if available_value < demand:
+                raise ValueError("global SFC placement capacity is insufficient")
+    if evidence["placement_feasible"] is not True:
         raise ValueError("global SFC placement capacity is insufficient")
-    if getattr(plan, "hop_order_valid", True) is False:
+    if evidence["chain_order_valid"] is not True:
         raise ValueError("global SFC plan has invalid hop order")
+    if evidence["path_feasible"] is not True:
+        raise ValueError("global SFC plan contains an infeasible network path")
     for record in tuple(getattr(plan, "path_records", ()) or ()):
         if isinstance(record, dict) and (
             record.get("feasible") is False

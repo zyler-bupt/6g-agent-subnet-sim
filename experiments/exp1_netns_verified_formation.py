@@ -47,6 +47,9 @@ class DeploymentCommand:
 class DeploymentBatch:
     label: str
     commands: tuple[DeploymentCommand, ...]
+    # Transactional adapters use exact per-command ownership while nominal
+    # installation continues to consume only label and commands.
+    command_owners: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class FormationDeploymentPlan:
     # explicit chain batches and path records above.
     service_placements: tuple[object, ...] | Mapping[object, object] | None = None
     placement_capacity: tuple[object, ...] | Mapping[object, object] | None = None
+    sfc_evidence: Mapping[str, object] | None = None
 
     @property
     def control_messages(self) -> int:
@@ -713,6 +717,7 @@ class ProcessNetnsTopology:
         common = tuple(self._gateway_default_commands()) + tuple(self._outer_agent_commands())
         if method_id == "proposed":
             peer_commands: list[DeploymentCommand] = []
+            peer_owners: list[str] = []
             seen: set[tuple[int | None, tuple[str, ...]]] = set()
             for edge in ordered:
                 for command in self._explicit_peer_commands(edge):
@@ -720,8 +725,14 @@ class ProcessNetnsTopology:
                     if identity not in seen:
                         seen.add(identity)
                         peer_commands.append(command)
+                        peer_owners.append(edge.edge_id)
             commands = common + tuple(peer_commands)
-            batches = (DeploymentBatch("task_dag_parallel_batch", commands),)
+            batches = (
+                DeploymentBatch(
+                    "task_dag_parallel_batch", commands,
+                    ("shared",) * len(common) + tuple(peer_owners),
+                ),
+            )
             policy = "task_dag_batch_parallel_deployment"
             chains: tuple[tuple[FormationEdge, ...], ...] = ()
             work_units = len(self.agents) + len(edges)
@@ -729,14 +740,21 @@ class ProcessNetnsTopology:
             path_records = self._cspf_path_records(
                 ordered, profiles, max_path_delay_ms=max_path_delay_ms
             )
-            edge_batches = tuple(
-                DeploymentBatch(
-                    f"cspf_flow:{edge.edge_id}",
-                    tuple(self._explicit_peer_commands(edge)),
+            edge_batches_list: list[DeploymentBatch] = []
+            for edge in ordered:
+                flow_commands = tuple(self._explicit_peer_commands(edge))
+                edge_batches_list.append(
+                    DeploymentBatch(
+                        f"cspf_flow:{edge.edge_id}", flow_commands,
+                        (edge.edge_id,) * len(flow_commands),
+                    )
                 )
-                for edge in ordered
-            )
-            batches = (DeploymentBatch("cspf_shared_infrastructure", common),) + edge_batches
+            edge_batches = tuple(edge_batches_list)
+            batches = (
+                DeploymentBatch(
+                    "cspf_shared_infrastructure", common, ("shared",) * len(common)
+                ),
+            ) + edge_batches
             policy = "failed_or_insufficient_links_pruned_then_deterministic_te_shortest_path"
             chains = ()
             work_units = len(edges) * (len(self.agents) + len(edges))
@@ -762,6 +780,8 @@ class ProcessNetnsTopology:
                             DeploymentBatch(
                                 f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:routes",
                                 tuple(route_commands),
+                                (f"chain-{chain_index:03d}:hop:{hop_index:03d}",)
+                                * len(route_commands),
                             )
                         )
                     if rule_commands:
@@ -769,14 +789,20 @@ class ProcessNetnsTopology:
                             DeploymentBatch(
                                 f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:activate",
                                 tuple(rule_commands),
+                                (f"chain-{chain_index:03d}:hop:{hop_index:03d}",)
+                                * len(rule_commands),
                             )
                         )
+            gateway_commands = tuple(self._gateway_default_commands())
+            outer_commands = tuple(self._outer_agent_commands())
             batches = (
                 DeploymentBatch(
-                    "sfc_gateway_infrastructure", tuple(self._gateway_default_commands())
+                    "sfc_gateway_infrastructure", gateway_commands,
+                    ("shared",) * len(gateway_commands),
                 ),
                 DeploymentBatch(
-                    "sfc_outer_reachability", tuple(self._outer_agent_commands())
+                    "sfc_outer_reachability", outer_commands,
+                    ("shared",) * len(outer_commands),
                 ),
                 *chain_batches,
             )
@@ -784,6 +810,9 @@ class ProcessNetnsTopology:
             work_units = len(edges) + sum(len(chain) ** 2 for chain in chains)
         if method_id != "cspf":
             path_records = ()
+        sfc_evidence = None
+        if method_id == "global_sfc_embedding":
+            sfc_evidence = self._sfc_evidence(chains, batches)
         return FormationDeploymentPlan(
             method_id=method_id,
             planning_policy=policy,
@@ -793,6 +822,12 @@ class ProcessNetnsTopology:
             planning_work_units=work_units,
             batches=tuple(batches),
             path_records=tuple(path_records),
+            service_placements=tuple(chain_index for chain_index in range(len(chains))),
+            placement_capacity={
+                chain_index: sum(edge.required_throughput_mbps for edge in chain)
+                for chain_index, chain in enumerate(chains)
+            } if method_id == "global_sfc_embedding" else None,
+            sfc_evidence=sfc_evidence,
         )
 
     def install_deployment_plan(
@@ -878,6 +913,58 @@ class ProcessNetnsTopology:
                 )
             )
         return commands
+
+    @staticmethod
+    def _sfc_evidence(
+        chains: Sequence[Sequence[FormationEdge]],
+        batches: Sequence[DeploymentBatch],
+    ) -> dict[str, object]:
+        """Materialize the Global SFC checks used by transactional adapters."""
+        chain_order_valid = True
+        path_feasible = True
+        service_availability = tuple(
+            {"chain_id": f"chain-{index:03d}", "available": bool(chain)}
+            for index, chain in enumerate(chains)
+        )
+        for batch in batches:
+            if not batch.label.startswith("sfc_chain:"):
+                continue
+            match = re.match(r"^sfc_chain:(\d+):hop:(\d+):", batch.label)
+            owner_ok = bool(batch.command_owners) and all(
+                owner == batch.command_owners[0] for owner in batch.command_owners
+            )
+            if match is None or not batch.commands or not owner_ok:
+                path_feasible = False
+                continue
+            chain_index = int(match.group(1))
+            hop_index = int(match.group(2))
+            expected_owner = f"chain-{chain_index:03d}:hop:{hop_index:03d}"
+            if batch.command_owners[0] != expected_owner:
+                path_feasible = False
+        labels = {
+            (int(match.group(1)), int(match.group(2)))
+            for batch in batches
+            if (match := re.match(r"^sfc_chain:(\d+):hop:(\d+):", batch.label))
+        }
+        for chain_index in range(len(chains)):
+            hops = {hop for chain, hop in labels if chain == chain_index}
+            expected = set(range(max(hops) + 1)) if hops else set()
+            if hops != expected:
+                chain_order_valid = False
+        placement_capacity = {
+            f"chain-{index:03d}": sum(edge.required_throughput_mbps for edge in chain)
+            for index, chain in enumerate(chains)
+        }
+        placement_feasible = all(
+            float(capacity) >= 0.0 for capacity in placement_capacity.values()
+        )
+        return {
+            "service_availability": service_availability,
+            "placement_capacity": placement_capacity,
+            "placement_feasible": placement_feasible,
+            "chain_order_valid": chain_order_valid,
+            "path_feasible": path_feasible,
+        }
 
     def _cspf_path_records(
         self,

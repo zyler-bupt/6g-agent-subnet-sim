@@ -29,8 +29,32 @@ from src.controller.formation_transactions import (
 class MethodTransactionAdapterTests(unittest.TestCase):
     @staticmethod
     def _plan(method_id: str, labels: tuple[str, ...]) -> SimpleNamespace:
-        batches = tuple(SimpleNamespace(label=label, commands=(label,)) for label in labels)
-        return SimpleNamespace(method_id=method_id, ordered_edge_ids=tuple(), batches=batches)
+        owners = []
+        for label in labels:
+            if method_id == "cspf":
+                owners.append(label.removeprefix("cspf_flow:"))
+            elif method_id == "global_sfc_embedding":
+                parts = label.split(":")
+                owners.append(f"chain-{int(parts[1]):03d}:hop:{int(parts[3]):03d}")
+            else:
+                owners.append("shared")
+        batches = tuple(
+            SimpleNamespace(label=label, commands=(label,), command_owners=(owner,))
+            for label, owner in zip(labels, owners)
+        )
+        return SimpleNamespace(
+            method_id=method_id, ordered_edge_ids=tuple(), batches=batches,
+            service_placements=(0, 1) if method_id == "global_sfc_embedding" else None,
+            placement_capacity={"chain-000": 3.0, "chain-001": 1.0}
+            if method_id == "global_sfc_embedding" else None,
+            service_chain_count=0, sfc_evidence={
+                "service_availability": (True,),
+                "placement_capacity": {"chain-000": 3.0, "chain-001": 1.0},
+                "placement_feasible": True,
+                "chain_order_valid": True,
+                "path_feasible": True,
+            } if method_id == "global_sfc_embedding" else None,
+        )
 
     @staticmethod
     def _edges() -> tuple[FormationEdge, ...]:
@@ -75,12 +99,23 @@ class MethodTransactionAdapterTests(unittest.TestCase):
             [tx.chain_id for tx in waves[0]], ["chain-000", "chain-001"]
         )
         self.assertEqual(len({tx.chain_id for tx in waves[0]}), len(waves[0]))
+        for wave in waves:
+            self.assertEqual(
+                len({tx.chain_id for tx in wave}), len(wave),
+                "a wave may contain at most one dependency hop per chain",
+            )
+        self.assertEqual(waves[0][0].commands, ("sfc_chain:000:hop:000:routes",))
+        self.assertEqual(waves[0][1].commands, ("sfc_chain:001:hop:000:routes",))
+        self.assertEqual(waves[1][0].commands, ("sfc_chain:000:hop:001:routes",))
 
     def test_baselines_never_call_task_descendant_closure(self) -> None:
         edges = self._edges()
         cspf_plan = self._plan("cspf", tuple(f"cspf_flow:{edge.edge_id}" for edge in edges))
         sfc_plan = self._plan(
-            "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+            "global_sfc_embedding", (
+                "sfc_chain:000:hop:000:routes", "sfc_chain:000:hop:001:routes",
+                "sfc_chain:001:hop:000:routes",
+            )
         )
 
         with patch(
@@ -98,6 +133,95 @@ class MethodTransactionAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "invalid hop order"):
             build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_global_sfc_requires_all_planning_evidence(self) -> None:
+        edges = self._edges()
+        valid = {
+            "service_availability": (True,),
+            "placement_capacity": {"chain-000": 3.0, "chain-001": 1.0},
+            "placement_feasible": True,
+            "chain_order_valid": True,
+            "path_feasible": True,
+        }
+        cases = {
+            "missing evidence": None,
+            "missing service availability": {
+                key: value for key, value in valid.items() if key != "service_availability"
+            },
+            "unavailable service": {**valid, "service_availability": (False,)},
+            "missing placement capacity": {
+                **valid, "placement_capacity": {}
+            },
+            "insufficient placement": {**valid, "placement_feasible": False},
+            "invalid chain ordering": {**valid, "chain_order_valid": False},
+            "infeasible path": {**valid, "path_feasible": False},
+        }
+        for name, evidence in cases.items():
+            with self.subTest(name=name):
+                plan = self._plan("global_sfc_embedding", ("sfc_chain:000:hop:000:routes",))
+                plan.sfc_evidence = evidence
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+
+        for field, value in (("service_placements", ()), ("placement_capacity", {})):
+            with self.subTest(missing_field=field):
+                plan = self._plan("global_sfc_embedding", ("sfc_chain:000:hop:000:routes",))
+                setattr(plan, field, value)
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_proposed_waves_and_descendant_retry_use_exact_edge_ownership(self) -> None:
+        edges = (
+            FormationEdge("e-0", 0, 1, 1.0),
+            FormationEdge("e-1", 1, 2, 1.0),
+            FormationEdge("e-2", 2, 3, 1.0),
+        )
+        batches = (
+            SimpleNamespace(
+                label="task_dag_parallel_batch",
+                commands=("shared", "ancestor", "failed", "descendant", "sibling"),
+                command_owners=("shared", "e-0", "e-1", "e-2", "e-other"),
+            ),
+        )
+        plan = SimpleNamespace(
+            method_id="proposed", ordered_edge_ids=("e-0", "e-1", "e-2"), batches=batches
+        )
+
+        waves = build_method_transactions("proposed", plan, edges)
+        retry = build_retry_transactions("proposed", "e-1", plan, edges)
+
+        self.assertEqual([[tx.logical_edge_id for tx in wave] for wave in waves], [["e-0"], ["e-1"], ["e-2"]])
+        self.assertEqual(waves[0][0].commands, ("shared", "ancestor"))
+        self.assertEqual(waves[1][0].commands, ("failed",))
+        self.assertEqual(waves[2][0].commands, ("descendant",))
+        self.assertEqual([tx.logical_edge_id for wave in retry for tx in wave], ["e-1", "e-2"])
+        self.assertEqual([tx.commands for wave in retry for tx in wave], [("shared", "failed"), ("descendant",)])
+
+    def test_cspf_retry_uses_exact_ownership_without_substring_collisions(self) -> None:
+        edges = (FormationEdge("e-1", 0, 1, 1.0), FormationEdge("e-10", 1, 2, 1.0))
+        plan = SimpleNamespace(
+            method_id="cspf", ordered_edge_ids=("e-1", "e-10"),
+            batches=(
+                SimpleNamespace(label="cspf_flow:e-1", commands=("one",), command_owners=("e-1",)),
+                SimpleNamespace(label="cspf_flow:e-10", commands=("ten",), command_owners=("e-10",)),
+            ),
+        )
+
+        retry = build_retry_transactions("cspf", "e-1", plan, edges)
+
+        self.assertEqual(retry[0][0].commands, ("one",))
+
+    def test_cspf_rejects_empty_owned_flow_payload(self) -> None:
+        edge = FormationEdge("e-empty", 0, 1, 1.0)
+        plan = SimpleNamespace(
+            method_id="cspf", ordered_edge_ids=("e-empty",),
+            batches=(SimpleNamespace(
+                label="cspf_flow:e-empty", commands=(), command_owners=()
+            ),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "no owned commands"):
+            build_method_transactions("cspf", plan, (edge,))
 
     def test_cspf_reserves_residual_capacity_before_parallel_flow_deployment(self) -> None:
         topology = exp1.ProcessNetnsTopology(3, 2)
