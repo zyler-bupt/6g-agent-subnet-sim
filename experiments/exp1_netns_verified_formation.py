@@ -354,28 +354,22 @@ class NetnsPolicyTableBackend:
                 tuple(staged_commands), check=True, deadline=deadline
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            cleanup = self._cleanup(staged)
             return StageResult(
                 accepted=False,
                 commands_attempted=len(staged_commands),
-                reason=_combined_command_reason(_command_error(error), cleanup.reason),
+                reason=_command_error(error),
                 affected_objects=tuple(affected_objects),
                 readback_before=staged.snapshot,
-                readback_after=cleanup.readback_after,
             )
         try:
             after = self._readback(staged, deadline=deadline)
         except (RuntimeError, subprocess.SubprocessError) as error:
-            cleanup = self._cleanup(staged)
             return StageResult(
                 accepted=False,
                 commands_attempted=len(staged_commands),
-                reason=_combined_command_reason(
-                    f"post-stage readback failed: {_command_error(error)}", cleanup.reason
-                ),
+                reason=f"post-stage readback failed: {_command_error(error)}",
                 affected_objects=tuple(affected_objects),
                 readback_before=staged.snapshot,
-                readback_after=cleanup.readback_after,
             )
         return StageResult(
             accepted=True,

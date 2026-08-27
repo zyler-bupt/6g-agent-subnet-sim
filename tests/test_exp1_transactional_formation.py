@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -807,6 +807,46 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         self.assertIsNotNone(topology.deadlines[0])
         self.assertGreater(topology.deadlines[0], time.perf_counter())
 
+    def test_stage_timeout_returns_at_deadline_then_flushes_explicitly(self) -> None:
+        class DeadlineTopology:
+            def __init__(self) -> None:
+                self.commands: list[tuple[tuple[int | None, tuple[str, ...]], ...]] = []
+                self.delay_cleanup = True
+
+            def _run_ns(self, *_args, **_kwargs):
+                return SimpleNamespace(stdout="[]")
+
+            def _parallel_commands(self, commands, *, check, timeout=None, deadline=None):
+                items = tuple(commands)
+                self.commands.append(items)
+                if any(command[:3] == ("ip", "route", "replace") for _, command in items):
+                    threading.Event().wait(max(0.0, (deadline or time.perf_counter()) - time.perf_counter()))
+                    raise subprocess.TimeoutExpired("ip", 0.0)
+                if self.delay_cleanup:
+                    threading.Event().wait(0.08)
+
+        topology = DeadlineTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        started = time.perf_counter()
+
+        staged = backend.stage("txn-timeout", (self._command(),), ack_timeout_ms=30)
+        elapsed = time.perf_counter() - started
+
+        self.assertFalse(staged.accepted)
+        self.assertLess(elapsed, 0.07)
+        self.assertIn("txn-timeout", backend._transactions)
+        self.assertTrue(backend._used_tables)
+        self.assertFalse(any(
+            command[:3] == ("ip", "route", "flush")
+            for batch in topology.commands for _, command in batch
+        ))
+
+        topology.delay_cleanup = False
+        flushed = backend.flush("txn-timeout")
+
+        self.assertTrue(flushed.accepted)
+        self.assertFalse(backend._used_tables)
+
     def test_stage_uses_one_absolute_deadline_for_all_concrete_commands(self) -> None:
         topology = self._KernelTopology()
         backend = exp1.NetnsPolicyTableBackend(topology)
@@ -1141,6 +1181,16 @@ class _RecordingTransactionalTopology:
             ),
         )
 
+    def _table_route(self, edge: FormationEdge, owner: int) -> exp1.DeploymentCommand:
+        return exp1.DeploymentCommand(
+            f"agent-{owner}", 100 + owner + self.pid_offset,
+            (
+                "ip", "route", "replace", "table", str(100 + owner),
+                f"10.0.{edge.target_index}.2/32", "via", f"10.0.{owner}.1",
+                "dev", "eth0",
+            ),
+        )
+
     def plan_task_routes(self, method_id, edges, *, profiles, max_path_delay_ms):
         self.planner_inputs.append(
             {
@@ -1185,7 +1235,7 @@ class _RecordingTransactionalTopology:
                     chain_batches.append(
                         exp1.DeploymentBatch(
                             f"sfc_chain:{chain_index:03d}:hop:{hop_index:03d}:routes",
-                            (self._route(edge, edge.source_index),),
+                            (self._table_route(edge, edge.source_index),),
                             (owner,),
                         )
                     )
@@ -1199,7 +1249,7 @@ class _RecordingTransactionalTopology:
                                     (
                                         "ip", "rule", "add", "priority", "10000",
                                         "to", f"10.0.{edge.target_index}.2/32",
-                                        "lookup", "100",
+                                        "lookup", str(100 + edge.source_index),
                                     ),
                                 ),
                             ),
@@ -1514,7 +1564,7 @@ class TransactionalRunnerContractTests(unittest.TestCase):
     def test_method_owned_filter_only_omits_known_sfc_activation_rules(self) -> None:
         route = exp1.DeploymentCommand(
             "agent-0", 100,
-            ("ip", "route", "replace", "10.0.1.2/32", "via", "10.0.0.1", "dev", "eth0"),
+            ("ip", "route", "replace", "table", "100", "10.0.1.2/32", "via", "10.0.0.1", "dev", "eth0"),
         )
         unknown = exp1.DeploymentCommand(
             "agent-0", 100, ("ip", "route", "del", "10.0.1.2/32"),
@@ -1539,6 +1589,24 @@ class TransactionalRunnerContractTests(unittest.TestCase):
         self.assertEqual(
             transactional._method_owned_waves(((sfc,),))[0][0].commands, (route,)
         )
+        unrelated_activation = exp1.DeploymentCommand(
+            "agent-0", 100,
+            ("ip", "rule", "add", "priority", "10001", "to", "10.0.99.2/32", "lookup", "100"),
+        )
+        with self.assertRaisesRegex(ValueError, "does not correspond"):
+            transactional._method_owned_waves((
+                (replace(sfc, commands=(route, unrelated_activation)),),
+            ))
+
+    def test_phase_aware_default_output_uses_the_loaded_protocol_phase(self) -> None:
+        self.assertEqual(
+            transactional._default_output_dir(self.formal),
+            Path(self.formal["output"]["provenance"]),
+        )
+        self.assertEqual(
+            transactional._default_output_dir(self.pilot),
+            Path(self.pilot["output"]["provenance"]),
+        )
 
     def test_exception_paths_accumulate_started_stage_durations(self) -> None:
         cases = (
@@ -1562,6 +1630,45 @@ class TransactionalRunnerContractTests(unittest.TestCase):
                 self.assertFalse(row.success)
                 self.assertEqual(row.failure_stage, stage)
                 self.assertGreaterEqual(getattr(row, duration_name), 15.0)
+
+    def test_prepare_timer_includes_parallel_future_error(self) -> None:
+        def delayed_prepare_failure(*_args, **_kwargs):
+            threading.Event().wait(0.02)
+            raise RuntimeError("prepare future exploded")
+
+        with patch.object(
+            transactional, "_parallel_apply", side_effect=delayed_prepare_failure
+        ):
+            prepare_row, _events = run_transactional_trial(
+                _RecordingTransactionalTopology(4, 4), self.formal,
+                method_id="proposed", scenario_class="command_rejection",
+                seed=0, num_agents=4,
+            )
+        self.assertEqual(prepare_row.failure_stage, "PREPARE")
+        self.assertGreaterEqual(prepare_row.prepare_latency_ms, 15.0)
+
+    def test_commit_timer_includes_parallel_future_error(self) -> None:
+        original_parallel_apply = transactional._parallel_apply
+        calls = 0
+
+        def fail_second_parallel_apply(function, items):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                threading.Event().wait(0.02)
+                raise RuntimeError("commit future exploded")
+            return original_parallel_apply(function, items)
+
+        with patch.object(
+            transactional, "_parallel_apply", new=fail_second_parallel_apply
+        ):
+            commit_row, _events = run_transactional_trial(
+                _RecordingTransactionalTopology(4, 4), self.formal,
+                method_id="proposed", scenario_class="command_rejection",
+                seed=0, num_agents=4,
+            )
+        self.assertEqual(commit_row.failure_stage, "COMMIT")
+        self.assertGreaterEqual(commit_row.commit_latency_ms, 15.0)
 
     def test_measured_scopes_exclude_common_setup_and_post_verify_cleanup(self) -> None:
         topology = _RecordingTransactionalTopology(
@@ -1679,6 +1786,51 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             with self.subTest(method_id=method_id):
                 self.assertTrue(row.success)
                 self.assertGreater(row.partial_state_exposure_ms, 0.0)
+
+    def test_post_complete_verifier_failure_does_not_extend_closed_exposure(self) -> None:
+        topology = _RecordingTransactionalTopology(4, 4)
+
+        def delayed_verify_failure(*_args, **_kwargs):
+            threading.Event().wait(0.05)
+            raise RuntimeError("verifier exploded after complete commit")
+
+        topology.verify_ping = delayed_verify_failure
+        row, _events = run_transactional_trial(
+            topology, self.formal, method_id="cspf",
+            scenario_class="command_rejection", seed=0, num_agents=4,
+        )
+
+        self.assertFalse(row.success)
+        self.assertEqual(row.failure_stage, "FINAL_VERIFY")
+        self.assertLess(row.partial_state_exposure_ms, 30.0)
+
+    def test_commit_rejection_rolls_back_later_accepted_peer(self) -> None:
+        class RejectionBeforeAcceptanceTopology(_RecordingTransactionalTopology):
+            def __init__(self) -> None:
+                super().__init__(4, 4)
+                self.commit_calls = 0
+
+            def activate_transaction(self, transaction_id):
+                self.commit_calls += 1
+                if self.commit_calls == 1:
+                    return CommandResult(accepted=False, reason="first commit rejected")
+                return super().activate_transaction(transaction_id)
+
+        topology = RejectionBeforeAcceptanceTopology()
+        row, events = run_transactional_trial(
+            topology, self.formal, method_id="cspf",
+            scenario_class="command_rejection", seed=0, num_agents=4,
+        )
+
+        self.assertFalse(row.success)
+        self.assertEqual(row.failure_stage, "COMMIT")
+        self.assertEqual(row.rollback_count, row.commit_attempts - 1)
+        self.assertGreater(row.rollback_count, 0)
+        self.assertFalse(topology.activated)
+        self.assertEqual(
+            len([event for event in events if event["stage"] == "TRANSACTION_ROLLBACK"]),
+            row.rollback_count,
+        )
 
     def test_run_schema_is_immutable(self) -> None:
         names = set(TransactionalFormationRun.__dataclass_fields__)

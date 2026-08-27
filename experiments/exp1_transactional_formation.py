@@ -478,9 +478,11 @@ def run_transactional_trial(
             if not wave:
                 continue
             prepare_started = time.perf_counter()
-            prepared = _parallel_apply(engine.prepare, wave)
-            prepare_finished = time.perf_counter()
-            prepare_latency += prepare_finished - prepare_started
+            try:
+                prepared = _parallel_apply(engine.prepare, wave)
+            finally:
+                prepare_finished = time.perf_counter()
+                prepare_latency += prepare_finished - prepare_started
             rejected = [
                 (transaction, result)
                 for transaction, result in zip(wave, prepared)
@@ -524,19 +526,26 @@ def run_transactional_trial(
                 else:
                     recovery_finished = time.perf_counter()
                     rollback_replan_latency += recovery_finished - recovery_started
+                    current_stage = "COMMIT"
                     commit_started = time.perf_counter()
-                    commits = _parallel_apply(
-                        lambda transaction: engine.commit(transaction.transaction_id),
-                        tuple(transaction for transaction, _result in accepted),
-                    )
-                    commit_finished = time.perf_counter()
-                    commit_latency += commit_finished - commit_started
+                    try:
+                        commits = _parallel_apply(
+                            lambda transaction: engine.commit(transaction.transaction_id),
+                            tuple(transaction for transaction, _result in accepted),
+                        )
+                    finally:
+                        commit_finished = time.perf_counter()
+                        commit_latency += commit_finished - commit_started
+                    commit_failures: list[TransactionAttempt] = []
                     for (transaction, _prepared), committed in zip(accepted, commits):
-                        if not committed.accepted:
-                            raise RuntimeError(committed.reason or "commit rejected")
-                        committed_ids.append(transaction.transaction_id)
-                        committed_keys.add(_transaction_key(transaction))
-                        first_commit_at = first_commit_at or commit_finished
+                        if committed.accepted:
+                            committed_ids.append(transaction.transaction_id)
+                            committed_keys.add(_transaction_key(transaction))
+                            first_commit_at = first_commit_at or commit_finished
+                        else:
+                            commit_failures.append(committed)
+                    if commit_failures:
+                        raise RuntimeError(commit_failures[0].reason or "commit rejected")
                 if retry_used or int(transaction_config["max_attempts"]) < 2:
                     raise RuntimeError(rejected[0][1].reason or "prepare rejected")
                 retry_used = True
@@ -580,24 +589,31 @@ def run_transactional_trial(
 
             current_stage = "COMMIT"
             commit_started = time.perf_counter()
-            commits = _parallel_apply(
-                lambda transaction: engine.commit(transaction.transaction_id), wave
-            )
-            commit_finished = time.perf_counter()
-            commit_latency += commit_finished - commit_started
+            try:
+                commits = _parallel_apply(
+                    lambda transaction: engine.commit(transaction.transaction_id), wave
+                )
+            finally:
+                commit_finished = time.perf_counter()
+                commit_latency += commit_finished - commit_started
+            commit_failures = []
             for transaction, committed in zip(wave, commits):
-                if not committed.accepted:
-                    raise RuntimeError(committed.reason or "commit rejected")
-                committed_ids.append(transaction.transaction_id)
-                committed_keys.add(_transaction_key(transaction))
-                first_commit_at = first_commit_at or commit_finished
+                if committed.accepted:
+                    committed_ids.append(transaction.transaction_id)
+                    committed_keys.add(_transaction_key(transaction))
+                    first_commit_at = first_commit_at or commit_finished
+                else:
+                    commit_failures.append(committed)
+            if commit_failures:
+                raise RuntimeError(commit_failures[0].reason or "commit rejected")
 
         if committed_keys != expected_keys:
             missing = sorted(str(item) for item in expected_keys - committed_keys)
             raise RuntimeError("incomplete commit; missing transaction scopes: " + ",".join(missing))
         method_commit_finished = time.perf_counter()
-        if retry_used and first_commit_at is not None:
+        if first_commit_at is not None:
             partial_state_exposure += max(0.0, method_commit_finished - first_commit_at)
+            first_commit_at = None
         _ensure_before(deadline)
 
         current_stage = "FINAL_VERIFY"
@@ -651,6 +667,7 @@ def run_transactional_trial(
                     cleanup_failures.append(_cleanup_attempt_failure(rolled_back))
         if first_commit_at is not None:
             partial_state_exposure += max(0.0, time.perf_counter() - first_commit_at)
+            first_commit_at = None
     finally:
         stopper = getattr(topology, "stop_background_traffic", None)
         if background is not None and callable(stopper):
@@ -909,24 +926,29 @@ def _method_owned_waves(
         for transaction in wave:
             if transaction.scope_kind == "shared":
                 continue
-            route_candidates: list[object] = []
-            for command in transaction.commands:
-                if _is_agent_route_candidate(command):
-                    route_candidates.append(command)
-                    continue
-                if (
-                    transaction.scope_kind == "chain"
-                    and _is_known_sfc_activation_rule(command)
-                ):
-                    # The policy-table backend derives the corresponding
-                    # inactive-table activation rule after staging the route.
-                    continue
-                raise ValueError(
-                    "unsupported method-owned command for transactional policy backend"
-                )
+            route_candidates = [
+                command for command in transaction.commands
+                if _is_agent_route_candidate(command)
+            ]
             if not route_candidates:
                 raise ValueError(
                     "method-owned transaction has no agent route candidates"
+                )
+            for command in transaction.commands:
+                if _is_agent_route_candidate(command):
+                    continue
+                activation = _sfc_activation_rule(command)
+                if transaction.scope_kind == "chain" and activation is not None:
+                    if _activation_matches_staged_route(activation, route_candidates):
+                        # The policy-table backend derives this same
+                        # namespace/table/destination activation from the
+                        # corresponding staged route.
+                        continue
+                    raise ValueError(
+                        "SFC activation rule does not correspond to a staged route"
+                    )
+                raise ValueError(
+                    "unsupported method-owned command for transactional policy backend"
                 )
             filtered_transactions.append(
                 replace(transaction, commands=tuple(route_candidates))
@@ -943,21 +965,56 @@ def _is_agent_route_candidate(command: object) -> bool:
     )
 
 
-def _is_known_sfc_activation_rule(command: object) -> bool:
+def _sfc_activation_rule(
+    command: object,
+) -> tuple[str, int, ipaddress.IPv4Network | ipaddress.IPv6Network] | None:
     argv = tuple(getattr(command, "argv", ()))
-    if not getattr(command, "namespace", "").startswith("agent-"):
-        return False
+    namespace = str(getattr(command, "namespace", ""))
+    if not namespace.startswith("agent-"):
+        return None
     if len(argv) != 9 or argv[:4] != ("ip", "rule", "add", "priority"):
-        return False
+        return None
     if argv[5] != "to" or argv[7] != "lookup":
-        return False
+        return None
     try:
         priority = int(argv[4])
         network = ipaddress.ip_network(argv[6], strict=False)
         table = int(argv[8])
     except ValueError:
-        return False
-    return priority > 0 and table > 0 and network.prefixlen == network.max_prefixlen
+        return None
+    if priority <= 0 or table <= 0 or network.prefixlen != network.max_prefixlen:
+        return None
+    return namespace, table, network
+
+
+def _activation_matches_staged_route(
+    activation: tuple[str, int, ipaddress.IPv4Network | ipaddress.IPv6Network],
+    routes: Sequence[object],
+) -> bool:
+    namespace, table, destination = activation
+    for route in routes:
+        if getattr(route, "namespace", "") != namespace:
+            continue
+        route_table_and_destination = _route_table_and_destination(route)
+        if route_table_and_destination == (table, destination):
+            return True
+    return False
+
+
+def _route_table_and_destination(
+    command: object,
+) -> tuple[int, ipaddress.IPv4Network | ipaddress.IPv6Network] | None:
+    argv = tuple(getattr(command, "argv", ()))
+    if argv[:3] != ("ip", "route", "replace"):
+        return None
+    try:
+        table_index = argv.index("table", 3)
+        table = int(argv[table_index + 1])
+        destination = argv[3] if table_index != 3 else argv[5]
+        network = ipaddress.ip_network(destination, strict=False)
+    except (IndexError, ValueError):
+        return None
+    return table, network
 
 
 def _with_versions(
@@ -1292,6 +1349,13 @@ def _parse_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _default_output_dir(config: Mapping[str, object]) -> Path:
+    output = config.get("output")
+    if not isinstance(output, Mapping) or not isinstance(output.get("provenance"), str):
+        raise RuntimeError("transactional config is missing output provenance")
+    return Path(str(output["provenance"]))
+
+
 def _validate_cli_invocation(
     config: Mapping[str, object],
     output_dir: Path,
@@ -1341,7 +1405,7 @@ def main() -> None:
         "scenario_classes": _parse_csv(args.scenario_classes)
         if args.scenario_classes else None,
     }
-    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_DIR
+    output_dir = Path(args.output_dir) if args.output_dir else _default_output_dir(config)
     _validate_cli_invocation(
         config,
         output_dir,
