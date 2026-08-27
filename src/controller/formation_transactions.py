@@ -81,7 +81,14 @@ class FormationTransaction:
 
 @dataclass(frozen=True)
 class CommandResult:
-    """Executor result for activation or cleanup commands."""
+    """Executor result for activation or cleanup commands.
+
+    ``readback_after_evidence`` is an explicit, non-kernel replacement when a
+    backend cannot obtain a post-operation readback.  Unlike an absent
+    ``readback_after`` (which permits the engine's legacy fallback readback),
+    it tells the engine that the backend deliberately supplied audit evidence
+    and that a new operation-time readback must not be started.
+    """
 
     accepted: bool
     commands_attempted: int = 0
@@ -89,6 +96,7 @@ class CommandResult:
     affected_objects: tuple[str, ...] = ()
     readback_before: tuple[dict[str, object], ...] | None = None
     readback_after: tuple[dict[str, object], ...] | None = None
+    readback_after_evidence: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "affected_objects", tuple(self.affected_objects))
@@ -96,6 +104,10 @@ class CommandResult:
             object.__setattr__(self, "readback_before", tuple(self.readback_before))
         if self.readback_after is not None:
             object.__setattr__(self, "readback_after", tuple(self.readback_after))
+        if self.readback_after is not None and self.readback_after_evidence:
+            raise ValueError(
+                "readback_after_evidence requires an unavailable post-operation readback"
+            )
         if self.commands_attempted < 0:
             raise ValueError("commands_attempted must be nonnegative")
 
@@ -273,13 +285,16 @@ class FormationTransactionEngine:
         after = result.readback_after
         after_fingerprint = ""
         if after is None:
-            try:
-                after = self.executor.readback(transaction.transaction_id)
-            except Exception as error:
-                accepted = False
-                effective_phase = failure_phase
-                reason = _combined_reason(reason, f"post-operation readback failed: {_exception_reason(error)}")
-                after_fingerprint = _error_fingerprint(error)
+            if result.readback_after_evidence:
+                after_fingerprint = _evidence_fingerprint(result.readback_after_evidence)
+            else:
+                try:
+                    after = self.executor.readback(transaction.transaction_id)
+                except Exception as error:
+                    accepted = False
+                    effective_phase = failure_phase
+                    reason = _combined_reason(reason, f"post-operation readback failed: {_exception_reason(error)}")
+                    after_fingerprint = _error_fingerprint(error)
         ended_ns = time.monotonic_ns()
         attempt = TransactionAttempt(
             transaction_id=transaction.transaction_id,
@@ -316,6 +331,11 @@ def _readback_fingerprint(readback: tuple[dict[str, object], ...]) -> str:
 def _error_fingerprint(error: Exception) -> str:
     payload = {"error_type": type(error).__name__, "message": str(error)}
     return _readback_fingerprint((payload,))
+
+
+def _evidence_fingerprint(evidence: str) -> str:
+    """Fingerprint explicit audit evidence without claiming kernel state."""
+    return _readback_fingerprint(({"audit_evidence": evidence},))
 
 
 def _exception_reason(error: Exception) -> str:

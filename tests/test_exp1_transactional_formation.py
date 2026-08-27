@@ -27,6 +27,7 @@ from experiments.paper_protocol import TRANSACTIONAL_EXP1_PROTOCOL
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
+    FormationFaultSchedule,
     FormationTransaction,
     FormationTransactionEngine,
     StageResult,
@@ -845,6 +846,96 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         flushed = backend.flush("txn-timeout")
 
         self.assertTrue(flushed.accepted)
+        self.assertFalse(backend._used_tables)
+
+    def test_engine_prepare_deadline_keeps_post_readback_for_explicit_abort(self) -> None:
+        class DeadlineTopology:
+            def __init__(self) -> None:
+                self.timed_out = False
+                self.readback_calls = 0
+
+            def _run_ns(self, *_args, **_kwargs):
+                self.readback_calls += 1
+                if self.timed_out:
+                    # An engine fallback readback after the stage deadline would
+                    # be observable as an additional 80 ms pre-return delay.
+                    threading.Event().wait(0.08)
+                return SimpleNamespace(stdout="[]")
+
+            def _parallel_commands(self, commands, *, check, timeout=None, deadline=None):
+                if any(
+                    command[:3] == ("ip", "route", "replace")
+                    for _, command in tuple(commands)
+                ):
+                    threading.Event().wait(
+                        max(0.0, (deadline or time.perf_counter()) - time.perf_counter())
+                    )
+                    self.timed_out = True
+                    raise subprocess.TimeoutExpired("ip", 0.0)
+
+        class BackendExecutor:
+            def __init__(self, backend) -> None:
+                self.backend = backend
+                self.stage_result: StageResult | None = None
+
+            def stage(self, transaction, ack_timeout_ms):
+                self.stage_result = self.backend.stage(
+                    transaction.transaction_id,
+                    transaction.commands,
+                    ack_timeout_ms=ack_timeout_ms,
+                )
+                return self.stage_result
+
+            def activate(self, transaction_id):
+                return self.backend.activate(transaction_id)
+
+            def flush(self, transaction_id):
+                return self.backend.flush(transaction_id)
+
+            def readback(self, transaction_id):
+                return self.backend.readback(transaction_id)
+
+        topology = DeadlineTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        executor = BackendExecutor(backend)
+        engine = FormationTransactionEngine(executor, ack_timeout_ms=30)
+        transaction = FormationTransaction(
+            transaction_id="txn-engine-deadline",
+            attempt_index=0,
+            expected_versions=(),
+            commands=(self._command(),),
+            affected_objects=("edge-0",),
+        )
+
+        started = time.perf_counter()
+        prepared = engine.prepare(transaction)
+        prepare_elapsed = time.perf_counter() - started
+        reads_after_prepare = topology.readback_calls
+
+        self.assertFalse(prepared.accepted)
+        self.assertLess(prepare_elapsed, 0.07)
+        self.assertIsNotNone(executor.stage_result)
+        assert executor.stage_result is not None
+        self.assertIsNone(executor.stage_result.readback_after)
+        self.assertEqual(
+            executor.stage_result.readback_after_evidence,
+            "post-readback-unavailable-due-to-prepare-deadline",
+        )
+        self.assertIn("post-readback unavailable due to prepare deadline", prepared.reason)
+        self.assertTrue(prepared.readback_after_fingerprint)
+
+        aborted = engine.abort(transaction.transaction_id)
+
+        self.assertTrue(aborted.accepted)
+        self.assertGreater(topology.readback_calls, reads_after_prepare)
+        expected_cleanup_readback = hashlib.sha256(
+            json.dumps(
+                executor.stage_result.readback_before,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(aborted.readback_after_fingerprint, expected_cleanup_readback)
         self.assertFalse(backend._used_tables)
 
     def test_stage_uses_one_absolute_deadline_for_all_concrete_commands(self) -> None:
@@ -1669,6 +1760,67 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             )
         self.assertEqual(commit_row.failure_stage, "COMMIT")
         self.assertGreaterEqual(commit_row.commit_latency_ms, 15.0)
+
+    def test_parallel_commit_exception_collects_and_rolls_back_later_accepts(self) -> None:
+        topology = _RecordingTransactionalTopology(4, 4)
+        original_commit = FormationTransactionEngine.commit
+        later_commit_finished = threading.Event()
+        failing_id = "cspf:flow:edge-000-00-01:0"
+
+        def commit_with_first_future_failure(engine, transaction_id):
+            if transaction_id == failing_id:
+                self.assertTrue(later_commit_finished.wait(1.0))
+                raise RuntimeError("forced first commit future failure")
+            attempt = original_commit(engine, transaction_id)
+            if attempt.accepted:
+                later_commit_finished.set()
+            return attempt
+
+        def no_target_fault(*_args, **_kwargs):
+            return FormationFaultSchedule(
+                FaultClass.COMMAND_REJECTION,
+                4,
+                0,
+                "not-a-formation-edge",
+                0,
+            )
+
+        with (
+            patch.object(transactional, "build_fault_schedule", new=no_target_fault),
+            patch.object(
+                FormationTransactionEngine,
+                "commit",
+                new=commit_with_first_future_failure,
+            ),
+        ):
+            row, events = run_transactional_trial(
+                topology,
+                self.formal,
+                method_id="cspf",
+                scenario_class="command_rejection",
+                seed=0,
+                num_agents=4,
+            )
+
+        committed = {
+            str(event["details"]["transaction_id"])
+            for event in events
+            if event["stage"] == "TRANSACTION_COMMIT"
+            and bool(event["details"]["accepted"])
+        }
+        rolled_back = {
+            str(event["details"]["transaction_id"])
+            for event in events
+            if event["stage"] == "TRANSACTION_ROLLBACK"
+            and bool(event["details"]["accepted"])
+        }
+
+        self.assertFalse(row.success)
+        self.assertEqual(row.failure_stage, "COMMIT")
+        self.assertTrue(committed)
+        self.assertSetEqual(rolled_back, committed)
+        self.assertEqual(row.rollback_count, len(committed))
+        self.assertEqual(topology.activated, set())
 
     def test_measured_scopes_exclude_common_setup_and_post_verify_cleanup(self) -> None:
         topology = _RecordingTransactionalTopology(

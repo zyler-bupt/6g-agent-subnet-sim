@@ -56,6 +56,19 @@ class TransactionalScheduledRun:
     scenario_class: str
 
 
+class ParallelApplyError(RuntimeError):
+    """All future outcomes collected before surfacing one or more failures."""
+
+    def __init__(self, errors: Sequence[Exception], results: Sequence[Any | None]) -> None:
+        self.errors = tuple(errors)
+        self.results = tuple(results)
+        first = self.errors[0]
+        super().__init__(
+            f"{len(self.errors)} parallel operation failure(s); "
+            f"first: {type(first).__name__}: {first}"
+        )
+
+
 @dataclass(frozen=True)
 class TransactionalFormationRun:
     protocol_id: str
@@ -528,22 +541,31 @@ def run_transactional_trial(
                     rollback_replan_latency += recovery_finished - recovery_started
                     current_stage = "COMMIT"
                     commit_started = time.perf_counter()
+                    parallel_commit_error: ParallelApplyError | None = None
                     try:
-                        commits = _parallel_apply(
-                            lambda transaction: engine.commit(transaction.transaction_id),
-                            tuple(transaction for transaction, _result in accepted),
-                        )
+                        try:
+                            commits = _parallel_apply(
+                                lambda transaction: engine.commit(transaction.transaction_id),
+                                tuple(transaction for transaction, _result in accepted),
+                            )
+                        except ParallelApplyError as error:
+                            parallel_commit_error = error
+                            commits = list(error.results)
                     finally:
                         commit_finished = time.perf_counter()
                         commit_latency += commit_finished - commit_started
                     commit_failures: list[TransactionAttempt] = []
                     for (transaction, _prepared), committed in zip(accepted, commits):
+                        if committed is None:
+                            continue
                         if committed.accepted:
                             committed_ids.append(transaction.transaction_id)
                             committed_keys.add(_transaction_key(transaction))
                             first_commit_at = first_commit_at or commit_finished
                         else:
                             commit_failures.append(committed)
+                    if parallel_commit_error is not None:
+                        raise parallel_commit_error
                     if commit_failures:
                         raise RuntimeError(commit_failures[0].reason or "commit rejected")
                 if retry_used or int(transaction_config["max_attempts"]) < 2:
@@ -589,21 +611,30 @@ def run_transactional_trial(
 
             current_stage = "COMMIT"
             commit_started = time.perf_counter()
+            parallel_commit_error = None
             try:
-                commits = _parallel_apply(
-                    lambda transaction: engine.commit(transaction.transaction_id), wave
-                )
+                try:
+                    commits = _parallel_apply(
+                        lambda transaction: engine.commit(transaction.transaction_id), wave
+                    )
+                except ParallelApplyError as error:
+                    parallel_commit_error = error
+                    commits = list(error.results)
             finally:
                 commit_finished = time.perf_counter()
                 commit_latency += commit_finished - commit_started
             commit_failures = []
             for transaction, committed in zip(wave, commits):
+                if committed is None:
+                    continue
                 if committed.accepted:
                     committed_ids.append(transaction.transaction_id)
                     committed_keys.add(_transaction_key(transaction))
                     first_commit_at = first_commit_at or commit_finished
                 else:
                     commit_failures.append(committed)
+            if parallel_commit_error is not None:
+                raise parallel_commit_error
             if commit_failures:
                 raise RuntimeError(commit_failures[0].reason or "commit rejected")
 
@@ -1051,7 +1082,16 @@ def _parallel_apply(function: Callable[[Any], Any], items: Sequence[Any]) -> lis
         return [function(item) for item in items]
     with ThreadPoolExecutor(max_workers=min(32, len(items))) as pool:
         futures = [pool.submit(function, item) for item in items]
-        return [future.result() for future in futures]
+        results: list[Any | None] = [None] * len(futures)
+        errors: list[Exception] = []
+        for index, future in enumerate(futures):
+            try:
+                results[index] = future.result()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ParallelApplyError(errors, results) from errors[0]
+        return list(results)
 
 
 def _verify_final(

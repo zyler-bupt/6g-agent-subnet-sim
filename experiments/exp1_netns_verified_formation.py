@@ -334,7 +334,12 @@ class NetnsPolicyTableBackend:
             with self._state_lock:
                 self._transactions.pop(transaction_id, None)
             self._release_tables(staged.table_by_pid)
-            return StageResult(accepted=False, reason=_command_error(error))
+            evidence, evidence_reason = _stage_readback_evidence(error, deadline)
+            return StageResult(
+                accepted=False,
+                reason=f"{_command_error(error)}; {evidence_reason}",
+                readback_after_evidence=evidence,
+            )
         if any(
             record["routes"] or _rules_reference_table(record["rules"], record["table_id"])
             for record in staged.snapshot
@@ -354,22 +359,29 @@ class NetnsPolicyTableBackend:
                 tuple(staged_commands), check=True, deadline=deadline
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            evidence, evidence_reason = _stage_readback_evidence(error, deadline)
             return StageResult(
                 accepted=False,
                 commands_attempted=len(staged_commands),
-                reason=_command_error(error),
+                reason=f"{_command_error(error)}; {evidence_reason}",
                 affected_objects=tuple(affected_objects),
                 readback_before=staged.snapshot,
+                readback_after_evidence=evidence,
             )
         try:
             after = self._readback(staged, deadline=deadline)
         except (RuntimeError, subprocess.SubprocessError) as error:
+            evidence, evidence_reason = _stage_readback_evidence(error, deadline)
             return StageResult(
                 accepted=False,
                 commands_attempted=len(staged_commands),
-                reason=f"post-stage readback failed: {_command_error(error)}",
+                reason=(
+                    f"post-stage readback failed: {_command_error(error)}; "
+                    f"{evidence_reason}"
+                ),
                 affected_objects=tuple(affected_objects),
                 readback_before=staged.snapshot,
+                readback_after_evidence=evidence,
             )
         return StageResult(
             accepted=True,
@@ -635,6 +647,21 @@ def _normalized_rule_network(value: str) -> ipaddress.IPv4Network | ipaddress.IP
 
 def _command_error(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
+
+
+def _stage_readback_evidence(
+    error: Exception, deadline: float
+) -> tuple[str, str]:
+    """Describe an unavailable stage readback without inventing kernel state."""
+    if isinstance(error, subprocess.TimeoutExpired) or time.perf_counter() >= deadline:
+        return (
+            "post-readback-unavailable-due-to-prepare-deadline",
+            "post-readback unavailable due to prepare deadline",
+        )
+    return (
+        "post-readback-unavailable-after-stage-error",
+        "post-readback unavailable after stage error",
+    )
 
 
 def _remaining_timeout(deadline: float | None, fallback: float) -> float:
