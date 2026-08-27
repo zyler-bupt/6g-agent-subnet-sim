@@ -19,6 +19,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
+from src.controller.formation_transactions import CommandResult, StageResult
+
 
 @dataclass(frozen=True)
 class FormationEdge:
@@ -220,6 +222,227 @@ def background_gateway_route_commands(
     )
 
 
+@dataclass
+class _StagedPolicyTransaction:
+    table_by_pid: dict[int, int]
+    activation_commands: tuple[tuple[int, tuple[str, ...]], ...]
+    snapshot: tuple[dict[str, object], ...]
+
+
+class NetnsPolicyTableBackend:
+    """Linux policy-table staging backend for transactional route candidates.
+
+    Each transaction receives an inactive per-agent routing table.  Staging
+    populates those tables only; activation adds the matching destination rules.
+    ``flush`` removes both forms of state, returning the recorded pre-stage
+    readback (an empty private table by allocation) without touching nominal
+    route installation.
+    """
+
+    _TABLE_BASE = 20_000
+    _TABLE_RANGE = 20_000
+    _RULE_PRIORITY_BASE = 30_000
+    _RULE_PRIORITY_RANGE = 20_000
+
+    def __init__(self, topology: ProcessNetnsTopology) -> None:
+        self._topology = topology
+        self._transactions: dict[str, _StagedPolicyTransaction] = {}
+        self._used_tables: set[int] = set()
+
+    def stage(
+        self, transaction_id: str, commands: Sequence[DeploymentCommand]
+    ) -> StageResult:
+        if not transaction_id:
+            return StageResult(accepted=False, reason="transaction_id must not be empty")
+        if transaction_id in self._transactions:
+            return StageResult(accepted=False, reason="transaction is already staged")
+
+        table_by_pid: dict[int, int] = {}
+        staged_commands: list[tuple[int | None, tuple[str, ...]]] = []
+        activation_commands: list[tuple[int, tuple[str, ...]]] = []
+        affected_objects: list[str] = []
+        try:
+            for command in commands:
+                pid, table = self._require_agent_route(command, transaction_id, table_by_pid)
+                staged_commands.append((pid, _route_in_table(command.argv, table)))
+                activation = _activation_rule(command.argv, table, transaction_id, pid)
+                if activation is not None:
+                    activation_commands.append((pid, activation))
+                affected_objects.append(command.namespace)
+        except ValueError as error:
+            self._release_tables(table_by_pid)
+            return StageResult(
+                accepted=False,
+                reason=str(error),
+                affected_objects=tuple(affected_objects),
+            )
+
+        staged = _StagedPolicyTransaction(
+            table_by_pid=table_by_pid,
+            activation_commands=tuple(activation_commands),
+            snapshot=(),
+        )
+        self._transactions[transaction_id] = staged
+        staged.snapshot = self.readback(transaction_id)
+        if any(record["routes"] for record in staged.snapshot):
+            self._transactions.pop(transaction_id, None)
+            self._release_tables(staged.table_by_pid)
+            return StageResult(
+                accepted=False,
+                reason="allocated policy table was not inactive",
+                affected_objects=tuple(affected_objects),
+            )
+        try:
+            self._topology._parallel_commands(tuple(staged_commands), check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            self._flush_staged(transaction_id, staged)
+            return StageResult(
+                accepted=False,
+                commands_attempted=len(staged_commands),
+                reason=str(error),
+                affected_objects=tuple(affected_objects),
+            )
+        return StageResult(
+            accepted=True,
+            commands_attempted=len(staged_commands),
+            affected_objects=tuple(affected_objects),
+        )
+
+    def activate(self, transaction_id: str) -> CommandResult:
+        staged = self._transactions.get(transaction_id)
+        if staged is None:
+            return CommandResult(accepted=False, reason="transaction is not staged")
+        commands = tuple(staged.activation_commands)
+        try:
+            self._topology._parallel_commands(commands, check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            return CommandResult(
+                accepted=False,
+                commands_attempted=len(commands),
+                reason=str(error),
+            )
+        return CommandResult(accepted=True, commands_attempted=len(commands))
+
+    def flush(self, transaction_id: str) -> CommandResult:
+        staged = self._transactions.get(transaction_id)
+        if staged is None:
+            return CommandResult(accepted=False, reason="transaction is not staged")
+        commands = self._flush_staged(transaction_id, staged)
+        return CommandResult(accepted=True, commands_attempted=len(commands))
+
+    def readback(self, transaction_id: str) -> tuple[dict[str, object], ...]:
+        staged = self._transactions.get(transaction_id)
+        if staged is None:
+            return ()
+        records: list[dict[str, object]] = []
+        for pid, table in sorted(staged.table_by_pid.items()):
+            routes = _ip_json(
+                self._topology._run_ns(
+                    pid, "ip", "-j", "route", "show", "table", str(table)
+                ).stdout,
+                f"policy table {table} routes",
+            )
+            rules = _ip_json(
+                self._topology._run_ns(pid, "ip", "-j", "rule", "show").stdout,
+                f"policy table {table} rules",
+            )
+            records.append(
+                {
+                    "namespace_pid": pid,
+                    "table_id": table,
+                    "routes": routes,
+                    "rules": rules,
+                }
+            )
+        return tuple(records)
+
+    def _require_agent_route(
+        self,
+        command: DeploymentCommand,
+        transaction_id: str,
+        table_by_pid: dict[int, int],
+    ) -> tuple[int, int]:
+        if command.pid is None or not command.namespace.startswith("agent-"):
+            raise ValueError("transaction staging requires an agent route command")
+        if command.argv[:3] != ("ip", "route", "replace"):
+            raise ValueError("transaction staging requires ip route replace commands")
+        table = table_by_pid.get(command.pid)
+        if table is None:
+            table = self._allocate_table(transaction_id, command.pid)
+            table_by_pid[command.pid] = table
+        return command.pid, table
+
+    def _allocate_table(self, transaction_id: str, pid: int) -> int:
+        digest = hashlib.sha256(f"{transaction_id}:{pid}".encode("utf-8")).digest()
+        start = int.from_bytes(digest[:4], "big") % self._TABLE_RANGE
+        for offset in range(self._TABLE_RANGE):
+            table = self._TABLE_BASE + (start + offset) % self._TABLE_RANGE
+            if table not in self._used_tables:
+                self._used_tables.add(table)
+                return table
+        raise RuntimeError("no inactive policy table identifiers are available")
+
+    def _release_tables(self, table_by_pid: Mapping[int, int]) -> None:
+        self._used_tables.difference_update(table_by_pid.values())
+
+    def _flush_staged(
+        self, transaction_id: str, staged: _StagedPolicyTransaction
+    ) -> tuple[tuple[int | None, tuple[str, ...]], ...]:
+        removal_rules = tuple(
+            (pid, _delete_rule(command)) for pid, command in staged.activation_commands
+        )
+        flush_tables = tuple(
+            (pid, ("ip", "route", "flush", "table", str(table)))
+            for pid, table in sorted(staged.table_by_pid.items())
+        )
+        commands = removal_rules + flush_tables
+        self._topology._parallel_commands(commands, check=False)
+        self._transactions.pop(transaction_id, None)
+        self._release_tables(staged.table_by_pid)
+        return commands
+
+
+def _route_in_table(command: tuple[str, ...], table: int) -> tuple[str, ...]:
+    command_without_table = list(command)
+    if "table" in command_without_table:
+        table_index = command_without_table.index("table")
+        del command_without_table[table_index : table_index + 2]
+    return tuple(command_without_table[:3] + ["table", str(table)] + command_without_table[3:])
+
+
+def _activation_rule(
+    route_command: tuple[str, ...], table: int, transaction_id: str, pid: int
+) -> tuple[str, ...] | None:
+    route = _route_in_table(route_command, table)
+    destination = route[5] if len(route) > 5 else ""
+    if not destination.endswith("/32"):
+        return None
+    digest = hashlib.sha256(
+        f"{transaction_id}:{pid}:{destination}".encode("utf-8")
+    ).digest()
+    priority = NetnsPolicyTableBackend._RULE_PRIORITY_BASE + (
+        int.from_bytes(digest[:4], "big") % NetnsPolicyTableBackend._RULE_PRIORITY_RANGE
+    )
+    return (
+        "ip", "rule", "add", "priority", str(priority), "to", destination,
+        "lookup", str(table),
+    )
+
+
+def _delete_rule(command: tuple[str, ...]) -> tuple[str, ...]:
+    return ("ip", "rule", "del", *command[3:])
+
+
+def _ip_json(payload: str, context: str) -> list[object]:
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"{context}: invalid ip JSON") from error
+    if not isinstance(decoded, list):
+        raise RuntimeError(f"{context}: expected a JSON list")
+    return decoded
+
+
 class ProcessNetnsTopology:
     """Real veth topology built from process-owned Linux network namespaces.
 
@@ -238,6 +461,7 @@ class ProcessNetnsTopology:
         self.agent_gateways: list[int] = []
         self._servers: list[subprocess.Popen[str]] = []
         self.last_install_commands: list[dict[str, object]] = []
+        self._transaction_backend = NetnsPolicyTableBackend(self)
 
     def __enter__(self) -> ProcessNetnsTopology:
         self._require_commands(
@@ -427,6 +651,20 @@ class ProcessNetnsTopology:
                 for command in batch.commands
             )
         return plan.control_messages, plan.rules_installed
+
+    def stage_transaction_commands(
+        self, transaction_id: str, commands: Sequence[DeploymentCommand]
+    ) -> StageResult:
+        return self._transaction_backend.stage(transaction_id, tuple(commands))
+
+    def activate_transaction(self, transaction_id: str) -> CommandResult:
+        return self._transaction_backend.activate(transaction_id)
+
+    def abort_transaction(self, transaction_id: str) -> CommandResult:
+        return self._transaction_backend.flush(transaction_id)
+
+    def read_transaction_state(self, transaction_id: str) -> tuple[dict[str, object], ...]:
+        return self._transaction_backend.readback(transaction_id)
 
     def _gateway_default_commands(self) -> list[DeploymentCommand]:
         return [

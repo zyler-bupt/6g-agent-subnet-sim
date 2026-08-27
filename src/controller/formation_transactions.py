@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, Sequence
@@ -29,6 +32,176 @@ class TransactionPhase(str, Enum):
     COMMITTED = "committed"
     ABORTED = "aborted"
     ROLLED_BACK = "rolled_back"
+
+
+@dataclass(frozen=True)
+class FormationTransaction:
+    """Pure deployment payload consumed by the common transaction engine."""
+
+    transaction_id: str
+    attempt_index: int
+    expected_versions: tuple[tuple[str, int], ...]
+    commands: tuple[object, ...]
+    affected_objects: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "expected_versions", tuple(self.expected_versions))
+        object.__setattr__(self, "commands", tuple(self.commands))
+        object.__setattr__(self, "affected_objects", tuple(self.affected_objects))
+        if not self.transaction_id:
+            raise ValueError("transaction_id must not be empty")
+        if self.attempt_index < 0:
+            raise ValueError("attempt_index must be nonnegative")
+        seen_targets: set[str] = set()
+        for target, version in self.expected_versions:
+            if not target:
+                raise ValueError("expected version target must not be empty")
+            if target in seen_targets:
+                raise ValueError(f"duplicate expected version target: {target}")
+            if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+                raise ValueError("expected version must be a nonnegative integer")
+            seen_targets.add(target)
+        if any(not object_id for object_id in self.affected_objects):
+            raise ValueError("affected objects must not contain empty identifiers")
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Executor result for activation or cleanup commands."""
+
+    accepted: bool
+    commands_attempted: int = 0
+    reason: str = ""
+    affected_objects: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "affected_objects", tuple(self.affected_objects))
+        if self.commands_attempted < 0:
+            raise ValueError("commands_attempted must be nonnegative")
+
+
+@dataclass(frozen=True)
+class StageResult(CommandResult):
+    """Executor result for an inactive-table preparation attempt."""
+
+
+class FormationTransactionExecutor(Protocol):
+    """Boundary implemented by the topology-specific transaction backend."""
+
+    def stage(
+        self, transaction: FormationTransaction, ack_timeout_ms: int
+    ) -> StageResult: ...
+
+    def activate(self, transaction_id: str) -> CommandResult: ...
+
+    def flush(self, transaction_id: str) -> CommandResult: ...
+
+    def readback(self, transaction_id: str) -> tuple[dict[str, object], ...]: ...
+
+
+class FormationTransactionEngine:
+    """Fail-closed prepare/commit/abort state machine shared by Exp1 methods."""
+
+    def __init__(
+        self, executor: FormationTransactionExecutor, *, ack_timeout_ms: int
+    ) -> None:
+        if ack_timeout_ms <= 0:
+            raise ValueError("ack_timeout_ms must be positive")
+        self.executor = executor
+        self.ack_timeout_ms = ack_timeout_ms
+        self._states: dict[str, TransactionPhase] = {}
+        self._transactions: dict[str, FormationTransaction] = {}
+        self._readback_before: dict[str, tuple[dict[str, object], ...]] = {}
+        self.attempts: list[TransactionAttempt] = []
+
+    def prepare(self, transaction: FormationTransaction) -> TransactionAttempt:
+        self._require_new(transaction.transaction_id)
+        before = self.executor.readback(transaction.transaction_id)
+        self._transactions[transaction.transaction_id] = transaction
+        self._readback_before[transaction.transaction_id] = before
+        started_ns = time.monotonic_ns()
+        result = self.executor.stage(transaction, self.ack_timeout_ms)
+        phase = TransactionPhase.PREPARED if result.accepted else TransactionPhase.REJECTED
+        self._states[transaction.transaction_id] = phase
+        return self._record(transaction, "prepare", phase, result, before, started_ns)
+
+    def commit(self, transaction_id: str) -> TransactionAttempt:
+        transaction = self._require_phase(transaction_id, TransactionPhase.PREPARED)
+        before = self.executor.readback(transaction_id)
+        started_ns = time.monotonic_ns()
+        result = self.executor.activate(transaction_id)
+        phase = TransactionPhase.COMMITTED if result.accepted else TransactionPhase.REJECTED
+        self._states[transaction_id] = phase
+        return self._record(transaction, "commit", phase, result, before, started_ns)
+
+    def abort(self, transaction_id: str) -> TransactionAttempt:
+        transaction = self._require_abortable(transaction_id)
+        before = self.executor.readback(transaction_id)
+        started_ns = time.monotonic_ns()
+        result = self.executor.flush(transaction_id)
+        phase = TransactionPhase.ABORTED if result.accepted else self._states[transaction_id]
+        self._states[transaction_id] = phase
+        return self._record(transaction, "abort", phase, result, before, started_ns)
+
+    def rollback(self, transaction_id: str) -> TransactionAttempt:
+        transaction = self._require_phase(transaction_id, TransactionPhase.COMMITTED)
+        before = self.executor.readback(transaction_id)
+        started_ns = time.monotonic_ns()
+        result = self.executor.flush(transaction_id)
+        phase = TransactionPhase.ROLLED_BACK if result.accepted else TransactionPhase.COMMITTED
+        self._states[transaction_id] = phase
+        return self._record(transaction, "rollback", phase, result, before, started_ns)
+
+    def _require_new(self, transaction_id: str) -> None:
+        if transaction_id in self._states:
+            raise RuntimeError(f"transaction {transaction_id} already exists")
+
+    def _require_phase(
+        self, transaction_id: str, expected_phase: TransactionPhase
+    ) -> FormationTransaction:
+        if self._states.get(transaction_id) is not expected_phase:
+            expected = "prepared" if expected_phase is TransactionPhase.PREPARED else expected_phase.value
+            raise RuntimeError(f"transaction {transaction_id} is not {expected}")
+        return self._transactions[transaction_id]
+
+    def _require_abortable(self, transaction_id: str) -> FormationTransaction:
+        phase = self._states.get(transaction_id)
+        if phase not in {TransactionPhase.PREPARED, TransactionPhase.REJECTED}:
+            raise RuntimeError(f"transaction {transaction_id} is not abortable")
+        return self._transactions[transaction_id]
+
+    def _record(
+        self,
+        transaction: FormationTransaction,
+        operation: str,
+        phase: TransactionPhase,
+        result: CommandResult,
+        before: tuple[dict[str, object], ...],
+        started_ns: int,
+    ) -> TransactionAttempt:
+        after = self.executor.readback(transaction.transaction_id)
+        ended_ns = time.monotonic_ns()
+        attempt = TransactionAttempt(
+            transaction_id=transaction.transaction_id,
+            attempt_index=transaction.attempt_index,
+            operation=operation,
+            phase=phase,
+            accepted=result.accepted,
+            started_ns=started_ns,
+            ended_ns=ended_ns,
+            affected_objects=result.affected_objects or transaction.affected_objects,
+            commands_attempted=result.commands_attempted,
+            reason=result.reason,
+            readback_before_fingerprint=_readback_fingerprint(before),
+            readback_after_fingerprint=_readback_fingerprint(after),
+        )
+        self.attempts.append(attempt)
+        return attempt
+
+
+def _readback_fingerprint(readback: tuple[dict[str, object], ...]) -> str:
+    payload = json.dumps(readback, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
