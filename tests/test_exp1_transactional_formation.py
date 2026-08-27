@@ -174,6 +174,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
             self.fail_cleanup = False
             self.timeout_stage = False
             self.strict_missing_rule_deletion = False
+            self.canonical_host_rule = False
 
         def _run_ns(self, pid, *command, **_kwargs):
             self.readback_calls += 1
@@ -198,8 +199,11 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
                 elif command[:3] == ("ip", "route", "flush"):
                     self.routes[(pid, command[4])] = []
                 elif command[:3] == ("ip", "rule", "add"):
+                    destination = command[6]
+                    if self.canonical_host_rule and destination.endswith("/32"):
+                        destination = destination.removesuffix("/32")
                     self.rules.setdefault(pid, []).append(
-                        {"priority": int(command[4]), "to": command[6], "table": command[8]}
+                        {"priority": int(command[4]), "to": destination, "table": command[8]}
                     )
                 elif command[:3] == ("ip", "rule", "del"):
                     matching = [
@@ -222,6 +226,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
 
     def test_flush_restores_snapshot_and_reads_kernel_after_cleanup(self) -> None:
         topology = self._KernelTopology()
+        topology.canonical_host_rule = True
         backend = exp1.NetnsPolicyTableBackend(topology)
 
         staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
@@ -234,6 +239,12 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         self.assertEqual(flushed.readback_after, staged.readback_before)
         self.assertGreater(topology.readback_calls, reads_before_flush)
         self.assertEqual(backend.readback("txn-1"), staged.readback_before)
+        self.assertTrue(any(
+            command[:3] == ("ip", "rule", "del")
+            for commands, _, _ in topology.executed for _, command in commands
+        ))
+        self.assertFalse(exp1._same_rule_destination("10.101.1.3", "10.101.1.2/32"))
+        self.assertFalse(exp1._same_rule_destination("10.101.1.0/24", "10.101.1.2/32"))
 
     def test_cleanup_command_failure_is_reported_and_state_is_retained(self) -> None:
         topology = self._KernelTopology()
@@ -274,6 +285,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
     def test_abort_of_unactivated_prepare_skips_absent_rule_deletion_and_releases_table(self) -> None:
         topology = self._KernelTopology()
         topology.strict_missing_rule_deletion = True
+        topology.canonical_host_rule = True
         backend = exp1.NetnsPolicyTableBackend(topology)
         staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
         table_id = staged.readback_before[0]["table_id"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -565,10 +566,25 @@ def _activation_rule_exists(rules: Sequence[object], command: tuple[str, ...]) -
     return any(
         isinstance(rule, dict)
         and str(rule.get("priority")) == command[4]
-        and str(rule.get("to")) == command[6]
+        and _same_rule_destination(rule.get("to"), command[6])
         and str(rule.get("table", rule.get("lookup", ""))) == command[8]
         for rule in rules
     )
+
+
+def _same_rule_destination(rendered: object, staged: str) -> bool:
+    """Match iproute2's canonical host rendering without widening prefixes."""
+    try:
+        return _normalized_rule_network(str(rendered)) == _normalized_rule_network(staged)
+    except ValueError:
+        return False
+
+
+def _normalized_rule_network(value: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    if "/" not in value:
+        address = ipaddress.ip_address(value)
+        return ipaddress.ip_network(f"{address}/{address.max_prefixlen}", strict=False)
+    return ipaddress.ip_network(value, strict=False)
 
 
 def _command_error(error: Exception) -> str:
