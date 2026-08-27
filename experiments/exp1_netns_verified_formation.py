@@ -20,7 +20,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
-from src.controller.formation_transactions import CommandResult, StageResult
+from src.controller.formation_transactions import (
+    CommandResult,
+    StageResult,
+    build_method_transactions,
+    build_retry_transactions,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,11 @@ class FormationDeploymentPlan:
     planning_work_units: int
     batches: tuple[DeploymentBatch, ...]
     path_records: tuple[dict[str, object], ...] = ()
+    # Optional evidence populated by richer transactional planners.  Nominal
+    # canonical plans leave these unset; adapter validation then relies on the
+    # explicit chain batches and path records above.
+    service_placements: tuple[object, ...] | Mapping[object, object] | None = None
+    placement_capacity: tuple[object, ...] | Mapping[object, object] | None = None
 
     @property
     def control_messages(self) -> int:
@@ -880,6 +890,13 @@ class ProcessNetnsTopology:
             return ()
         by_endpoint = {profile.endpoint: profile for profile in profiles}
         records: list[dict[str, object]] = []
+        # Reservations are planned in canonical edge order.  Deployment
+        # transactions may later execute concurrently, but feasibility must
+        # observe each earlier reservation's residual capacity.
+        residual = {
+            endpoint: profile.bandwidth_mbps
+            for endpoint, profile in by_endpoint.items()
+        }
         for edge in edges:
             source_gateway = self.agent_gateways[edge.source_index]
             target_gateway = self.agent_gateways[edge.target_index]
@@ -914,7 +931,7 @@ class ProcessNetnsTopology:
                     f"CSPF path observation missing endpoints for {edge.edge_id}: "
                     + ",".join(missing)
                 )
-            bottleneck = min(by_endpoint[endpoint].bandwidth_mbps for endpoint in endpoints)
+            bottleneck = min(residual[endpoint] for endpoint in endpoints)
             if bottleneck < edge.required_throughput_mbps:
                 raise RuntimeError(
                     f"CSPF pruned {edge.edge_id}: path bandwidth {bottleneck:.6f} Mbps "
@@ -938,6 +955,8 @@ class ProcessNetnsTopology:
                     "tie_break": edge.edge_id,
                 }
             )
+            for endpoint in endpoints:
+                residual[endpoint] -= edge.required_throughput_mbps
         return tuple(records)
 
     def _table_peer_commands(self, edge: FormationEdge) -> list[DeploymentCommand]:

@@ -6,6 +6,7 @@ import subprocess
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import experiments.exp1_netns_verified_formation as exp1
 from experiments.exp1_netns_verified_formation import FormationEdge
@@ -17,10 +18,110 @@ from src.controller.formation_transactions import (
     StageResult,
     TransactionAttempt,
     TransactionPhase,
+    build_method_transactions,
+    build_retry_transactions,
     build_fault_schedule,
     retry_scope_for_method,
     task_descendant_closure,
 )
+
+
+class MethodTransactionAdapterTests(unittest.TestCase):
+    @staticmethod
+    def _plan(method_id: str, labels: tuple[str, ...]) -> SimpleNamespace:
+        batches = tuple(SimpleNamespace(label=label, commands=(label,)) for label in labels)
+        return SimpleNamespace(method_id=method_id, ordered_edge_ids=tuple(), batches=batches)
+
+    @staticmethod
+    def _edges() -> tuple[FormationEdge, ...]:
+        return (
+            FormationEdge("e-0", 0, 1, 1.0),
+            FormationEdge("e-1", 1, 2, 1.0),
+            FormationEdge("e-2", 3, 4, 1.0),
+        )
+
+    def test_cspf_independent_flows_are_in_one_parallel_wave(self) -> None:
+        edges = self._edges()
+        plan = self._plan("cspf", tuple(f"cspf_flow:{edge.edge_id}" for edge in edges))
+
+        waves = build_method_transactions("cspf", plan, edges)
+
+        self.assertEqual(len(waves), 1)
+        self.assertEqual({tx.scope_kind for tx in waves[0]}, {"flow"})
+        self.assertEqual([tx.logical_edge_id for tx in waves[0]], [edge.edge_id for edge in edges])
+
+    def test_sfc_parallelizes_chains_but_preserves_hop_order(self) -> None:
+        edges = self._edges()
+        plan = self._plan(
+            "global_sfc_embedding",
+            (
+                "sfc_chain:000:hop:000:routes",
+                "sfc_chain:001:hop:000:routes",
+                "sfc_chain:000:hop:001:routes",
+            ),
+        )
+
+        waves = build_method_transactions("global_sfc_embedding", plan, edges)
+
+        self.assertEqual(len(waves), 2)
+        self.assertEqual(
+            [(tx.chain_id, tx.hop_index) for wave in waves for tx in wave],
+            [("chain-000", 0), ("chain-001", 0), ("chain-000", 1)],
+        )
+        for chain_id in {tx.chain_id for wave in waves for tx in wave}:
+            hops = [tx.hop_index for wave in waves for tx in wave if tx.chain_id == chain_id]
+            self.assertEqual(hops, list(range(len(hops))))
+        self.assertEqual(
+            [tx.chain_id for tx in waves[0]], ["chain-000", "chain-001"]
+        )
+        self.assertEqual(len({tx.chain_id for tx in waves[0]}), len(waves[0]))
+
+    def test_baselines_never_call_task_descendant_closure(self) -> None:
+        edges = self._edges()
+        cspf_plan = self._plan("cspf", tuple(f"cspf_flow:{edge.edge_id}" for edge in edges))
+        sfc_plan = self._plan(
+            "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+        )
+
+        with patch(
+            "src.controller.formation_transactions.task_descendant_closure",
+            side_effect=AssertionError,
+        ):
+            build_retry_transactions("cspf", "e-1", cspf_plan, edges)
+            build_retry_transactions("global_sfc_embedding", "e-1", sfc_plan, edges)
+
+    def test_global_sfc_rejects_invalid_hop_order_before_building_transactions(self) -> None:
+        edges = self._edges()
+        plan = self._plan(
+            "global_sfc_embedding", ("sfc_chain:000:hop:001:routes",)
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid hop order"):
+            build_method_transactions("global_sfc_embedding", plan, edges)
+
+    def test_cspf_reserves_residual_capacity_before_parallel_flow_deployment(self) -> None:
+        topology = exp1.ProcessNetnsTopology(3, 2)
+        topology.agent_gateways = [0, 1, 0]
+        edges = (
+            FormationEdge("e-0", 0, 1, 1.0),
+            FormationEdge("e-1", 1, 2, 1.0),
+        )
+        endpoints = {
+            f"agent-{index}:eth0" for index in range(3)
+        } | {
+            "gateway-0:ga0", "gateway-1:ga1", "gateway-0:ga2",
+            "gateway-0:up0", "gateway-1:up0", "outer:og0", "outer:og1",
+        }
+        profiles = tuple(
+            exp1.TrafficControlProfile(
+                endpoint=endpoint, namespace_pid=None, interface="eth0",
+                base_delay_ms=1.0, jitter_ms=0.0, packet_loss_percent=0.0,
+                bandwidth_mbps=1.5, queue_limit_packets=100,
+            )
+            for endpoint in endpoints
+        )
+        with self.assertRaisesRegex(RuntimeError, "pruned e-1"):
+            topology._cspf_path_records(edges, profiles, max_path_delay_ms=None)
 
 
 class RecordingExecutor:

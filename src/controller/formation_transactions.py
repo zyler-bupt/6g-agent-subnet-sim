@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -43,6 +44,12 @@ class FormationTransaction:
     expected_versions: tuple[tuple[str, int], ...]
     commands: tuple[object, ...]
     affected_objects: tuple[str, ...]
+    # Method-owned scheduling metadata.  Keeping it on the common carrier
+    # means the runner can use the same prepare/commit API for every method.
+    scope_kind: str = "object"
+    logical_edge_id: str | None = None
+    chain_id: str | None = None
+    hop_index: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "expected_versions", tuple(self.expected_versions))
@@ -63,6 +70,10 @@ class FormationTransaction:
             seen_targets.add(target)
         if any(not object_id for object_id in self.affected_objects):
             raise ValueError("affected objects must not contain empty identifiers")
+        if not self.scope_kind:
+            raise ValueError("scope_kind must not be empty")
+        if self.hop_index < 0:
+            raise ValueError("hop_index must be nonnegative")
 
 
 @dataclass(frozen=True)
@@ -444,3 +455,323 @@ def _unselected_edges(
         (edge for edge in edges if edge.edge_id not in selected_ids),
         key=lambda edge: edge.edge_id,
     )
+
+
+def build_method_transactions(
+    method_id: str, plan: object, edges: Sequence[FormationEdgeLike]
+) -> tuple[tuple[FormationTransaction, ...], ...]:
+    """Build deterministic method-owned transaction waves.
+
+    ``plan`` is intentionally structural rather than imported from the netns
+    experiment: this pure controller module can therefore be tested without
+    Linux namespaces (and without creating an Exp1/Exp2 import cycle).
+    """
+    declared_method = getattr(plan, "method_id", None)
+    if declared_method is not None and declared_method != method_id:
+        raise ValueError(
+            f"deployment plan method {declared_method!r} does not match {method_id!r}"
+        )
+    edge_map, ordered_ids = _plan_edges(plan, edges)
+    if method_id == "proposed":
+        return _proposed_waves(plan, edge_map, ordered_ids, attempt_index=0)
+    if method_id == "cspf":
+        return (_flow_wave(plan, edge_map, ordered_ids, attempt_index=0),)
+    if method_id == "global_sfc_embedding":
+        return _sfc_waves(plan, edge_map, ordered_ids, attempt_index=0)
+    raise ValueError(f"unsupported formation method: {method_id}")
+
+
+def build_retry_transactions(
+    method_id: str,
+    failed_object: str,
+    plan: object,
+    edges: Sequence[FormationEdgeLike],
+) -> tuple[tuple[FormationTransaction, ...], ...]:
+    """Build only the scope owned by a failed method transaction.
+
+    Baseline methods deliberately use their native flow/chain selectors.  In
+    particular, this function never routes CSPF or SFC retries through the
+    Proposed Task-DAG descendant selector.
+    """
+    declared_method = getattr(plan, "method_id", None)
+    if declared_method is not None and declared_method != method_id:
+        raise ValueError(
+            f"deployment plan method {declared_method!r} does not match {method_id!r}"
+        )
+    edge_map, ordered_ids = _plan_edges(plan, edges)
+    if method_id == "proposed":
+        scope = retry_scope_for_method(method_id, failed_object, edges)
+        selected = tuple(edge_id for edge_id in ordered_ids if edge_id in scope)
+        if not selected:
+            raise ValueError(f"unknown failed object: {failed_object}")
+        return _proposed_waves(plan, edge_map, selected, attempt_index=1)
+    if method_id == "cspf":
+        if failed_object not in edge_map:
+            raise ValueError(f"unknown failed object: {failed_object}")
+        return (_flow_wave(plan, edge_map, (failed_object,), attempt_index=1),)
+    if method_id == "global_sfc_embedding":
+        waves = _sfc_waves(plan, edge_map, ordered_ids, attempt_index=1)
+        chain_id = _sfc_chain_for_failed_object(failed_object, waves)
+        # A planner may omit the edge-to-chain annotation while still
+        # exposing a single source-to-sink chain.  In that case every edge is
+        # necessarily owned by that chain (and remains a valid retry key).
+        if chain_id is None and failed_object in edge_map:
+            chain_ids = {tx.chain_id for wave in waves for tx in wave}
+            if len(chain_ids) == 1:
+                chain_id = next(iter(chain_ids))
+        if chain_id is None:
+            raise ValueError(f"unknown failed object: {failed_object}")
+        return tuple(
+            tuple(tx for tx in wave if tx.chain_id == chain_id)
+            for wave in waves
+            if any(tx.chain_id == chain_id for tx in wave)
+        )
+    raise ValueError(f"unsupported formation method: {method_id}")
+
+
+def _plan_edges(
+    plan: object, edges: Sequence[FormationEdgeLike]
+) -> tuple[dict[str, FormationEdgeLike], tuple[str, ...]]:
+    edge_map = {edge.edge_id: edge for edge in edges}
+    if len(edge_map) != len(edges):
+        raise ValueError("formation edges must have unique edge_id values")
+    declared = tuple(str(item) for item in getattr(plan, "ordered_edge_ids", ()))
+    if declared:
+        if set(declared) != set(edge_map) or len(declared) != len(edge_map):
+            raise ValueError("deployment plan edge order does not match formation edges")
+        return edge_map, declared
+    return edge_map, tuple(sorted(edge_map))
+
+
+def _plan_batches(plan: object) -> tuple[object, ...]:
+    batches = tuple(getattr(plan, "batches", ()))
+    if not batches:
+        raise ValueError("deployment plan must contain transaction batches")
+    return batches
+
+
+def _batch_label(batch: object) -> str:
+    return str(getattr(batch, "label", ""))
+
+
+def _batch_commands(batch: object) -> tuple[object, ...]:
+    return tuple(getattr(batch, "commands", ()))
+
+
+def _commands_for_edge(plan: object, edge_id: str, *, prefix: str) -> tuple[object, ...]:
+    selected: list[object] = []
+    for batch in _plan_batches(plan):
+        label = _batch_label(batch)
+        if label == f"{prefix}{edge_id}" or edge_id in label:
+            selected.extend(_batch_commands(batch))
+    return tuple(selected)
+
+
+def _transaction(
+    method_id: str,
+    scope: str,
+    attempt_index: int,
+    commands: Sequence[object],
+    affected: Sequence[str],
+    *,
+    scope_kind: str,
+    logical_edge_id: str | None = None,
+    chain_id: str | None = None,
+    hop_index: int = 0,
+) -> FormationTransaction:
+    identity = ":".join((method_id, scope, str(attempt_index)))
+    return FormationTransaction(
+        transaction_id=identity,
+        attempt_index=attempt_index,
+        expected_versions=(),
+        commands=tuple(commands),
+        affected_objects=tuple(affected),
+        scope_kind=scope_kind,
+        logical_edge_id=logical_edge_id,
+        chain_id=chain_id,
+        hop_index=hop_index,
+    )
+
+
+def _flow_wave(
+    plan: object,
+    edge_map: dict[str, FormationEdgeLike],
+    edge_ids: Sequence[str],
+    *,
+    attempt_index: int,
+) -> tuple[FormationTransaction, ...]:
+    transactions = []
+    for edge_id in edge_ids:
+        commands = _commands_for_edge(plan, edge_id, prefix="cspf_flow:")
+        transactions.append(
+            _transaction(
+                "cspf", f"flow:{edge_id}", attempt_index, commands, (edge_id,),
+                scope_kind="flow", logical_edge_id=edge_id,
+            )
+        )
+    return tuple(transactions)
+
+
+def _proposed_waves(
+    plan: object,
+    edge_map: dict[str, FormationEdgeLike],
+    edge_ids: Sequence[str],
+    *,
+    attempt_index: int,
+) -> tuple[tuple[FormationTransaction, ...], ...]:
+    remaining = set(edge_ids)
+    waves: list[tuple[FormationTransaction, ...]] = []
+    while remaining:
+        ready = tuple(
+            edge_id for edge_id in edge_ids if edge_id in remaining and not any(
+                predecessor.edge_id in remaining
+                for predecessor in edge_map.values()
+                if predecessor.target_index == edge_map[edge_id].source_index
+            )
+        )
+        if not ready:
+            raise ValueError("formation edges contain a dependency cycle")
+        # The canonical Proposed plan owns one batch for the complete wave.
+        # Preserve every command exactly once while allowing independent waves
+        # to be prepared and committed separately.
+        commands: tuple[object, ...] = tuple(
+            command
+            for batch in _plan_batches(plan)
+            for command in _batch_commands(batch)
+        )
+        transaction = _transaction(
+            "proposed", "wave:" + ",".join(ready), attempt_index, commands, ready,
+            scope_kind="task",
+        )
+        waves.append((transaction,))
+        remaining.difference_update(ready)
+    return tuple(waves)
+
+
+_SFC_BATCH = re.compile(r"^sfc_chain:(?P<chain>\d+):hop:(?P<hop>\d+):")
+
+
+def _sfc_waves(
+    plan: object,
+    edge_map: dict[str, FormationEdgeLike],
+    edge_ids: Sequence[str],
+    *,
+    attempt_index: int,
+) -> tuple[tuple[FormationTransaction, ...], ...]:
+    by_hop: dict[int, list[tuple[int, tuple[object, ...]]]] = {}
+    commands_by_key: dict[tuple[int, int], list[object]] = {}
+    for batch in _plan_batches(plan):
+        match = _SFC_BATCH.match(_batch_label(batch))
+        if match is None:
+            continue
+        chain_index = int(match.group("chain"))
+        hop_index = int(match.group("hop"))
+        commands_by_key.setdefault((chain_index, hop_index), []).extend(
+            _batch_commands(batch)
+        )
+    if not commands_by_key:
+        raise ValueError("global SFC plan has no service-chain placement batches")
+    for (chain_index, hop_index), commands in commands_by_key.items():
+        by_hop.setdefault(hop_index, []).append((chain_index, tuple(commands)))
+
+    chain_hops: dict[int, set[int]] = {}
+    for hop_index, entries in by_hop.items():
+        for chain_index, commands in entries:
+            if not commands:
+                raise ValueError("global SFC plan contains an infeasible empty hop")
+            chain_hops.setdefault(chain_index, set()).add(hop_index)
+    for chain_index, hops in chain_hops.items():
+        expected = set(range(max(hops) + 1))
+        if hops != expected:
+            raise ValueError(f"global SFC chain {chain_index:03d} has invalid hop order")
+    declared_count = int(getattr(plan, "service_chain_count", 0) or 0)
+    if declared_count and declared_count != len(chain_hops):
+        raise ValueError("global SFC service placement count does not match plan")
+
+    # Explicit optional placement/path evidence is validated when supplied by
+    # a richer planner, while old canonical plans remain structurally valid.
+    placements = getattr(plan, "service_placements", None)
+    if placements is not None and not placements:
+        raise ValueError("global SFC plan is missing service placement")
+    if getattr(plan, "placement_feasible", True) is False:
+        raise ValueError("global SFC placement capacity is insufficient")
+    if getattr(plan, "hop_order_valid", True) is False:
+        raise ValueError("global SFC plan has invalid hop order")
+    for record in tuple(getattr(plan, "path_records", ()) or ()):
+        if isinstance(record, dict) and (
+            record.get("feasible") is False
+            or record.get("path_feasible") is False
+            or record.get("placement_feasible") is False
+            or record.get("capacity_sufficient") is False
+        ):
+            raise ValueError("global SFC plan contains an infeasible placement/path")
+
+    waves: list[tuple[FormationTransaction, ...]] = []
+    chain_members = _chain_members(tuple(edge_map.values()))
+    for hop_index in range(max(by_hop) + 1):
+        transactions: list[FormationTransaction] = []
+        for chain_index, commands in sorted(by_hop.get(hop_index, ())):
+            chain_id = f"chain-{chain_index:03d}"
+            members = chain_members[chain_index] if chain_index < len(chain_members) else ()
+            logical_edge_id = members[hop_index] if hop_index < len(members) else None
+            transactions.append(
+                _transaction(
+                    "global_sfc_embedding", f"{chain_id}:hop:{hop_index}",
+                    attempt_index, commands, (logical_edge_id or chain_id,),
+                    scope_kind="chain", logical_edge_id=logical_edge_id,
+                    chain_id=chain_id, hop_index=hop_index,
+                )
+            )
+        if transactions:
+            waves.append(tuple(transactions))
+    return tuple(waves)
+
+
+def _chain_members(
+    edges: Sequence[FormationEdgeLike],
+) -> tuple[tuple[str, ...], ...]:
+    """Return the same deterministic edge-disjoint chain cover as Exp1."""
+    ordered = tuple(sorted(edges, key=lambda edge: edge.edge_id))
+    incoming = {edge.target_index for edge in ordered}
+    starts = [edge for edge in ordered if edge.source_index not in incoming]
+    starts.extend(edge for edge in ordered if edge not in starts)
+    outgoing: dict[int, list[FormationEdgeLike]] = {}
+    for edge in ordered:
+        outgoing.setdefault(edge.source_index, []).append(edge)
+    used: set[str] = set()
+    chains: list[tuple[str, ...]] = []
+    for start in starts:
+        if start.edge_id in used:
+            continue
+        chain: list[str] = []
+        current = start
+        while current.edge_id not in used:
+            used.add(current.edge_id)
+            chain.append(current.edge_id)
+            remaining = [
+                edge for edge in outgoing.get(current.target_index, ())
+                if edge.edge_id not in used
+            ]
+            if not remaining:
+                break
+            current = sorted(remaining, key=lambda edge: edge.edge_id)[0]
+        chains.append(tuple(chain))
+    return tuple(chains)
+
+
+def _sfc_chain_for_failed_object(
+    failed_object: str, waves: Sequence[Sequence[FormationTransaction]]
+) -> str | None:
+    all_transactions = [tx for wave in waves for tx in wave]
+    if failed_object.startswith("chain-"):
+        return failed_object if any(tx.chain_id == failed_object for tx in all_transactions) else None
+    if failed_object.startswith("chain:"):
+        ids = failed_object.removeprefix("chain:")
+        for tx in all_transactions:
+            if tx.logical_edge_id and tx.logical_edge_id in ids.split(","):
+                return tx.chain_id
+        return None
+    for tx in all_transactions:
+        if tx.logical_edge_id == failed_object:
+            return tx.chain_id
+    return None
