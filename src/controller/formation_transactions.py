@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import re
 import time
@@ -776,6 +777,13 @@ def _sfc_waves(
         raise ValueError("global SFC plan is missing placement capacity")
     if not isinstance(inventory, Mapping) or not isinstance(demand, Mapping):
         raise ValueError("global SFC plan is missing placement slot evidence")
+    expected_demand: dict[str, int] = {}
+    for agent in placements.values():
+        key = f"agent-{agent}"
+        expected_demand[key] = expected_demand.get(key, 0) + 1
+    if dict(demand) != expected_demand:
+        raise ValueError("global SFC placement slot demand is inconsistent")
+    used_agents = set(expected_demand)
     for key, required in demand.items():
         try:
             required_value = float(required)
@@ -784,8 +792,15 @@ def _sfc_waves(
             evidence_value = float(capacity[key])
         except (KeyError, TypeError, ValueError):
             raise ValueError("global SFC placement capacity is invalid") from None
+        if any(
+            isinstance(value, bool) or not math.isfinite(value)
+            for value in (required_value, available_value, declared_value, evidence_value)
+        ):
+            raise ValueError("global SFC placement capacity is invalid")
         if min(available_value, declared_value, evidence_value) < required_value:
             raise ValueError("global SFC placement capacity is insufficient")
+    if not used_agents.issubset(inventory) or not used_agents.issubset(declared_capacity) or not used_agents.issubset(capacity):
+        raise ValueError("global SFC placement capacity is incomplete")
     if evidence["placement_feasible"] is not True:
         raise ValueError("global SFC placement capacity is insufficient")
     if evidence["chain_order_valid"] is not True:
@@ -805,9 +820,52 @@ def _sfc_waves(
     }
     if set(records_by_edge) != set(edge_map) or len(records_by_edge) != len(edge_map):
         raise ValueError("global SFC plan has incomplete network path records")
+    expected_order = [edge_id for edge_id in getattr(plan, "ordered_edge_ids", ())]
+    if expected_order and list(records_by_edge) != expected_order:
+        raise ValueError("global SFC plan path records are not deterministically ordered")
     for edge_id, record in records_by_edge.items():
-        if record.get("feasible") is not True:
+        edge = edge_map[edge_id]
+        required_fields = (
+            "path", "path_endpoints", "required_throughput_mbps",
+            "bottleneck_mbps", "residual_bottleneck_after_mbps",
+            "delay_cost_ms", "max_path_delay_ms", "tie_break", "feasible",
+        )
+        if any(field not in record for field in required_fields):
+            raise ValueError(f"global SFC path evidence is incomplete for {edge_id}")
+        path = record["path"]
+        endpoints = record["path_endpoints"]
+        if (
+            not isinstance(path, (tuple, list)) or not path
+            or not isinstance(endpoints, (tuple, list)) or not endpoints
+            or any(not isinstance(node, str) or not node for node in (*path, *endpoints))
+        ):
+            raise ValueError(f"global SFC path evidence is malformed for {edge_id}")
+        if record["feasible"] is not True or record["tie_break"] != edge_id:
             raise ValueError(f"global SFC path is infeasible for {edge_id}")
+        try:
+            required = float(record["required_throughput_mbps"])
+            bottleneck = float(record["bottleneck_mbps"])
+            residual = float(record["residual_bottleneck_after_mbps"])
+            delay = float(record["delay_cost_ms"])
+            max_delay = record["max_path_delay_ms"]
+            max_delay_value = None if max_delay is None else float(max_delay)
+        except (TypeError, ValueError):
+            raise ValueError(f"global SFC path evidence is nonnumeric for {edge_id}") from None
+        values = (required, bottleneck, residual, delay)
+        if any(isinstance(value, bool) or not math.isfinite(value) for value in values):
+            raise ValueError(f"global SFC path evidence is nonnumeric for {edge_id}")
+        if max_delay_value is not None and (
+            isinstance(max_delay, bool) or not math.isfinite(max_delay_value)
+        ):
+            raise ValueError(f"global SFC path evidence has invalid delay bound for {edge_id}")
+        if not math.isclose(required, float(edge.required_throughput_mbps), rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(f"global SFC path demand mismatch for {edge_id}")
+        if bottleneck + 1e-9 < required or residual < -1e-9:
+            raise ValueError(f"global SFC path bandwidth is infeasible for {edge_id}")
+        if not math.isclose(residual, bottleneck - required, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(f"global SFC path residual is inconsistent for {edge_id}")
+        if delay < 0 or max_delay_value is not None and delay > max_delay_value + 1e-9:
+            raise ValueError(f"global SFC path delay is infeasible for {edge_id}")
     for record in tuple(getattr(plan, "path_records", ()) or ()):
         if isinstance(record, dict) and (
             record.get("feasible") is False

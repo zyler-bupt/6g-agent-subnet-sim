@@ -42,6 +42,21 @@ class MethodTransactionAdapterTests(unittest.TestCase):
             SimpleNamespace(label=label, commands=(label,), command_owners=(owner,))
             for label, owner in zip(labels, owners)
         )
+        path_records = tuple(
+            {
+                "edge_id": edge_id,
+                "path": ("source", "target"),
+                "path_endpoints": ("source:eth0", "target:eth0"),
+                "required_throughput_mbps": 1.0,
+                "bottleneck_mbps": 2.0,
+                "residual_bottleneck_after_mbps": 1.0,
+                "delay_cost_ms": 1.0,
+                "max_path_delay_ms": None,
+                "tie_break": edge_id,
+                "feasible": True,
+            }
+            for edge_id in ("e-0", "e-1", "e-2")
+        )
         return SimpleNamespace(
             method_id=method_id, ordered_edge_ids=tuple(), batches=batches,
             service_placements={index: index for index in range(5)}
@@ -50,7 +65,7 @@ class MethodTransactionAdapterTests(unittest.TestCase):
                                 "agent-3": 2, "agent-4": 2}
             if method_id == "global_sfc_embedding" else None,
             service_chain_count=0,
-            path_records=tuple({"edge_id": edge_id, "feasible": True} for edge_id in ("e-0", "e-1", "e-2"))
+            path_records=path_records
             if method_id == "global_sfc_embedding" else (),
             sfc_evidence={
                 "service_availability": tuple({"node": index, "agent": index, "available": True} for index in range(5)),
@@ -63,7 +78,7 @@ class MethodTransactionAdapterTests(unittest.TestCase):
                 "placement_feasible": True,
                 "chain_order_valid": True,
                 "path_feasible": True,
-                "path_records": tuple({"edge_id": edge_id, "feasible": True} for edge_id in ("e-0", "e-1", "e-2")),
+                "path_records": path_records,
             } if method_id == "global_sfc_embedding" else None,
         )
 
@@ -296,6 +311,32 @@ class MethodTransactionAdapterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "service availability"):
             build_method_transactions("global_sfc_embedding", plan, (edge,))
+
+    def test_global_sfc_rejects_incomplete_slot_demand_and_substantive_path_errors(self) -> None:
+        edges = self._edges()
+        plan = self._plan("global_sfc_embedding", ("sfc_chain:000:hop:000:routes",))
+        for demand in ({}, {"agent-0": 1}):
+            with self.subTest(demand=demand):
+                plan.sfc_evidence = {**plan.sfc_evidence, "placement_slot_demand": demand}
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
+        valid_records = list(plan.path_records)
+        for name, changes in (
+            ("bare", {"path": None}),
+            ("demand", {"required_throughput_mbps": 9.0}),
+            ("negative residual", {"residual_bottleneck_after_mbps": -1.0}),
+            ("inconsistent residual", {"residual_bottleneck_after_mbps": 0.5}),
+            ("delay bound", {"max_path_delay_ms": 0.0}),
+        ):
+            with self.subTest(path_error=name):
+                records = [dict(record) for record in valid_records]
+                records[0].update(changes)
+                plan.path_records = tuple(records)
+                plan.sfc_evidence = {**self._plan(
+                    "global_sfc_embedding", ("sfc_chain:000:hop:000:routes",)
+                ).sfc_evidence, "path_records": tuple(records)}
+                with self.assertRaises(ValueError):
+                    build_method_transactions("global_sfc_embedding", plan, edges)
 
     def test_cspf_reserves_residual_capacity_before_parallel_flow_deployment(self) -> None:
         topology = exp1.ProcessNetnsTopology(3, 2)

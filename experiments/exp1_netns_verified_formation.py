@@ -1077,8 +1077,11 @@ class ProcessNetnsTopology:
                     "edge_id": edge.edge_id,
                     "path": path,
                     "path_endpoints": endpoints,
+                    "required_throughput_mbps": edge.required_throughput_mbps,
                     "bottleneck_mbps": bottleneck,
+                    "residual_bottleneck_after_mbps": bottleneck - edge.required_throughput_mbps,
                     "delay_cost_ms": delay_cost_ms,
+                    "max_path_delay_ms": max_path_delay_ms,
                     "tie_break": edge.edge_id,
                 }
             )
