@@ -44,15 +44,26 @@ class MethodTransactionAdapterTests(unittest.TestCase):
         )
         return SimpleNamespace(
             method_id=method_id, ordered_edge_ids=tuple(), batches=batches,
-            service_placements=(0, 1) if method_id == "global_sfc_embedding" else None,
-            placement_capacity={"chain-000": 3.0, "chain-001": 1.0}
+            service_placements={index: index for index in range(5)}
             if method_id == "global_sfc_embedding" else None,
-            service_chain_count=0, sfc_evidence={
-                "service_availability": (True,),
-                "placement_capacity": {"chain-000": 3.0, "chain-001": 1.0},
+            placement_capacity={"agent-0": 2, "agent-1": 2, "agent-2": 2,
+                                "agent-3": 2, "agent-4": 2}
+            if method_id == "global_sfc_embedding" else None,
+            service_chain_count=0,
+            path_records=tuple({"edge_id": edge_id, "feasible": True} for edge_id in ("e-0", "e-1", "e-2"))
+            if method_id == "global_sfc_embedding" else (),
+            sfc_evidence={
+                "service_availability": tuple({"node": index, "agent": index, "available": True} for index in range(5)),
+                "placement_capacity": {"agent-0": 2, "agent-1": 2, "agent-2": 2,
+                                        "agent-3": 2, "agent-4": 2},
+                "placement_slot_inventory": {"agent-0": 2, "agent-1": 2, "agent-2": 2,
+                                              "agent-3": 2, "agent-4": 2},
+                "placement_slot_demand": {"agent-0": 1, "agent-1": 1, "agent-2": 1,
+                                           "agent-3": 1, "agent-4": 1},
                 "placement_feasible": True,
                 "chain_order_valid": True,
                 "path_feasible": True,
+                "path_records": tuple({"edge_id": edge_id, "feasible": True} for edge_id in ("e-0", "e-1", "e-2")),
             } if method_id == "global_sfc_embedding" else None,
         )
 
@@ -95,17 +106,18 @@ class MethodTransactionAdapterTests(unittest.TestCase):
         for chain_id in {tx.chain_id for wave in waves for tx in wave}:
             hops = [tx.hop_index for wave in waves for tx in wave if tx.chain_id == chain_id]
             self.assertEqual(hops, list(range(len(hops))))
-        self.assertEqual(
-            [tx.chain_id for tx in waves[0]], ["chain-000", "chain-001"]
-        )
-        self.assertEqual(len({tx.chain_id for tx in waves[0]}), len(waves[0]))
         for wave in waves:
             self.assertEqual(
                 len({tx.chain_id for tx in wave}), len(wave),
                 "a wave may contain at most one dependency hop per chain",
             )
-        self.assertEqual(waves[0][0].commands, ("sfc_chain:000:hop:000:routes",))
-        self.assertEqual(waves[0][1].commands, ("sfc_chain:001:hop:000:routes",))
+        self.assertEqual(
+            {(tx.chain_id, tx.commands) for tx in waves[0]},
+            {
+                ("chain-000", ("sfc_chain:000:hop:000:routes",)),
+                ("chain-001", ("sfc_chain:001:hop:000:routes",)),
+            },
+        )
         self.assertEqual(waves[1][0].commands, ("sfc_chain:000:hop:001:routes",))
 
     def test_baselines_never_call_task_descendant_closure(self) -> None:
@@ -190,12 +202,14 @@ class MethodTransactionAdapterTests(unittest.TestCase):
         waves = build_method_transactions("proposed", plan, edges)
         retry = build_retry_transactions("proposed", "e-1", plan, edges)
 
-        self.assertEqual([[tx.logical_edge_id for tx in wave] for wave in waves], [["e-0"], ["e-1"], ["e-2"]])
-        self.assertEqual(waves[0][0].commands, ("shared", "ancestor"))
-        self.assertEqual(waves[1][0].commands, ("failed",))
-        self.assertEqual(waves[2][0].commands, ("descendant",))
+        self.assertEqual([[tx.logical_edge_id for tx in wave] for wave in waves], [[None], ["e-0"], ["e-1"], ["e-2"]])
+        self.assertEqual(waves[0][0].scope_kind, "shared")
+        self.assertEqual(waves[0][0].commands, ("shared",))
+        self.assertEqual(waves[1][0].commands, ("ancestor",))
+        self.assertEqual(waves[2][0].commands, ("failed",))
+        self.assertEqual(waves[3][0].commands, ("descendant",))
         self.assertEqual([tx.logical_edge_id for wave in retry for tx in wave], ["e-1", "e-2"])
-        self.assertEqual([tx.commands for wave in retry for tx in wave], [("shared", "failed"), ("descendant",)])
+        self.assertEqual([tx.commands for wave in retry for tx in wave], [("failed",), ("descendant",)])
 
     def test_cspf_retry_uses_exact_ownership_without_substring_collisions(self) -> None:
         edges = (FormationEdge("e-1", 0, 1, 1.0), FormationEdge("e-10", 1, 2, 1.0))
@@ -222,6 +236,66 @@ class MethodTransactionAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no owned commands"):
             build_method_transactions("cspf", plan, (edge,))
+
+    @staticmethod
+    def _sfc_topology_and_profiles(
+        *, bandwidth_mbps: float = 10.0, base_delay_ms: float = 1.0
+    ) -> tuple[exp1.ProcessNetnsTopology, tuple[exp1.TrafficControlProfile, ...]]:
+        topology = exp1.ProcessNetnsTopology(2, 2)
+        topology.agents = [SimpleNamespace(pid=100), SimpleNamespace(pid=101)]
+        topology.gateways = [SimpleNamespace(pid=200), SimpleNamespace(pid=201)]
+        topology.agent_ips = ["10.100.0.2", "10.101.1.2"]
+        topology.agent_gateways = [0, 1]
+        endpoints = (
+            "agent-0:eth0", "gateway-0:ga0", "gateway-0:up0", "outer:og0",
+            "outer:og1", "gateway-1:up0", "gateway-1:ga1", "agent-1:eth0",
+        )
+        return topology, tuple(
+            exp1.TrafficControlProfile(
+                endpoint=endpoint, namespace_pid=None, interface="eth0",
+                base_delay_ms=base_delay_ms, jitter_ms=0.0,
+                packet_loss_percent=0.0, bandwidth_mbps=bandwidth_mbps,
+                queue_limit_packets=100,
+            ) for endpoint in endpoints
+        )
+
+    def test_global_sfc_planner_rejects_bandwidth_and_delay_path_failures(self) -> None:
+        edge = FormationEdge("e-path", 0, 1, 1.0)
+        topology, profiles = self._sfc_topology_and_profiles(bandwidth_mbps=0.5)
+        with self.assertRaisesRegex(RuntimeError, "pruned e-path"):
+            topology.plan_task_routes("global_sfc_embedding", (edge,), profiles=profiles)
+        topology, profiles = self._sfc_topology_and_profiles(base_delay_ms=2.0)
+        with self.assertRaisesRegex(RuntimeError, "path delay"):
+            topology.plan_task_routes(
+                "global_sfc_embedding", (edge,), profiles=profiles, max_path_delay_ms=10.0
+            )
+
+    def test_global_sfc_planner_emits_independent_evidence_for_valid_path(self) -> None:
+        edge = FormationEdge("e-path", 0, 1, 1.0)
+        topology, profiles = self._sfc_topology_and_profiles()
+        plan = topology.plan_task_routes(
+            "global_sfc_embedding", (edge,), profiles=profiles, max_path_delay_ms=20.0
+        )
+        waves = build_method_transactions("global_sfc_embedding", plan, (edge,))
+        self.assertTrue(plan.sfc_evidence["placement_slot_inventory"])
+        self.assertEqual(plan.sfc_evidence["placement_slot_demand"], {"agent-0": 1, "agent-1": 1})
+        self.assertEqual(plan.sfc_evidence["path_records"], plan.path_records)
+        self.assertEqual(waves[0][0].commands, tuple(
+            command for batch in plan.batches if batch.label.startswith("sfc_chain:")
+            for command in batch.commands
+        ))
+
+    def test_global_sfc_rejects_dead_assigned_agent_from_observable_inventory(self) -> None:
+        edge = FormationEdge("e-dead", 0, 1, 1.0)
+        topology, profiles = self._sfc_topology_and_profiles()
+        topology.agents[1] = SimpleNamespace(
+            pid=101, process=SimpleNamespace(poll=lambda: 1)
+        )
+        plan = topology.plan_task_routes(
+            "global_sfc_embedding", (edge,), profiles=profiles, max_path_delay_ms=20.0
+        )
+        with self.assertRaisesRegex(ValueError, "service availability"):
+            build_method_transactions("global_sfc_embedding", plan, (edge,))
 
     def test_cspf_reserves_residual_capacity_before_parallel_flow_deployment(self) -> None:
         topology = exp1.ProcessNetnsTopology(3, 2)

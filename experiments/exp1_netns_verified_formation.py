@@ -621,6 +621,7 @@ class ProcessNetnsTopology:
     def __init__(self, num_agents: int, num_gateways: int) -> None:
         self.num_agents = num_agents
         self.num_gateways = min(num_gateways, num_agents)
+        self.placement_slots_per_agent = 2
         self.agents: list[_NamespaceProcess] = []
         self.gateways: list[_NamespaceProcess] = []
         self.agent_ips: list[str] = []
@@ -715,6 +716,7 @@ class ProcessNetnsTopology:
             raise ValueError(f"unsupported canonical Exp1 method: {method_id}")
         ordered = _ordered_formation_edges(method_id, edges, self.num_gateways)
         common = tuple(self._gateway_default_commands()) + tuple(self._outer_agent_commands())
+        path_records: tuple[dict[str, object], ...] = ()
         if method_id == "proposed":
             peer_commands: list[DeploymentCommand] = []
             peer_owners: list[str] = []
@@ -759,6 +761,10 @@ class ProcessNetnsTopology:
             chains = ()
             work_units = len(edges) * (len(self.agents) + len(edges))
         else:
+            raw_path_records = self._cspf_path_records(
+                ordered, profiles, max_path_delay_ms=max_path_delay_ms
+            )
+            path_records = tuple({**record, "feasible": True} for record in raw_path_records)
             chains = _service_chains(edges)
             seen: set[tuple[int | None, tuple[str, ...]]] = set()
             chain_batches: list[DeploymentBatch] = []
@@ -808,11 +814,27 @@ class ProcessNetnsTopology:
             )
             policy = "task_dag_source_to_sink_chain_embedding_heuristic"
             work_units = len(edges) + sum(len(chain) ** 2 for chain in chains)
-        if method_id != "cspf":
+        if method_id == "proposed":
             path_records = ()
+        if method_id == "global_sfc_embedding":
+            service_placements = {
+                node_index: node_index
+                for edge in edges
+                for node_index in (edge.source_index, edge.target_index)
+            }
+            placement_capacity = {
+                f"agent-{agent_index}": self.placement_slots_per_agent
+                for agent_index in range(self.num_agents)
+            }
+        else:
+            service_placements = None
+            placement_capacity = None
         sfc_evidence = None
         if method_id == "global_sfc_embedding":
-            sfc_evidence = self._sfc_evidence(chains, batches)
+            sfc_evidence = self._sfc_evidence(
+                chains, batches, service_placements, placement_capacity,
+                path_records, self.agents,
+            )
         return FormationDeploymentPlan(
             method_id=method_id,
             planning_policy=policy,
@@ -822,11 +844,8 @@ class ProcessNetnsTopology:
             planning_work_units=work_units,
             batches=tuple(batches),
             path_records=tuple(path_records),
-            service_placements=tuple(chain_index for chain_index in range(len(chains))),
-            placement_capacity={
-                chain_index: sum(edge.required_throughput_mbps for edge in chain)
-                for chain_index, chain in enumerate(chains)
-            } if method_id == "global_sfc_embedding" else None,
+            service_placements=service_placements,
+            placement_capacity=placement_capacity,
             sfc_evidence=sfc_evidence,
         )
 
@@ -914,17 +933,34 @@ class ProcessNetnsTopology:
             )
         return commands
 
-    @staticmethod
     def _sfc_evidence(
+        self,
         chains: Sequence[Sequence[FormationEdge]],
         batches: Sequence[DeploymentBatch],
+        placements: Mapping[int, int],
+        slot_inventory: Mapping[str, int],
+        path_records: Sequence[dict[str, object]],
+        agents: Sequence[object],
     ) -> dict[str, object]:
         """Materialize the Global SFC checks used by transactional adapters."""
         chain_order_valid = True
         path_feasible = True
+        def live(agent_index: int) -> bool:
+            if not 0 <= agent_index < len(agents):
+                return False
+            namespace = agents[agent_index]
+            process = getattr(namespace, "process", None)
+            if process is not None and callable(getattr(process, "poll", None)):
+                return process.poll() is None
+            return isinstance(getattr(namespace, "pid", None), int) and namespace.pid > 0
+
         service_availability = tuple(
-            {"chain_id": f"chain-{index:03d}", "available": bool(chain)}
-            for index, chain in enumerate(chains)
+            {
+                "node": node,
+                "agent": placements.get(node, -1),
+                "available": live(placements.get(node, -1)),
+            }
+            for node in sorted(placements)
         )
         for batch in batches:
             if not batch.label.startswith("sfc_chain:"):
@@ -951,19 +987,23 @@ class ProcessNetnsTopology:
             expected = set(range(max(hops) + 1)) if hops else set()
             if hops != expected:
                 chain_order_valid = False
-        placement_capacity = {
-            f"chain-{index:03d}": sum(edge.required_throughput_mbps for edge in chain)
-            for index, chain in enumerate(chains)
-        }
+        slot_demand: dict[str, int] = {}
+        for agent_index in placements.values():
+            key = f"agent-{agent_index}"
+            slot_demand[key] = slot_demand.get(key, 0) + 1
         placement_feasible = all(
-            float(capacity) >= 0.0 for capacity in placement_capacity.values()
+            slot_inventory.get(key, -1) >= demand
+            for key, demand in slot_demand.items()
         )
         return {
             "service_availability": service_availability,
-            "placement_capacity": placement_capacity,
+            "placement_capacity": dict(slot_inventory),
+            "placement_slot_inventory": dict(slot_inventory),
+            "placement_slot_demand": slot_demand,
             "placement_feasible": placement_feasible,
             "chain_order_valid": chain_order_valid,
-            "path_feasible": path_feasible,
+            "path_feasible": path_feasible and len(path_records) == sum(len(chain) for chain in chains),
+            "path_records": tuple(path_records),
         }
 
     def _cspf_path_records(
