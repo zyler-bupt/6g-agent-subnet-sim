@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ipaddress
 import json
 import os
 import sys
@@ -43,6 +44,7 @@ SCENARIO_CLASSES = (
 )
 TASK_SIZES = (4, 8, 12, 16, 20)
 INHERITED_CONFIG = "configs/exp1_netns_verified_formation_v3.yaml"
+DEFAULT_OUTPUT_DIR = Path("results/paper/wcnc_final_v3/raw/exp1_transactional")
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,10 @@ class TransactionalFormationRun:
     method_owned_formation_latency_ms: float | None
     final_verification_latency_ms: float
     time_to_correct_formation_ms: float | None
+    verified_correct: bool
+    infrastructure_cleanup_success: bool
+    cleanup_failure_reason: str
+    leaked_state_fingerprint: str
     success: bool
     timeout: bool
     failure_stage: str
@@ -347,6 +353,7 @@ def run_transactional_trial(
     wasted_rule_commands = 0
     rollback_count = 0
     planning_latency = 0.0
+    replan_planning_latency = 0.0
     common_latency = 0.0
     prepare_latency = 0.0
     commit_latency = 0.0
@@ -356,6 +363,8 @@ def run_transactional_trial(
     first_commit_at: float | None = None
     method_commit_finished: float | None = None
     verified_correct_at: float | None = None
+    verified_correct = False
+    cleanup_failures: list[dict[str, object]] = []
     task_received = time.perf_counter()
     deadline = task_received + float(simulation["timeout_s"])
     current_stage = "PREPARATION"
@@ -389,14 +398,16 @@ def run_transactional_trial(
 
         current_stage = "PLAN"
         plan_started = time.perf_counter()
-        plan = topology.plan_task_routes(
-            method_id,
-            edges,
-            profiles=profiles,
-            max_path_delay_ms=float(verification["ping"]["max_average_rtt_ms"]),  # type: ignore[index]
-        )
-        plan_finished = time.perf_counter()
-        planning_latency += plan_finished - plan_started
+        try:
+            plan = topology.plan_task_routes(
+                method_id,
+                edges,
+                profiles=profiles,
+                max_path_delay_ms=float(verification["ping"]["max_average_rtt_ms"]),  # type: ignore[index]
+            )
+        finally:
+            plan_finished = time.perf_counter()
+            planning_latency += plan_finished - plan_started
         events.append(
             _event(
                 run_id,
@@ -426,9 +437,11 @@ def run_transactional_trial(
             [_command_payload(command) for command in canonical_common]
         )
         common_started = time.perf_counter()
-        topology.install_common_infrastructure(canonical_common)
-        common_finished = time.perf_counter()
-        common_latency += common_finished - common_started
+        try:
+            topology.install_common_infrastructure(canonical_common)
+        finally:
+            common_finished = time.perf_counter()
+            common_latency += common_finished - common_started
         events.append(
             _event(
                 run_id,
@@ -483,13 +496,20 @@ def run_transactional_trial(
                 wasted_rule_commands += sum(
                     result.commands_attempted for _transaction, result in rejected
                 )
-                for transaction, _result in rejected:
-                    engine.abort(transaction.transaction_id)
+                abort_targets = [transaction for transaction, _result in rejected]
+                if method_id == "proposed":
+                    abort_targets.extend(
+                        transaction for transaction, _result in accepted
+                    )
+                abort_failures = _abort_transactions(engine, abort_targets)
+                cleanup_failures.extend(abort_failures)
+                if abort_failures:
+                    current_stage = "ABORT_OR_ROLLBACK"
+                    raise RuntimeError(_cleanup_failure_reason(abort_failures))
                 replay: tuple[FormationTransaction, ...] = ()
                 if method_id == "proposed":
                     replay_items = []
                     for transaction, result in accepted:
-                        engine.abort(transaction.transaction_id)
                         wasted_rule_commands += result.commands_attempted
                         replay_items.append(
                             replace(
@@ -527,17 +547,22 @@ def run_transactional_trial(
                     or rejected[0][0].affected_objects[0]
                 )
                 replan_started = time.perf_counter()
-                retry_plan = topology.plan_task_routes(
-                    method_id,
-                    edges,
-                    profiles=profiles,
-                    max_path_delay_ms=float(verification["ping"]["max_average_rtt_ms"]),  # type: ignore[index]
-                )
+                try:
+                    retry_plan = topology.plan_task_routes(
+                        method_id,
+                        edges,
+                        profiles=profiles,
+                        max_path_delay_ms=float(verification["ping"]["max_average_rtt_ms"]),  # type: ignore[index]
+                    )
+                finally:
+                    replan_finished = time.perf_counter()
+                    replan_duration = replan_finished - replan_started
+                    planning_latency += replan_duration
+                    replan_planning_latency += replan_duration
+                    rollback_replan_latency += replan_duration
                 retry_waves = _method_owned_waves(
                     build_retry_transactions(method_id, failed_object, retry_plan, edges)
                 )
-                replan_finished = time.perf_counter()
-                rollback_replan_latency += replan_finished - replan_started
                 scoped = {
                     item
                     for retry_wave in retry_waves
@@ -571,6 +596,8 @@ def run_transactional_trial(
             missing = sorted(str(item) for item in expected_keys - committed_keys)
             raise RuntimeError("incomplete commit; missing transaction scopes: " + ",".join(missing))
         method_commit_finished = time.perf_counter()
+        if retry_used and first_commit_at is not None:
+            partial_state_exposure += max(0.0, method_commit_finished - first_commit_at)
         _ensure_before(deadline)
 
         current_stage = "FINAL_VERIFY"
@@ -581,13 +608,16 @@ def run_transactional_trial(
             }
         )
         verify_started = time.perf_counter()
-        verified, verifier_reason = _verify_final(topology, edges, verification)
-        verify_finished = time.perf_counter()
-        final_verification_latency = verify_finished - verify_started
+        try:
+            verified, verifier_reason = _verify_final(topology, edges, verification)
+        finally:
+            verify_finished = time.perf_counter()
+            final_verification_latency += verify_finished - verify_started
         if not verified:
             raise RuntimeError(verifier_reason)
         _ensure_before(deadline)
         success = True
+        verified_correct = True
         verified_correct_at = verify_finished
         current_stage = "VERIFIED_CORRECT"
         events.append(_event(run_id, verify_finished, "VERIFIED_CORRECT", {}))
@@ -607,11 +637,18 @@ def run_transactional_trial(
             for transaction_id in reversed(committed_ids):
                 try:
                     rolled_back = engine.rollback(transaction_id)
-                except RuntimeError:
+                except RuntimeError as cleanup_error:
+                    cleanup_failures.append(
+                        _cleanup_exception_failure(
+                            "rollback", transaction_id, cleanup_error
+                        )
+                    )
                     continue
                 if rolled_back.accepted:
                     rollback_count += 1
                     rollback_scope.update(rolled_back.affected_objects)
+                else:
+                    cleanup_failures.append(_cleanup_attempt_failure(rolled_back))
         if first_commit_at is not None:
             partial_state_exposure += max(0.0, time.perf_counter() - first_commit_at)
     finally:
@@ -620,16 +657,21 @@ def run_transactional_trial(
             try:
                 stopper(background)
             except Exception as error:
+                cleanup_failures.append(
+                    _cleanup_exception_failure("background_cleanup", "background", error)
+                )
+                events.append(
+                    _event(
+                        run_id,
+                        time.perf_counter(),
+                        "BACKGROUND_CLEANUP_FAILED",
+                        {"reason": f"{type(error).__name__}: {error}"},
+                    )
+                )
                 if success:
                     success = False
-                    current_stage = "CLEANUP"
+                    current_stage = "BACKGROUND_CLEANUP"
                     failure_reason = f"{type(error).__name__}: {error}"
-                    events.append(
-                        _event(
-                            run_id, time.perf_counter(), "TRIAL_FAILED",
-                            {"failure_stage": current_stage, "reason": failure_reason},
-                        )
-                    )
 
     ended = time.perf_counter()
     if executor is not None:
@@ -654,6 +696,10 @@ def run_transactional_trial(
     logical_target = (
         f"{fault_schedule.logical_edge_id}@gateway-{fault_schedule.gateway_index}"
         if fault_schedule else ""
+    )
+    cleanup_failure_reason = _cleanup_failure_reason(cleanup_failures)
+    leaked_state_fingerprint = (
+        stable_fingerprint(cleanup_failures) if cleanup_failures else ""
     )
     row = TransactionalFormationRun(
         protocol_id=str(experiment["protocol_id"]),
@@ -692,14 +738,19 @@ def run_transactional_trial(
                 + prepare_latency
                 + commit_latency
                 + rollback_replan_latency
+                - replan_planning_latency
             ) * 1000.0
             if method_commit_finished is not None else None
         ),
         final_verification_latency_ms=final_verification_latency * 1000.0,
         time_to_correct_formation_ms=(
             (verified_correct_at - task_received) * 1000.0
-            if success and verified_correct_at is not None else None
+            if verified_correct_at is not None else None
         ),
+        verified_correct=verified_correct,
+        infrastructure_cleanup_success=not cleanup_failures,
+        cleanup_failure_reason=cleanup_failure_reason,
+        leaked_state_fingerprint=leaked_state_fingerprint,
         success=success,
         timeout=timed_out,
         failure_stage="" if success else current_stage,
@@ -738,7 +789,9 @@ def run_transactional_experiment(
     )
     frozen_schedule = build_transactional_schedule(config)
     raw_dir = output_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    if raw_dir.exists():
+        raise RuntimeError(f"refusing to overwrite existing raw output: {raw_dir}")
+    raw_dir.mkdir(parents=True)
     runs_path = raw_dir / "runs.csv"
     attempts_path = raw_dir / "attempts.jsonl"
     scope_path = raw_dir / "measurement_scope.json"
@@ -750,6 +803,7 @@ def run_transactional_experiment(
         "configuration_sha256": stable_fingerprint(config),
         "frozen_config_grid": _grid_payload(frozen_schedule),
         "invocation_grid": invocation_grid,
+        "invocation_grid_sha256": stable_fingerprint(invocation_grid),
         "grid_source": "cli_overrides" if any(
             value is not None for value in (seeds, task_sizes, methods, scenario_classes)
         ) else "frozen_config",
@@ -767,6 +821,8 @@ def run_transactional_experiment(
     rows: list[TransactionalFormationRun] = []
     num_gateways = int(config["task"]["num_gateways"])  # type: ignore[index]
     for scheduled in schedule:
+        row: TransactionalFormationRun | None = None
+        events: list[dict[str, object]] = []
         try:
             with topology_factory(scheduled.num_agents, num_gateways) as topology:  # type: ignore[attr-defined]
                 row, events = run_transactional_trial(
@@ -779,7 +835,28 @@ def run_transactional_experiment(
                     run_sequence=scheduled.run_sequence,
                 )
         except Exception as error:
-            row, events = _construction_failure(config, scheduled, num_gateways, error)
+            if row is None:
+                row, events = _construction_failure(config, scheduled, num_gateways, error)
+            else:
+                row = _append_teardown_failure(row, error)
+                events.append(
+                    _event(
+                        row.run_id,
+                        time.perf_counter(),
+                        "TOPOLOGY_TEARDOWN_FAILED",
+                        {"reason": f"{type(error).__name__}: {error}"},
+                    )
+                )
+        events = [event for event in events if event["stage"] != "TERMINAL_ROW_READY"]
+        events.append(
+            _event(
+                row.run_id,
+                time.perf_counter(),
+                "TERMINAL_ROW_READY",
+                {"success": row.success, "timeout": row.timeout},
+            )
+        )
+        events.sort(key=lambda item: (float(item["timestamp"]), str(item["stage"])))
         _append_jsonl(attempts_path, events)
         _append_csv(runs_path, row)
         rows.append(row)
@@ -832,24 +909,55 @@ def _method_owned_waves(
         for transaction in wave:
             if transaction.scope_kind == "shared":
                 continue
-            route_candidates = tuple(
-                command
-                for command in transaction.commands
-                if getattr(command, "namespace", "").startswith("agent-")
-                and tuple(getattr(command, "argv", ()))[:3]
-                == ("ip", "route", "replace")
-            )
-            # SFC plans carry explicit policy-rule activation batches for the
-            # nominal installer.  The transactional backend derives its own
-            # inactive-table activation rule from each staged route, so those
-            # commands are outside the method-owned candidate subset here.
-            if route_candidates:
-                filtered_transactions.append(
-                    replace(transaction, commands=route_candidates)
+            route_candidates: list[object] = []
+            for command in transaction.commands:
+                if _is_agent_route_candidate(command):
+                    route_candidates.append(command)
+                    continue
+                if (
+                    transaction.scope_kind == "chain"
+                    and _is_known_sfc_activation_rule(command)
+                ):
+                    # The policy-table backend derives the corresponding
+                    # inactive-table activation rule after staging the route.
+                    continue
+                raise ValueError(
+                    "unsupported method-owned command for transactional policy backend"
                 )
+            if not route_candidates:
+                raise ValueError(
+                    "method-owned transaction has no agent route candidates"
+                )
+            filtered_transactions.append(
+                replace(transaction, commands=tuple(route_candidates))
+            )
         if filtered_transactions:
             filtered_waves.append(tuple(filtered_transactions))
     return tuple(filtered_waves)
+
+
+def _is_agent_route_candidate(command: object) -> bool:
+    return (
+        getattr(command, "namespace", "").startswith("agent-")
+        and tuple(getattr(command, "argv", ()))[:3] == ("ip", "route", "replace")
+    )
+
+
+def _is_known_sfc_activation_rule(command: object) -> bool:
+    argv = tuple(getattr(command, "argv", ()))
+    if not getattr(command, "namespace", "").startswith("agent-"):
+        return False
+    if len(argv) != 9 or argv[:4] != ("ip", "rule", "add", "priority"):
+        return False
+    if argv[5] != "to" or argv[7] != "lookup":
+        return False
+    try:
+        priority = int(argv[4])
+        network = ipaddress.ip_network(argv[6], strict=False)
+        table = int(argv[8])
+    except ValueError:
+        return False
+    return priority > 0 and table > 0 and network.prefixlen == network.max_prefixlen
 
 
 def _with_versions(
@@ -963,6 +1071,54 @@ def _event(
     }
 
 
+def _abort_transactions(
+    engine: FormationTransactionEngine,
+    transactions: Sequence[FormationTransaction],
+) -> list[dict[str, object]]:
+    """Attempt every required abort and retain failures as terminal evidence."""
+    failures: list[dict[str, object]] = []
+    for transaction in transactions:
+        try:
+            aborted = engine.abort(transaction.transaction_id)
+        except RuntimeError as error:
+            failures.append(
+                _cleanup_exception_failure("abort", transaction.transaction_id, error)
+            )
+            continue
+        if not aborted.accepted:
+            failures.append(_cleanup_attempt_failure(aborted))
+    return failures
+
+
+def _cleanup_attempt_failure(attempt: TransactionAttempt) -> dict[str, object]:
+    return {
+        "operation": attempt.operation,
+        "transaction_id": attempt.transaction_id,
+        "reason": attempt.reason or f"{attempt.operation} rejected",
+        "readback_before_fingerprint": attempt.readback_before_fingerprint,
+        "readback_after_fingerprint": attempt.readback_after_fingerprint,
+    }
+
+
+def _cleanup_exception_failure(
+    operation: str, transaction_id: str, error: Exception
+) -> dict[str, object]:
+    return {
+        "operation": operation,
+        "transaction_id": transaction_id,
+        "reason": f"{type(error).__name__}: {error}",
+        "readback_before_fingerprint": "",
+        "readback_after_fingerprint": "",
+    }
+
+
+def _cleanup_failure_reason(failures: Sequence[Mapping[str, object]]) -> str:
+    return "; ".join(
+        f"{item['operation']} {item['transaction_id']}: {item['reason']}"
+        for item in failures
+    )
+
+
 def _command_payload(command: object) -> dict[str, object]:
     return {
         "namespace": getattr(command, "namespace", ""),
@@ -1032,6 +1188,33 @@ def _append_csv(path: Path, row: TransactionalFormationRun) -> None:
         os.fsync(handle.fileno())
 
 
+def _append_teardown_failure(
+    row: TransactionalFormationRun, error: Exception
+) -> TransactionalFormationRun:
+    failure = _cleanup_exception_failure("topology_teardown", "topology", error)
+    cleanup_failures: list[dict[str, object]] = [failure]
+    if row.cleanup_failure_reason:
+        cleanup_failures.insert(
+            0,
+            {
+                "operation": "prior_cleanup",
+                "transaction_id": "trial",
+                "reason": row.cleanup_failure_reason,
+                "readback_before_fingerprint": "",
+                "readback_after_fingerprint": row.leaked_state_fingerprint,
+            },
+        )
+    return replace(
+        row,
+        success=False,
+        infrastructure_cleanup_success=False,
+        cleanup_failure_reason=_cleanup_failure_reason(cleanup_failures),
+        leaked_state_fingerprint=stable_fingerprint(cleanup_failures),
+        failure_stage=row.failure_stage or "TOPOLOGY_TEARDOWN",
+        failure_reason=row.failure_reason or failure["reason"],
+    )
+
+
 def _construction_failure(
     config: Mapping[str, object],
     scheduled: TransactionalScheduledRun,
@@ -1078,6 +1261,10 @@ def _construction_failure(
         method_owned_formation_latency_ms=None,
         final_verification_latency_ms=0.0,
         time_to_correct_formation_ms=None,
+        verified_correct=False,
+        infrastructure_cleanup_success=False,
+        cleanup_failure_reason="",
+        leaked_state_fingerprint="",
         success=False,
         timeout=isinstance(error, TimeoutError),
         failure_stage="TOPOLOGY_CONSTRUCTION",
@@ -1105,12 +1292,36 @@ def _parse_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _validate_cli_invocation(
+    config: Mapping[str, object],
+    output_dir: Path,
+    *,
+    has_overrides: bool,
+    output_was_explicit: bool,
+) -> None:
+    experiment = config.get("experiment")
+    if not isinstance(experiment, Mapping):
+        raise RuntimeError("transactional config is missing experiment metadata")
+    if has_overrides:
+        if experiment.get("phase") == "formal":
+            raise RuntimeError("CLI overrides are forbidden for the formal protocol")
+        if (
+            not output_was_explicit
+            or output_dir.resolve() == DEFAULT_OUTPUT_DIR.resolve()
+        ):
+            raise RuntimeError(
+                "CLI overrides require an explicit noncanonical output directory"
+            )
+    if (output_dir / "raw").exists():
+        raise RuntimeError(
+            f"refusing to overwrite existing raw output: {output_dir / 'raw'}"
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Measured transactional Exp1 formation")
     parser.add_argument("--config", default="configs/exp1_transactional_formation_v1.yaml")
-    parser.add_argument(
-        "--output-dir", default="results/paper/wcnc_final_v3/raw/exp1_transactional"
-    )
+    parser.add_argument("--output-dir")
     parser.add_argument("--seeds", default="")
     parser.add_argument("--task-sizes", default="")
     parser.add_argument("--methods", default="")
@@ -1130,12 +1341,19 @@ def main() -> None:
         "scenario_classes": _parse_csv(args.scenario_classes)
         if args.scenario_classes else None,
     }
+    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_DIR
+    _validate_cli_invocation(
+        config,
+        output_dir,
+        has_overrides=any(value is not None for value in overrides.values()),
+        output_was_explicit=args.output_dir is not None,
+    )
     if not nominal._inside_user_namespace():
         raise SystemExit(nominal._reexec_in_user_namespace(sys.argv[1:]))
     nominal.validate_isolated_outer_namespace()
     rows = run_transactional_experiment(
         config,
-        Path(args.output_dir),
+        output_dir,
         require_complete_grid=args.require_complete_grid,
         **overrides,
     )

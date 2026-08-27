@@ -7,12 +7,14 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import experiments.exp1_netns_verified_formation as exp1
+import experiments.exp1_transactional_formation as transactional
 from experiments.exp1_netns_verified_formation import FormationEdge
 from experiments.exp1_transactional_formation import (
     TransactionalFormationRun,
@@ -581,6 +583,76 @@ class FormationTransactionEngineTests(unittest.TestCase):
         self.assertIn("kernel readback unavailable", prepared.reason)
         self.assertTrue(prepared.readback_after_fingerprint)
 
+    def test_same_transaction_prepare_is_serialized_without_blocking_other_ids(self) -> None:
+        class BlockingExecutor(RecordingExecutor):
+            def __init__(self):
+                super().__init__()
+                self.stage_started = threading.Event()
+                self.release_stage = threading.Event()
+                self.stage_calls = 0
+
+            def stage(self, transaction, ack_timeout_ms):
+                self.stage_calls += 1
+                if transaction.transaction_id == "txn-1":
+                    self.stage_started.set()
+                    self.release_stage.wait(1.0)
+                return super().stage(transaction, ack_timeout_ms)
+
+        executor = BlockingExecutor()
+        engine = FormationTransactionEngine(executor, ack_timeout_ms=200)
+        other_transaction = FormationTransaction(
+            transaction_id="txn-2",
+            attempt_index=0,
+            expected_versions=(),
+            commands=("ip route replace 10.0.1.2/32",),
+            affected_objects=("edge-1",),
+        )
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(engine.prepare, self.transaction)
+            self.assertTrue(executor.stage_started.wait(1.0))
+            second = pool.submit(engine.prepare, self.transaction)
+            other = pool.submit(engine.prepare, other_transaction)
+            self.assertTrue(other.result(timeout=0.2).accepted)
+            time.sleep(0.02)
+            executor.release_stage.set()
+            outcomes = []
+            for future in (first, second):
+                try:
+                    outcomes.append(future.result())
+                except RuntimeError as error:
+                    outcomes.append(error)
+
+        self.assertEqual(executor.stage_calls, 2)
+        self.assertEqual(sum(isinstance(item, TransactionAttempt) for item in outcomes), 1)
+        self.assertEqual(sum(isinstance(item, RuntimeError) for item in outcomes), 1)
+        self.assertEqual(len(engine.attempts), 2)
+
+    def test_concurrent_unique_transactions_record_every_prepare_and_commit(self) -> None:
+        engine = FormationTransactionEngine(RecordingExecutor(), ack_timeout_ms=200)
+        transactions = tuple(
+            FormationTransaction(
+                transaction_id=f"txn-{index}",
+                attempt_index=0,
+                expected_versions=(),
+                commands=(f"command-{index}",),
+                affected_objects=(f"edge-{index}",),
+            )
+            for index in range(64)
+        )
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            prepared = tuple(pool.map(engine.prepare, transactions))
+            committed = tuple(
+                pool.map(lambda tx: engine.commit(tx.transaction_id), transactions)
+            )
+
+        self.assertTrue(all(item.accepted for item in prepared + committed))
+        self.assertEqual(len(engine.attempts), 128)
+        self.assertEqual(
+            len({(item.transaction_id, item.operation) for item in engine.attempts}),
+            128,
+        )
+
 
 class NetnsPolicyTableBackendTests(unittest.TestCase):
     def test_stages_routes_before_activation_and_flushes_table(self) -> None:
@@ -746,6 +818,102 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         self.assertIsNotNone(topology.deadlines[0])
         self.assertGreater(topology.deadlines[0], time.perf_counter())
 
+    def test_duplicate_concurrent_stage_reserves_one_transaction(self) -> None:
+        topology = self._KernelTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        iteration_started = threading.Event()
+        release_iteration = threading.Event()
+
+        class BlockingCommands:
+            def __init__(self):
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                if self.iterations == 1:
+                    iteration_started.set()
+                    release_iteration.wait(1.0)
+                return iter((NetnsPolicyTableBackendTests._command(),))
+
+        commands = BlockingCommands()
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(backend.stage, "txn-concurrent", commands)
+            self.assertTrue(iteration_started.wait(1.0))
+            second = pool.submit(backend.stage, "txn-concurrent", commands)
+            other = pool.submit(backend.stage, "txn-independent", commands)
+            self.assertTrue(other.result(timeout=0.2).accepted)
+            time.sleep(0.02)
+            release_iteration.set()
+            results = (first.result(), second.result())
+
+        self.assertEqual(sum(item.accepted for item in results), 1)
+        self.assertEqual(len(backend._transactions), 2)
+        self.assertEqual(len(backend._used_tables), 2)
+
+    def test_concurrent_transactions_allocate_unique_policy_tables(self) -> None:
+        topology = self._KernelTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = tuple(
+                pool.map(
+                    lambda index: backend.stage(
+                        f"txn-{index}", (self._command(),), ack_timeout_ms=200
+                    ),
+                    range(64),
+                )
+            )
+
+        self.assertTrue(all(item.accepted for item in results))
+        tables = [
+            next(iter(staged.table_by_pid.values()))
+            for staged in backend._transactions.values()
+        ]
+        self.assertEqual(len(tables), 64)
+        self.assertEqual(len(set(tables)), 64)
+
+    def test_prepare_deadline_covers_pre_stage_and_post_stage_readback(self) -> None:
+        class CumulativeTopology:
+            def __init__(self):
+                self.read_timeouts = []
+                self.read_calls = 0
+                self.timed_out = False
+
+            def _run_ns(self, pid, *command, timeout=None, **_kwargs):
+                self.read_calls += 1
+                self.read_timeouts.append(timeout)
+                delay = 0.025 if self.read_calls <= 3 else 0.0
+                if timeout is not None and timeout < delay:
+                    threading.Event().wait(max(0.0, timeout))
+                    self.timed_out = True
+                    raise subprocess.TimeoutExpired(command, timeout)
+                threading.Event().wait(delay)
+                return SimpleNamespace(stdout="[]")
+
+            def _parallel_commands(
+                self, commands, *, check, timeout=None, deadline=None
+            ):
+                if deadline is not None:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired("stage", 0.0)
+                    threading.Event().wait(min(0.015, remaining))
+
+        topology = CumulativeTopology()
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        started = time.perf_counter()
+
+        staged = backend.stage(
+            "txn-cumulative", (self._command(),), ack_timeout_ms=80
+        )
+        elapsed = time.perf_counter() - started
+
+        self.assertFalse(staged.accepted)
+        self.assertTrue(topology.timed_out)
+        self.assertIn("post-stage readback failed", staged.reason)
+        self.assertLess(elapsed, 0.14)
+        self.assertGreater(topology.read_timeouts[0], topology.read_timeouts[2])
+
     def test_abort_of_unactivated_prepare_skips_absent_rule_deletion_and_releases_table(self) -> None:
         topology = self._KernelTopology()
         topology.strict_missing_rule_deletion = True
@@ -899,6 +1067,8 @@ class _RecordingTransactionalTopology:
         self, num_agents: int, num_gateways: int, *,
         fail_verify: bool = False, pid_offset: int = 0,
         common_delay_s: float = 0.0, cleanup_delay_s: float = 0.0,
+        fail_abort: bool = False, cleanup_error: bool = False,
+        teardown_error: bool = False,
     ) -> None:
         self.num_agents = num_agents
         self.num_gateways = min(num_gateways, num_agents)
@@ -906,6 +1076,9 @@ class _RecordingTransactionalTopology:
         self.pid_offset = pid_offset
         self.common_delay_s = common_delay_s
         self.cleanup_delay_s = cleanup_delay_s
+        self.fail_abort = fail_abort
+        self.cleanup_error = cleanup_error
+        self.teardown_error = teardown_error
         self.planner_inputs: list[dict[str, object]] = []
         self.common_installs: list[tuple[exp1.DeploymentCommand, ...]] = []
         self.staged: dict[str, tuple[object, ...]] = {}
@@ -916,6 +1089,8 @@ class _RecordingTransactionalTopology:
         return self
 
     def __exit__(self, *_args):
+        if self.teardown_error:
+            raise RuntimeError("topology teardown exploded")
         return None
 
     def reset_task_routes(self) -> None:
@@ -930,6 +1105,8 @@ class _RecordingTransactionalTopology:
 
     def stop_background_traffic(self, _background):
         threading.Event().wait(self.cleanup_delay_s)
+        if self.cleanup_error:
+            raise RuntimeError("background cleanup exploded")
         return {"enabled": False}
 
     def common_infrastructure_commands(self):
@@ -1108,6 +1285,12 @@ class _RecordingTransactionalTopology:
         return CommandResult(accepted=True, commands_attempted=1, readback_after=self.read_transaction_state(transaction_id))
 
     def abort_transaction(self, transaction_id):
+        if self.fail_abort:
+            return CommandResult(
+                accepted=False,
+                reason="kernel cleanup failed",
+                readback_after=self.read_transaction_state(transaction_id),
+            )
         self.staged.pop(transaction_id, None)
         self.activated.discard(transaction_id)
         return CommandResult(accepted=True, commands_attempted=1, readback_after=())
@@ -1287,6 +1470,98 @@ class TransactionalRunnerContractTests(unittest.TestCase):
         self.assertEqual(scope["invocation_grid"]["seeds"], [7])
         self.assertEqual(scope["invocation_grid"]["expected_rows"], 1)
         self.assertNotEqual(scope["invocation_grid"], scope["frozen_config_grid"])
+        self.assertNotEqual(
+            scope["configuration_sha256"], scope["invocation_grid_sha256"]
+        )
+
+    def test_override_safety_rejects_formal_default_output_and_existing_raw(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "pilot-output"
+            overrides = {"seeds": (9000,)}
+            with self.assertRaisesRegex(RuntimeError, "formal"):
+                transactional._validate_cli_invocation(
+                    self.formal,
+                    output_dir,
+                    has_overrides=True,
+                    output_was_explicit=True,
+                )
+            with self.assertRaisesRegex(RuntimeError, "explicit noncanonical"):
+                transactional._validate_cli_invocation(
+                    self.pilot,
+                    transactional.DEFAULT_OUTPUT_DIR,
+                    has_overrides=True,
+                    output_was_explicit=True,
+                )
+            (output_dir / "raw").mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "existing raw"):
+                transactional._validate_cli_invocation(
+                    self.pilot,
+                    output_dir,
+                    has_overrides=True,
+                    output_was_explicit=True,
+                )
+            with self.assertRaisesRegex(RuntimeError, "existing raw"):
+                run_transactional_experiment(
+                    self.pilot,
+                    output_dir,
+                    seeds=(9000,),
+                    task_sizes=(4,),
+                    methods=("cspf",),
+                    scenario_classes=("command_rejection",),
+                )
+            self.assertEqual(overrides["seeds"], (9000,))
+
+    def test_method_owned_filter_only_omits_known_sfc_activation_rules(self) -> None:
+        route = exp1.DeploymentCommand(
+            "agent-0", 100,
+            ("ip", "route", "replace", "10.0.1.2/32", "via", "10.0.0.1", "dev", "eth0"),
+        )
+        unknown = exp1.DeploymentCommand(
+            "agent-0", 100, ("ip", "route", "del", "10.0.1.2/32"),
+        )
+        activation = exp1.DeploymentCommand(
+            "agent-0", 100,
+            ("ip", "rule", "add", "priority", "10000", "to", "10.0.1.2/32", "lookup", "100"),
+        )
+        for method_id in ("proposed", "cspf"):
+            transaction = FormationTransaction(
+                transaction_id=f"{method_id}:bad", attempt_index=0,
+                expected_versions=(), commands=(route, unknown),
+                affected_objects=("e-0",), scope_kind="task", logical_edge_id="e-0",
+            )
+            with self.subTest(method_id=method_id), self.assertRaisesRegex(ValueError, "unsupported"):
+                transactional._method_owned_waves(((transaction,),))
+        sfc = FormationTransaction(
+            transaction_id="sfc:known", attempt_index=0,
+            expected_versions=(), commands=(route, activation),
+            affected_objects=("chain-000",), scope_kind="chain", chain_id="chain-000",
+        )
+        self.assertEqual(
+            transactional._method_owned_waves(((sfc,),))[0][0].commands, (route,)
+        )
+
+    def test_exception_paths_accumulate_started_stage_durations(self) -> None:
+        cases = (
+            ("plan_task_routes", "planning_latency_ms", "PLAN"),
+            ("install_common_infrastructure", "common_infrastructure_latency_ms", "COMMON_INFRASTRUCTURE"),
+            ("verify_ping", "final_verification_latency_ms", "FINAL_VERIFY"),
+        )
+        for method_name, duration_name, stage in cases:
+            topology = _RecordingTransactionalTopology(4, 4)
+
+            def delayed_failure(*_args, **_kwargs):
+                threading.Event().wait(0.02)
+                raise RuntimeError(f"{method_name} exploded")
+
+            setattr(topology, method_name, delayed_failure)
+            row, _events = run_transactional_trial(
+                topology, self.formal, method_id="cspf",
+                scenario_class="command_rejection", seed=0, num_agents=4,
+            )
+            with self.subTest(stage=stage):
+                self.assertFalse(row.success)
+                self.assertEqual(row.failure_stage, stage)
+                self.assertGreaterEqual(getattr(row, duration_name), 15.0)
 
     def test_measured_scopes_exclude_common_setup_and_post_verify_cleanup(self) -> None:
         topology = _RecordingTransactionalTopology(
@@ -1307,6 +1582,103 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             40.0,
         )
         self.assertGreaterEqual(wall_ms - row.time_to_correct_formation_ms, 40.0)
+
+    def test_failed_peer_abort_stops_replan_and_final_verification(self) -> None:
+        topology = _RecordingTransactionalTopology(4, 4, fail_abort=True)
+
+        row, events = run_transactional_trial(
+            topology, self.formal, method_id="proposed",
+            scenario_class="command_rejection", seed=0, num_agents=4,
+        )
+
+        self.assertFalse(row.success)
+        self.assertFalse(row.infrastructure_cleanup_success)
+        self.assertEqual(row.failure_stage, "ABORT_OR_ROLLBACK")
+        self.assertIn("kernel cleanup failed", row.cleanup_failure_reason)
+        self.assertTrue(row.leaked_state_fingerprint)
+        self.assertEqual(len(topology.planner_inputs), 1)
+        self.assertEqual(topology.verifier_calls, [])
+        self.assertTrue(any(event["stage"] == "TRANSACTION_ABORT" for event in events))
+
+    def test_failed_rollback_is_retained_with_original_verifier_failure(self) -> None:
+        topology = _RecordingTransactionalTopology(
+            4, 4, fail_abort=True, fail_verify=True
+        )
+
+        row, events = run_transactional_trial(
+            topology, self.formal, method_id="cspf",
+            scenario_class="command_rejection", seed=0, num_agents=4,
+        )
+
+        self.assertFalse(row.success)
+        self.assertFalse(row.infrastructure_cleanup_success)
+        self.assertEqual(row.failure_stage, "FINAL_VERIFY")
+        self.assertIn("verifier exploded", row.failure_reason)
+        self.assertIn("kernel cleanup failed", row.cleanup_failure_reason)
+        self.assertTrue(row.leaked_state_fingerprint)
+        self.assertTrue(any(event["stage"] == "TRANSACTION_ROLLBACK" for event in events))
+
+    def test_background_cleanup_failure_retains_first_verified_timestamp(self) -> None:
+        topology = _RecordingTransactionalTopology(4, 4, cleanup_error=True)
+
+        row, events = run_transactional_trial(
+            topology, self.formal, method_id="cspf",
+            scenario_class="command_rejection", seed=0, num_agents=4,
+        )
+
+        self.assertFalse(row.success)
+        self.assertTrue(row.verified_correct)
+        self.assertIsNotNone(row.time_to_correct_formation_ms)
+        self.assertFalse(row.infrastructure_cleanup_success)
+        self.assertEqual(row.failure_stage, "BACKGROUND_CLEANUP")
+        self.assertIn("background cleanup exploded", row.cleanup_failure_reason)
+        self.assertTrue(any(event["stage"] == "BACKGROUND_CLEANUP_FAILED" for event in events))
+
+    def test_teardown_failure_appends_to_attempts_without_replacing_trial(self) -> None:
+        def topology_factory(num_agents, num_gateways):
+            return _RecordingTransactionalTopology(
+                num_agents, num_gateways, teardown_error=True
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            rows = run_transactional_experiment(
+                self.formal,
+                Path(directory),
+                seeds=(7,),
+                task_sizes=(4,),
+                methods=("cspf",),
+                scenario_classes=("command_rejection",),
+                require_complete_grid=True,
+                topology_factory=topology_factory,
+            )
+            raw = Path(directory) / "raw"
+            events = [
+                json.loads(line)
+                for line in (raw / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        row = rows[0]
+        self.assertGreater(row.num_business_edges, 0)
+        self.assertTrue(row.fault_schedule_fingerprint)
+        self.assertTrue(row.verified_correct)
+        self.assertIsNotNone(row.time_to_correct_formation_ms)
+        self.assertFalse(row.infrastructure_cleanup_success)
+        self.assertIn("topology teardown exploded", row.cleanup_failure_reason)
+        self.assertTrue(any(event["stage"] == "FAULT_INJECTED" for event in events))
+        self.assertTrue(any(event["stage"] == "TOPOLOGY_TEARDOWN_FAILED" for event in events))
+
+    def test_successful_baseline_retries_measure_partial_state_exposure(self) -> None:
+        for method_id in ("cspf", "global_sfc_embedding"):
+            topology = _RecordingTransactionalTopology(4, 4)
+
+            row, _events = run_transactional_trial(
+                topology, self.formal, method_id=method_id,
+                scenario_class="command_rejection", seed=0, num_agents=4,
+            )
+
+            with self.subTest(method_id=method_id):
+                self.assertTrue(row.success)
+                self.assertGreater(row.partial_state_exposure_ms, 0.0)
 
     def test_run_schema_is_immutable(self) -> None:
         names = set(TransactionalFormationRun.__dataclass_fields__)

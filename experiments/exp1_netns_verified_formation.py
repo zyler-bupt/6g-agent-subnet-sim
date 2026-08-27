@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -266,6 +267,8 @@ class NetnsPolicyTableBackend:
         self._topology = topology
         self._transactions: dict[str, _StagedPolicyTransaction] = {}
         self._used_tables: set[int] = set()
+        self._state_lock = threading.RLock()
+        self._transaction_locks: dict[str, threading.RLock] = {}
 
     def stage(
         self,
@@ -274,12 +277,28 @@ class NetnsPolicyTableBackend:
         *,
         ack_timeout_ms: int = 200,
     ) -> StageResult:
+        deadline = time.perf_counter() + ack_timeout_ms / 1000.0
+        with self._transaction_lock(transaction_id):
+            return self._stage_locked(
+                transaction_id, commands, ack_timeout_ms=ack_timeout_ms,
+                deadline=deadline,
+            )
+
+    def _stage_locked(
+        self,
+        transaction_id: str,
+        commands: Sequence[DeploymentCommand],
+        *,
+        ack_timeout_ms: int,
+        deadline: float,
+    ) -> StageResult:
         if not transaction_id:
             return StageResult(accepted=False, reason="transaction_id must not be empty")
-        if transaction_id in self._transactions:
-            return StageResult(accepted=False, reason="transaction is already staged")
         if ack_timeout_ms <= 0:
             return StageResult(accepted=False, reason="ack_timeout_ms must be positive")
+        with self._state_lock:
+            if transaction_id in self._transactions:
+                return StageResult(accepted=False, reason="transaction is already staged")
 
         table_by_pid: dict[int, int] = {}
         staged_commands: list[tuple[int | None, tuple[str, ...]]] = []
@@ -307,18 +326,21 @@ class NetnsPolicyTableBackend:
             snapshot=(),
             timeout_s=ack_timeout_ms / 1000.0,
         )
-        self._transactions[transaction_id] = staged
+        with self._state_lock:
+            self._transactions[transaction_id] = staged
         try:
-            staged.snapshot = self._readback(staged)
+            staged.snapshot = self._readback(staged, deadline=deadline)
         except (RuntimeError, subprocess.SubprocessError) as error:
-            self._transactions.pop(transaction_id, None)
+            with self._state_lock:
+                self._transactions.pop(transaction_id, None)
             self._release_tables(staged.table_by_pid)
             return StageResult(accepted=False, reason=_command_error(error))
         if any(
             record["routes"] or _rules_reference_table(record["rules"], record["table_id"])
             for record in staged.snapshot
         ):
-            self._transactions.pop(transaction_id, None)
+            with self._state_lock:
+                self._transactions.pop(transaction_id, None)
             self._release_tables(staged.table_by_pid)
             return StageResult(
                 accepted=False,
@@ -328,9 +350,8 @@ class NetnsPolicyTableBackend:
                 readback_after=staged.snapshot,
             )
         try:
-            stage_deadline = time.perf_counter() + staged.timeout_s
             self._topology._parallel_commands(
-                tuple(staged_commands), check=True, deadline=stage_deadline
+                tuple(staged_commands), check=True, deadline=deadline
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             cleanup = self._cleanup(staged)
@@ -343,7 +364,7 @@ class NetnsPolicyTableBackend:
                 readback_after=cleanup.readback_after,
             )
         try:
-            after = self._readback(staged)
+            after = self._readback(staged, deadline=deadline)
         except (RuntimeError, subprocess.SubprocessError) as error:
             cleanup = self._cleanup(staged)
             return StageResult(
@@ -365,7 +386,12 @@ class NetnsPolicyTableBackend:
         )
 
     def activate(self, transaction_id: str) -> CommandResult:
-        staged = self._transactions.get(transaction_id)
+        with self._transaction_lock(transaction_id):
+            return self._activate_locked(transaction_id)
+
+    def _activate_locked(self, transaction_id: str) -> CommandResult:
+        with self._state_lock:
+            staged = self._transactions.get(transaction_id)
         if staged is None or staged.cleaned:
             return CommandResult(accepted=False, reason="transaction is not staged")
         commands = tuple(staged.activation_commands)
@@ -401,32 +427,41 @@ class NetnsPolicyTableBackend:
         )
 
     def flush(self, transaction_id: str) -> CommandResult:
-        staged = self._transactions.get(transaction_id)
-        if staged is None or staged.cleaned:
-            return CommandResult(accepted=False, reason="transaction is not staged")
-        return self._cleanup(staged)
+        with self._transaction_lock(transaction_id):
+            with self._state_lock:
+                staged = self._transactions.get(transaction_id)
+            if staged is None or staged.cleaned:
+                return CommandResult(accepted=False, reason="transaction is not staged")
+            return self._cleanup(staged)
 
     def readback(self, transaction_id: str) -> tuple[dict[str, object], ...]:
-        staged = self._transactions.get(transaction_id)
-        if staged is None:
-            return ()
-        return self._readback(staged)
+        with self._transaction_lock(transaction_id):
+            with self._state_lock:
+                staged = self._transactions.get(transaction_id)
+            if staged is None:
+                return ()
+            return self._readback(staged)
+
+    def _transaction_lock(self, transaction_id: str) -> threading.RLock:
+        with self._state_lock:
+            return self._transaction_locks.setdefault(transaction_id, threading.RLock())
 
     def _readback(
-        self, staged: _StagedPolicyTransaction
+        self, staged: _StagedPolicyTransaction, *, deadline: float | None = None
     ) -> tuple[dict[str, object], ...]:
         records: list[dict[str, object]] = []
         for pid, table in sorted(staged.table_by_pid.items()):
             routes = _ip_json(
                 self._topology._run_ns(
                     pid, "ip", "-j", "route", "show", "table", str(table),
-                    timeout=staged.timeout_s,
+                    timeout=_remaining_timeout(deadline, staged.timeout_s),
                 ).stdout,
                 f"policy table {table} routes",
             )
             rules = _ip_json(
                 self._topology._run_ns(
-                    pid, "ip", "-j", "rule", "show", timeout=staged.timeout_s
+                    pid, "ip", "-j", "rule", "show",
+                    timeout=_remaining_timeout(deadline, staged.timeout_s),
                 ).stdout,
                 f"policy table {table} rules",
             )
@@ -459,15 +494,17 @@ class NetnsPolicyTableBackend:
     def _allocate_table(self, transaction_id: str, pid: int) -> int:
         digest = hashlib.sha256(f"{transaction_id}:{pid}".encode("utf-8")).digest()
         start = int.from_bytes(digest[:4], "big") % self._TABLE_RANGE
-        for offset in range(self._TABLE_RANGE):
-            table = self._TABLE_BASE + (start + offset) % self._TABLE_RANGE
-            if table not in self._used_tables:
-                self._used_tables.add(table)
-                return table
+        with self._state_lock:
+            for offset in range(self._TABLE_RANGE):
+                table = self._TABLE_BASE + (start + offset) % self._TABLE_RANGE
+                if table not in self._used_tables:
+                    self._used_tables.add(table)
+                    return table
         raise RuntimeError("no inactive policy table identifiers are available")
 
     def _release_tables(self, table_by_pid: Mapping[int, int]) -> None:
-        self._used_tables.difference_update(table_by_pid.values())
+        with self._state_lock:
+            self._used_tables.difference_update(table_by_pid.values())
 
     def _cleanup(self, staged: _StagedPolicyTransaction) -> CommandResult:
         try:
@@ -604,6 +641,15 @@ def _normalized_rule_network(value: str) -> ipaddress.IPv4Network | ipaddress.IP
 
 def _command_error(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
+
+
+def _remaining_timeout(deadline: float | None, fallback: float) -> float:
+    if deadline is None:
+        return fallback
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired("prepare deadline", 0.0)
+    return remaining
 
 
 def _combined_command_reason(primary: str, cleanup: str) -> str:
