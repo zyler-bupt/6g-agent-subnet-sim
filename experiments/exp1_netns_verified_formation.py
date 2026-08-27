@@ -386,7 +386,7 @@ class NetnsPolicyTableBackend:
 
     def flush(self, transaction_id: str) -> CommandResult:
         staged = self._transactions.get(transaction_id)
-        if staged is None:
+        if staged is None or staged.cleaned:
             return CommandResult(accepted=False, reason="transaction is not staged")
         return self._cleanup(staged)
 
@@ -458,8 +458,13 @@ class NetnsPolicyTableBackend:
             before = self._readback(staged)
         except (RuntimeError, subprocess.SubprocessError) as error:
             return CommandResult(accepted=False, reason=_command_error(error))
+        rules_by_pid = {
+            int(record["namespace_pid"]): record["rules"] for record in before
+        }
         removal_rules = tuple(
-            (pid, _delete_rule(command)) for pid, command in staged.activation_commands
+            (pid, _delete_rule(command))
+            for pid, command in staged.activation_commands
+            if _activation_rule_exists(rules_by_pid.get(pid, ()), command)
         )
         flush_tables = tuple(
             (pid, ("ip", "route", "flush", "table", str(table)))
@@ -497,6 +502,7 @@ class NetnsPolicyTableBackend:
                 readback_after=after,
             )
         staged.cleaned = True
+        self._release_tables(staged.table_by_pid)
         return CommandResult(
             accepted=True,
             commands_attempted=len(commands),
@@ -551,6 +557,16 @@ def _rules_reference_table(rules: Sequence[object], table_id: object) -> bool:
     return any(
         isinstance(rule, dict)
         and str(rule.get("table", rule.get("lookup", ""))) == expected
+        for rule in rules
+    )
+
+
+def _activation_rule_exists(rules: Sequence[object], command: tuple[str, ...]) -> bool:
+    return any(
+        isinstance(rule, dict)
+        and str(rule.get("priority")) == command[4]
+        and str(rule.get("to")) == command[6]
+        and str(rule.get("table", rule.get("lookup", ""))) == command[8]
         for rule in rules
     )
 

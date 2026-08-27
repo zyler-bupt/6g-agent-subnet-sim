@@ -163,8 +163,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         staged_command = executed[0][0][1]
         self.assertEqual(staged_command[:4], ("ip", "route", "replace", "table"))
         self.assertIn("lookup", executed[1][0][1])
-        self.assertEqual(executed[2][0][1][:4], ("ip", "rule", "del", "priority"))
-        self.assertEqual(executed[2][1][1][:4], ("ip", "route", "flush", "table"))
+        self.assertEqual(executed[2][0][1][:4], ("ip", "route", "flush", "table"))
 
     class _KernelTopology:
         def __init__(self) -> None:
@@ -174,6 +173,7 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
             self.readback_calls = 0
             self.fail_cleanup = False
             self.timeout_stage = False
+            self.strict_missing_rule_deletion = False
 
         def _run_ns(self, pid, *command, **_kwargs):
             self.readback_calls += 1
@@ -202,6 +202,12 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
                         {"priority": int(command[4]), "to": command[6], "table": command[8]}
                     )
                 elif command[:3] == ("ip", "rule", "del"):
+                    matching = [
+                        rule for rule in self.rules.get(pid, [])
+                        if str(rule.get("priority")) == command[4] and str(rule.get("table")) == command[8]
+                    ]
+                    if self.strict_missing_rule_deletion and not matching:
+                        raise subprocess.CalledProcessError(2, command)
                     self.rules[pid] = [
                         rule for rule in self.rules.get(pid, [])
                         if not (str(rule.get("priority")) == command[4] and str(rule.get("table")) == command[8])
@@ -264,6 +270,37 @@ class NetnsPolicyTableBackendTests(unittest.TestCase):
         self.assertFalse(staged.accepted)
         self.assertIn("TimeoutExpired", staged.reason)
         self.assertTrue(all(timeout == 0.2 for _, _, timeout in topology.executed))
+
+    def test_abort_of_unactivated_prepare_skips_absent_rule_deletion_and_releases_table(self) -> None:
+        topology = self._KernelTopology()
+        topology.strict_missing_rule_deletion = True
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+        table_id = staged.readback_before[0]["table_id"]
+
+        aborted = backend.flush("txn-1")
+
+        self.assertTrue(aborted.accepted)
+        self.assertFalse(any(
+            command[:3] == ("ip", "rule", "del")
+            for commands, _, _ in topology.executed for _, command in commands
+        ))
+        self.assertNotIn(table_id, backend._used_tables)
+
+    def test_stage_failure_cleanup_skips_absent_rule_deletion(self) -> None:
+        topology = self._KernelTopology()
+        topology.timeout_stage = True
+        topology.strict_missing_rule_deletion = True
+        backend = exp1.NetnsPolicyTableBackend(topology)
+
+        staged = backend.stage("txn-1", (self._command(),), ack_timeout_ms=200)
+
+        self.assertFalse(staged.accepted)
+        self.assertNotIn("cleanup: CalledProcessError", staged.reason)
+        self.assertFalse(any(
+            command[:3] == ("ip", "rule", "del")
+            for commands, _, _ in topology.executed for _, command in commands
+        ))
 
 
 class FormationTransactionProtocolTests(unittest.TestCase):
