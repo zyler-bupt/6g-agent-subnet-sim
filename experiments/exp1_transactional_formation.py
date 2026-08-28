@@ -7,7 +7,10 @@ import csv
 import hashlib
 import ipaddress
 import json
+import math
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -867,6 +870,248 @@ def _terminal_details(row: TransactionalFormationRun) -> dict[str, object]:
     }
 
 
+_RUN_INT_FIELDS = frozenset({
+    "run_sequence", "seed", "num_agents", "num_gateways", "num_business_edges",
+    "attempt_count", "prepare_attempts", "commit_attempts", "rollback_count",
+    "wasted_rule_commands",
+})
+_RUN_FLOAT_FIELDS = frozenset({
+    "partial_state_exposure_ms", "planning_latency_ms",
+    "common_infrastructure_latency_ms", "prepare_latency_ms", "commit_latency_ms",
+    "rollback_replan_latency_ms", "method_owned_formation_latency_ms",
+    "final_verification_latency_ms", "time_to_correct_formation_ms",
+})
+_RUN_OPTIONAL_FLOAT_FIELDS = frozenset({
+    "method_owned_formation_latency_ms", "time_to_correct_formation_ms",
+})
+_RUN_BOOL_FIELDS = frozenset({
+    "verified_correct", "infrastructure_cleanup_success", "success", "timeout",
+})
+_RESUME_TRANSACTION_STAGES = frozenset({
+    "TRANSACTION_PREPARE", "TRANSACTION_COMMIT", "TRANSACTION_ABORT",
+    "TRANSACTION_ROLLBACK",
+})
+
+
+def _persisted_run(row: Mapping[str, str]) -> TransactionalFormationRun:
+    expected = [field.name for field in fields(TransactionalFormationRun)]
+    if set(row) != set(expected):
+        raise RuntimeError("transactional resume row schema differs from frozen runner")
+    values: dict[str, object] = {}
+    for name in expected:
+        value = row[name]
+        try:
+            if name in _RUN_INT_FIELDS:
+                values[name] = int(value)
+            elif name in _RUN_BOOL_FIELDS:
+                if value.lower() not in {"true", "false"}:
+                    raise ValueError
+                values[name] = value.lower() == "true"
+            elif name in _RUN_FLOAT_FIELDS:
+                values[name] = (
+                    None if name in _RUN_OPTIONAL_FLOAT_FIELDS and value == ""
+                    else float(value)
+                )
+            else:
+                values[name] = value
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(f"transactional resume row has invalid {name}") from error
+    return TransactionalFormationRun(**values)  # type: ignore[arg-type]
+
+
+def _read_persisted_runs(path: Path) -> list[TransactionalFormationRun]:
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return [_persisted_run(row) for row in csv.DictReader(handle)]
+    except (OSError, csv.Error) as error:
+        raise RuntimeError("transactional resume runs.csv is unreadable") from error
+
+
+def _read_persisted_events(path: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise RuntimeError(
+                        f"transactional resume event line {line_number} is not an object"
+                    )
+                events.append(event)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("transactional resume attempts.jsonl is unreadable") from error
+    return events
+
+
+def _validate_resume_events(
+    rows: Sequence[TransactionalFormationRun], events: Sequence[Mapping[str, object]],
+) -> None:
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    block_order: list[str] = []
+    for event in events:
+        run_id = event.get("run_id")
+        if not isinstance(run_id, str):
+            raise RuntimeError("transactional resume event has no run_id")
+        if run_id not in grouped:
+            grouped[run_id] = []
+            block_order.append(run_id)
+        elif block_order[-1] != run_id:
+            raise RuntimeError("transactional resume event stream is split or reordered")
+        grouped[run_id].append(event)
+    expected_order = [row.run_id for row in rows]
+    if block_order != expected_order:
+        raise RuntimeError("transactional resume events do not match the persisted prefix")
+    for row in rows:
+        stream = grouped[row.run_id]
+        sequences: list[int] = []
+        operation_counts = {stage: 0 for stage in _RESUME_TRANSACTION_STAGES}
+        transaction_states: dict[str, str] = {}
+        for event in stream:
+            for field in (
+                "run_sequence", "method_id", "scenario_class", "seed", "num_agents",
+                "success", "timeout", "failure_stage", "failure_reason",
+            ):
+                if event.get(field) != getattr(row, field):
+                    raise RuntimeError(
+                        f"transactional resume event {field} contradicts its terminal row"
+                    )
+            try:
+                sequence = int(event["event_sequence"])
+                timestamp = float(event["timestamp"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("transactional resume event identity is invalid") from error
+            if sequence < 1 or not math.isfinite(timestamp):
+                raise RuntimeError("transactional resume event sequence/timestamp is invalid")
+            sequences.append(sequence)
+            stage = str(event.get("stage", ""))
+            if stage not in _RESUME_TRANSACTION_STAGES:
+                continue
+            operation_counts[stage] += 1
+            details = event.get("details")
+            if not isinstance(details, Mapping):
+                raise RuntimeError("transactional resume transaction event lacks details")
+            transaction_id = details.get("transaction_id")
+            accepted = details.get("accepted")
+            if not isinstance(transaction_id, str) or not isinstance(accepted, bool):
+                raise RuntimeError("transactional resume transaction event identity is invalid")
+            previous = transaction_states.get(transaction_id, "new")
+            if stage == "TRANSACTION_PREPARE":
+                if previous != "new":
+                    raise RuntimeError("transactional resume prepare has no causal predecessor")
+                transaction_states[transaction_id] = "prepared" if accepted else "rejected"
+            elif stage == "TRANSACTION_COMMIT":
+                if previous != "prepared":
+                    raise RuntimeError("transactional resume commit lacks accepted prepare")
+                transaction_states[transaction_id] = "committed" if accepted else "rejected"
+            elif stage == "TRANSACTION_ABORT":
+                if previous not in {"prepared", "rejected"}:
+                    raise RuntimeError("transactional resume abort lacks prepare/rejection")
+                transaction_states[transaction_id] = "aborted"
+            elif stage == "TRANSACTION_ROLLBACK":
+                if previous != "committed":
+                    raise RuntimeError("transactional resume rollback lacks commit")
+                transaction_states[transaction_id] = "rolled_back"
+        if sequences != list(range(1, len(stream) + 1)):
+            raise RuntimeError("transactional resume event sequences are not contiguous")
+        if not stream or stream[-1].get("stage") != "TERMINAL_ROW_READY":
+            raise RuntimeError("transactional resume prefix lacks a terminal event")
+        if stream[-1].get("details") != _terminal_details(row):
+            raise RuntimeError("transactional resume terminal event contradicts its row")
+        if sum(operation_counts.values()) != row.attempt_count:
+            raise RuntimeError("transactional resume attempt count contradicts events")
+        if operation_counts["TRANSACTION_PREPARE"] != row.prepare_attempts:
+            raise RuntimeError("transactional resume prepare count contradicts events")
+        if operation_counts["TRANSACTION_COMMIT"] != row.commit_attempts:
+            raise RuntimeError("transactional resume commit count contradicts events")
+        accepted_rollbacks = sum(
+            event.get("stage") == "TRANSACTION_ROLLBACK"
+            and isinstance(event.get("details"), Mapping)
+            and event["details"].get("accepted") is True  # type: ignore[index]
+            for event in stream
+        )
+        if accepted_rollbacks != row.rollback_count:
+            raise RuntimeError("transactional resume rollback count contradicts events")
+
+
+def _write_scope(path: Path, scope: Mapping[str, object]) -> None:
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(temporary, path)
+
+
+def _validate_execution_commit(output_dir: Path, expected: str | None, *, resume: bool) -> None:
+    path = output_dir / "execution_commit.txt"
+    if expected is None:
+        if resume:
+            raise RuntimeError("transactional resume requires an execution commit")
+        return
+    if re.fullmatch(r"[0-9a-f]{40}", expected) is None:
+        raise RuntimeError("transactional execution commit must be 40 lowercase hex characters")
+    if not resume and not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(expected + "\n")
+        except FileExistsError:
+            pass
+    if not path.is_file() or path.read_text(encoding="utf-8").strip() != expected:
+        raise RuntimeError("transactional execution commit provenance mismatch")
+
+
+def _resume_prefix(
+    config: Mapping[str, object], output_dir: Path,
+    schedule: Sequence[TransactionalScheduledRun], scope: Mapping[str, object],
+    invocation_grid: Mapping[str, object], frozen_grid: Mapping[str, object],
+) -> tuple[list[TransactionalFormationRun], list[dict[str, object]]]:
+    raw = output_dir / "raw"
+    rows = _read_persisted_runs(raw / "runs.csv")
+    events = _read_persisted_events(raw / "attempts.jsonl")
+    expected_scope = {
+        "protocol_id": config["experiment"]["protocol_id"],  # type: ignore[index]
+        "arm_id": config["experiment"]["arm_id"],  # type: ignore[index]
+        "phase": config["experiment"]["phase"],  # type: ignore[index]
+        "configuration_sha256": stable_fingerprint(config),
+        "frozen_config_grid": frozen_grid,
+        "invocation_grid": invocation_grid,
+        "invocation_grid_sha256": stable_fingerprint(invocation_grid),
+    }
+    if any(scope.get(key) != value for key, value in expected_scope.items()):
+        raise RuntimeError("transactional resume scope/config differs from frozen invocation")
+    if len(rows) > len(schedule):
+        raise RuntimeError("transactional resume prefix exceeds the frozen schedule")
+    for row, scheduled in zip(rows, schedule):
+        expected_key = (
+            scheduled.run_sequence, scheduled.seed, scheduled.num_agents,
+            scheduled.method_id, scheduled.scenario_class,
+        )
+        actual_key = (
+            row.run_sequence, row.seed, row.num_agents, row.method_id,
+            row.scenario_class,
+        )
+        if actual_key != expected_key:
+            raise RuntimeError("transactional resume prefix differs from frozen schedule")
+        if row.configuration_sha256 != stable_fingerprint(config):
+            raise RuntimeError("transactional resume prefix configuration drift")
+    _validate_resume_events(rows, events)
+    if int(scope.get("completed_rows", -1)) != len(rows):
+        raise RuntimeError("transactional resume scope does not close its persisted prefix")
+    if int(scope.get("row_count", -1)) != len(rows):
+        raise RuntimeError("transactional resume row count does not match its prefix")
+    if int(scope.get("event_count", -1)) != len(events):
+        raise RuntimeError("transactional resume event count does not match its prefix")
+    runs_hash = str(scope.get("runs_csv_sha256", ""))
+    events_hash = str(scope.get("attempts_jsonl_sha256", ""))
+    if runs_hash and runs_hash != hashlib.sha256((raw / "runs.csv").read_bytes()).hexdigest():
+        raise RuntimeError("transactional resume runs.csv hash drift")
+    if events_hash and events_hash != hashlib.sha256((raw / "attempts.jsonl").read_bytes()).hexdigest():
+        raise RuntimeError("transactional resume attempts.jsonl hash drift")
+    return rows, events
+
+
 def run_transactional_experiment(
     config: Mapping[str, object],
     output_dir: Path,
@@ -876,6 +1121,8 @@ def run_transactional_experiment(
     methods: Sequence[str] | None = None,
     scenario_classes: Sequence[str] | None = None,
     require_complete_grid: bool = False,
+    resume: bool = False,
+    execution_commit: str | None = None,
     topology_factory: Callable[[int, int], object] = nominal.ProcessNetnsTopology,
 ) -> list[TransactionalFormationRun]:
     """Execute and incrementally persist the exact invocation Cartesian grid."""
@@ -888,14 +1135,17 @@ def run_transactional_experiment(
     )
     frozen_schedule = build_transactional_schedule(config)
     raw_dir = output_dir / "raw"
-    if raw_dir.exists():
+    _validate_execution_commit(output_dir, execution_commit, resume=resume)
+    if raw_dir.exists() and not resume:
         raise RuntimeError(f"refusing to overwrite existing raw output: {raw_dir}")
-    raw_dir.mkdir(parents=True)
+    if not raw_dir.exists() and resume:
+        raise RuntimeError("transactional resume requires an existing raw prefix")
+    raw_dir.mkdir(parents=True, exist_ok=resume)
     runs_path = raw_dir / "runs.csv"
     attempts_path = raw_dir / "attempts.jsonl"
     scope_path = raw_dir / "measurement_scope.json"
     invocation_grid = _grid_payload(schedule)
-    scope = {
+    initial_scope = {
         "protocol_id": config["experiment"]["protocol_id"],  # type: ignore[index]
         "arm_id": config["experiment"]["arm_id"],  # type: ignore[index]
         "phase": config["experiment"]["phase"],  # type: ignore[index]
@@ -916,14 +1166,33 @@ def run_transactional_experiment(
         "runs_csv_sha256": "",
         "attempts_jsonl_sha256": "",
     }
-    scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with runs_path.open("w", encoding="utf-8", newline="") as handle:
-        csv.DictWriter(handle, fieldnames=[field.name for field in fields(TransactionalFormationRun)]).writeheader()
-    attempts_path.write_text("", encoding="utf-8")
+    if resume:
+        try:
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError("transactional resume measurement scope is unreadable") from error
+        if not isinstance(scope, dict):
+            raise RuntimeError("transactional resume measurement scope is not an object")
+        rows, _events = _resume_prefix(
+            config, output_dir, schedule, scope, invocation_grid,
+            _grid_payload(frozen_schedule),
+        )
+        if len(rows) == len(schedule):
+            if require_complete_grid:
+                _validate_complete_grid(rows, schedule)
+            return rows
+    else:
+        scope = initial_scope
+        _write_scope(scope_path, scope)
+        with runs_path.open("w", encoding="utf-8", newline="") as handle:
+            csv.DictWriter(
+                handle, fieldnames=[field.name for field in fields(TransactionalFormationRun)]
+            ).writeheader()
+        attempts_path.write_text("", encoding="utf-8")
+        rows = []
 
-    rows: list[TransactionalFormationRun] = []
     num_gateways = int(config["task"]["num_gateways"])  # type: ignore[index]
-    for scheduled in schedule:
+    for scheduled in schedule[len(rows):]:
         row: TransactionalFormationRun | None = None
         events: list[dict[str, object]] = []
         try:
@@ -964,6 +1233,12 @@ def run_transactional_experiment(
         _append_csv(runs_path, row)
         rows.append(row)
         scope["event_count"] = int(scope["event_count"]) + len(events)
+        scope["completed_rows"] = len(rows)
+        scope["row_count"] = len(rows)
+        scope["complete_grid_validated"] = False
+        scope["runs_csv_sha256"] = ""
+        scope["attempts_jsonl_sha256"] = ""
+        _write_scope(scope_path, scope)
 
     if require_complete_grid:
         _validate_complete_grid(rows, schedule)
@@ -972,7 +1247,7 @@ def run_transactional_experiment(
     scope["complete_grid_validated"] = bool(require_complete_grid)
     scope["runs_csv_sha256"] = hashlib.sha256(runs_path.read_bytes()).hexdigest()
     scope["attempts_jsonl_sha256"] = hashlib.sha256(attempts_path.read_bytes()).hexdigest()
-    scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_scope(scope_path, scope)
     return rows
 
 
@@ -1505,6 +1780,7 @@ def _validate_cli_invocation(
     *,
     has_overrides: bool,
     output_was_explicit: bool,
+    resume: bool = False,
 ) -> None:
     experiment = config.get("experiment")
     if not isinstance(experiment, Mapping):
@@ -1519,10 +1795,12 @@ def _validate_cli_invocation(
             raise RuntimeError(
                 "CLI overrides require an explicit noncanonical output directory"
             )
-    if (output_dir / "raw").exists():
+    if (output_dir / "raw").exists() and not resume:
         raise RuntimeError(
             f"refusing to overwrite existing raw output: {output_dir / 'raw'}"
         )
+    if resume and not (output_dir / "raw").exists():
+        raise RuntimeError("transactional --resume requires an existing raw prefix")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1534,6 +1812,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--methods", default="")
     parser.add_argument("--scenario-classes", default="")
     parser.add_argument("--require-complete-grid", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     return parser
 
 
@@ -1554,14 +1833,20 @@ def main() -> None:
         output_dir,
         has_overrides=any(value is not None for value in overrides.values()),
         output_was_explicit=args.output_dir is not None,
+        resume=args.resume,
     )
     if not nominal._inside_user_namespace():
         raise SystemExit(nominal._reexec_in_user_namespace(sys.argv[1:]))
     nominal.validate_isolated_outer_namespace()
+    current_commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"), check=True, text=True, capture_output=True,
+    ).stdout.strip()
     rows = run_transactional_experiment(
         config,
         output_dir,
         require_complete_grid=args.require_complete_grid,
+        resume=args.resume,
+        execution_commit=current_commit,
         **overrides,
     )
     successful = sum(row.success for row in rows)

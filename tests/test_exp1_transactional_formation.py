@@ -35,6 +35,10 @@ from scripts.aggregate_wcnc_final_v3 import (
     aggregate_transactional,
 )
 from scripts.normalize_wcnc_final_v3_exp1_transactional import _validate_attempt_events
+from scripts.publish_wcnc_final_v3_staging import (
+    publish_immutable_tree,
+    validate_staged_experiment,
+)
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -1660,6 +1664,114 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             self.assertEqual(event["failure_stage"], rows[0].failure_stage)
             self.assertEqual(event["failure_reason"], rows[0].failure_reason)
 
+    def test_interrupted_prefix_resumes_exactly_once(self) -> None:
+        """Resume must validate and append only the missing frozen invocation suffix."""
+        calls = 0
+
+        def interrupting_factory(num_agents, num_gateways):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt("simulated host interruption")
+            return _RecordingTransactionalTopology(num_agents, num_gateways)
+
+        overrides = {
+            "seeds": (9000, 9001), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            with self.assertRaises(KeyboardInterrupt):
+                run_transactional_experiment(
+                    self.pilot, output, topology_factory=interrupting_factory,
+                    execution_commit=commit, **overrides,
+                )
+
+            rows = run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, resume=True, require_complete_grid=True,
+                **overrides,
+            )
+            with (output / "raw" / "runs.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                persisted = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(persisted), 2)
+        self.assertEqual(len({row["run_id"] for row in persisted}), 2)
+
+    def test_resume_rejects_tampered_prefix_and_commit_mismatch(self) -> None:
+        """Neither a mutated prefix nor data from another execution commit is resumable."""
+        overrides = {
+            "seeds": (9000,), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, require_complete_grid=True, **overrides,
+            )
+            with self.assertRaisesRegex(RuntimeError, "commit"):
+                run_transactional_experiment(
+                    self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                    execution_commit="b" * 40, resume=True, **overrides,
+                )
+            runs_path = output / "raw" / "runs.csv"
+            with runs_path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["method_id"] = "cspf"
+            with runs_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(RuntimeError, "prefix|schedule"):
+                run_transactional_experiment(
+                    self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                    execution_commit=commit, resume=True, **overrides,
+                )
+
+    def test_complete_resume_is_validation_only(self) -> None:
+        """A complete authenticated grid must not execute or rewrite another trial."""
+        overrides = {
+            "seeds": (9000,), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, require_complete_grid=True, **overrides,
+            )
+            before = {
+                path.name: path.read_bytes() for path in (output / "raw").iterdir()
+            }
+
+            def forbidden_factory(*_args):
+                raise AssertionError("complete resume executed a new topology")
+
+            rows = run_transactional_experiment(
+                self.pilot, output, topology_factory=forbidden_factory,
+                execution_commit=commit, resume=True, require_complete_grid=True,
+                **overrides,
+            )
+            after = {
+                path.name: path.read_bytes() for path in (output / "raw").iterdir()
+            }
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(before, after)
+
     def test_logical_scenario_fingerprint_includes_frozen_transaction_policy(self) -> None:
         original = transactional._logical_scenario_fingerprint(
             self.formal, "command_rejection", 7, 8,
@@ -2165,6 +2277,93 @@ class RemoteLauncherContractTests(unittest.TestCase):
     METHODS = ("proposed", "cspf", "global_sfc_embedding")
     SIZES = (4, 8, 12, 16, 20)
 
+    def _staged_rows(self, experiment: str, seeds: tuple[int, ...]) -> list[dict[str, str]]:
+        repo = Path(__file__).resolve().parents[1]
+        config = yaml.safe_load((repo / "configs/wcnc_final_v3.yaml").read_text())
+        rows: list[dict[str, str]] = []
+        if experiment == "exp2":
+            points = [("", gamma, 0) for gamma in config["exp2"]["gamma"]]
+            methods_by_failure = {"": tuple(config["exp2"]["methods"])}
+        elif experiment == "exp3":
+            points = [("", scope, event) for scope in config["exp3"]["affected_dependency_scope_percent"] for event in range(5)]
+            methods_by_failure = {"": tuple(config["exp3"]["methods"])}
+        else:
+            points = []
+            methods_by_failure = config["exp4"]["methods_by_failure"]
+            for failure_type, key in (
+                ("link_failure", "link_affected_flow_ratio"),
+                ("agent_failure", "agent_dependency_closure_ratio"),
+                ("capacity_degradation", "capacity_ratio"),
+            ):
+                points.extend((failure_type, value, 0) for value in config["exp4"][key])
+        for failure_type, point, event in points:
+            for seed in seeds:
+                scenario = f"{experiment}:{failure_type}:{point}:{seed}:{event}"
+                for method in methods_by_failure[failure_type]:
+                    rows.append({
+                        "protocol_id": "wcnc_final_v3", "experiment": experiment,
+                        "seed": str(seed), "event_id": str(event), "method_id": method,
+                        "scenario_fingerprint": scenario, "failure_type": failure_type,
+                        "gamma": str(point) if experiment == "exp2" else "",
+                        "affected_scope_bucket_percent": str(point) if experiment == "exp3" else "",
+                        "failure_severity": str(point) if experiment == "exp4" else "",
+                        "result_mode": "transactional_simulation", "success": "true",
+                        "timeout": "false", "failure_reason": "",
+                    })
+        return rows
+
+    @staticmethod
+    def _write_staged_rows(root: Path, experiment: str, rows: list[dict[str, str]]) -> Path:
+        raw = root / "raw" / experiment
+        raw.mkdir(parents=True)
+        with (raw / "trials.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+            writer.writeheader(); writer.writerows(rows)
+        (raw / "execution_commit.txt").write_text("a" * 40 + "\n", encoding="utf-8")
+        return raw
+
+    def test_exp2_exp4_staging_validation_and_immutable_publication_are_behavioral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for experiment in ("exp2", "exp3", "exp4"):
+                rows = self._staged_rows(experiment, (0, 1))
+                source = self._write_staged_rows(base / experiment, experiment, rows)
+                validate_staged_experiment(source, experiment, seeds=(0, 1))
+                (source / "producer-extra.json").write_text("{}\n", encoding="utf-8")
+                target = base / "canonical" / experiment
+                target.mkdir(parents=True)
+                (target / "preserved.txt").write_text("old\n", encoding="utf-8")
+                publish_immutable_tree(source, target)
+                self.assertEqual((target / "preserved.txt").read_text(), "old\n")
+                self.assertEqual((target / "producer-extra.json").read_text(), "{}\n")
+                self.assertTrue((target / "execution_commit.txt").is_file())
+
+    def test_staging_validation_rejects_missing_duplicate_and_inapplicable_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); rows = self._staged_rows("exp4", (0,))
+            source = self._write_staged_rows(base / "missing", "exp4", rows[:-1])
+            with self.assertRaisesRegex(ValueError, "grid|row"):
+                validate_staged_experiment(source, "exp4", seeds=(0,))
+            source = self._write_staged_rows(base / "duplicate", "exp4", rows + [rows[0]])
+            with self.assertRaisesRegex(ValueError, "duplicate|grid"):
+                validate_staged_experiment(source, "exp4", seeds=(0,))
+            altered = [dict(row) for row in rows]; altered[0]["method_id"] = "sfc_restoration"
+            source = self._write_staged_rows(base / "inapplicable", "exp4", altered)
+            with self.assertRaisesRegex(ValueError, "method|grid"):
+                validate_staged_experiment(source, "exp4", seeds=(0,))
+
+    def test_immutable_tree_preflights_all_files_before_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); source = base / "source"; target = base / "target"
+            source.mkdir(); target.mkdir()
+            (source / "a.txt").write_text("new-a\n", encoding="utf-8")
+            (source / "z.txt").write_text("new-z\n", encoding="utf-8")
+            (target / "z.txt").write_text("old-z\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "overwrite"):
+                publish_immutable_tree(source, target)
+            self.assertFalse((target / "a.txt").exists())
+            self.assertEqual((target / "z.txt").read_text(), "old-z\n")
+
     @staticmethod
     def _configuration_hash(config_path: Path) -> str:
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -2182,7 +2381,16 @@ class RemoteLauncherContractTests(unittest.TestCase):
             "run_id", "num_agents", "seed", "method_id",
             "scenario_fingerprint", "configuration_sha256", "result_mode",
             "run_sequence", "block_index", "order_position",
-            "method_order_position",
+            "method_order_position", "task_received_at", "mapping_finished_at",
+            "traffic_control_started_at", "traffic_control_finished_at",
+            "route_install_started_at", "route_install_finished_at",
+            "activation_finished_at", "verification_started_at",
+            "ping_verify_started_at", "ping_verify_finished_at",
+            "iperf_verify_started_at", "data_plane_verified_at",
+            "num_business_edges", "control_messages", "rules_installed",
+            "ping_edges_total", "ping_edges_passed", "iperf_flows_total",
+            "iperf_flows_passed", "formation_failed", "success",
+            "failure_stage", "failure_reason",
         )
         rows = []
         events = []
@@ -2198,6 +2406,22 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 run_id = (
                     f"agents={scheduled.num_agents}:seed={scheduled.seed}:method={method}"
                 )
+                base = sequence * 10.0
+                times = {
+                    "traffic_control_started_at": base - 0.2,
+                    "traffic_control_finished_at": base - 0.1,
+                    "task_received_at": base,
+                    "mapping_finished_at": base + 0.1,
+                    "route_install_started_at": base + 0.1,
+                    "route_install_finished_at": base + 0.2,
+                    "activation_finished_at": base + 0.21,
+                    "verification_started_at": base + 0.21,
+                    "ping_verify_started_at": base + 0.21,
+                    "ping_verify_finished_at": base + 0.3,
+                    "iperf_verify_started_at": base + 0.3,
+                    "data_plane_verified_at": base + 0.4,
+                }
+                edges = max(1, scheduled.num_agents - 1)
                 rows.append({
                     "run_id": run_id,
                     "num_agents": scheduled.num_agents,
@@ -2210,13 +2434,59 @@ class RemoteLauncherContractTests(unittest.TestCase):
                     "block_index": scheduled.block_index,
                     "order_position": scheduled.order_position,
                     "method_order_position": method_position,
+                    **times,
+                    "num_business_edges": edges,
+                    "control_messages": 1,
+                    "rules_installed": edges,
+                    "ping_edges_total": edges,
+                    "ping_edges_passed": edges,
+                    "iperf_flows_total": edges,
+                    "iperf_flows_passed": edges,
+                    "formation_failed": "false",
+                    "success": "true",
+                    "failure_stage": "",
+                    "failure_reason": "",
                 })
-                events.extend((
-                    {"run_id": run_id, "timestamp": sequence * 2.0,
+                identity = {
+                    "run_id": run_id, "run_sequence": sequence,
+                    "block_index": scheduled.block_index,
+                    "order_position": scheduled.order_position,
+                    "method_order_position": method_position,
+                    "seed": scheduled.seed, "method_id": method,
+                    "num_agents": scheduled.num_agents,
+                }
+                run_events = [
+                    {**identity, "timestamp": base - 0.05,
+                     "stage": "BACKGROUND_PREPARED", "details": {"enabled": False}},
+                    {**identity, "timestamp": times["task_received_at"],
                      "stage": "TASK_RECEIVED", "details": {}},
-                    {"run_id": run_id, "timestamp": sequence * 2.0 + 1.0,
-                     "stage": "DATA_PLANE_VERIFIED", "details": {}},
-                ))
+                    {**identity, "timestamp": times["mapping_finished_at"],
+                     "stage": "MAPPING_FINISHED", "details": {"business_edges": edges}},
+                    {**identity, "timestamp": times["traffic_control_started_at"],
+                     "stage": "TRAFFIC_CONTROL_STARTED", "details": {"implementation": "Linux tc HTB + netem"}},
+                    {**identity, "timestamp": times["traffic_control_finished_at"],
+                     "stage": "TRAFFIC_CONTROL_FINISHED", "details": {"profiles": []}},
+                    {**identity, "timestamp": times["route_install_started_at"],
+                     "stage": "ROUTE_INSTALL_STARTED", "details": {
+                         "control_messages": 1, "rules_installed": edges,
+                         "deployment_batches": [], "commands": [],
+                     }},
+                    {**identity, "timestamp": times["route_install_finished_at"],
+                     "stage": "ROUTE_INSTALL_FINISHED", "details": {}},
+                    {**identity, "timestamp": times["activation_finished_at"],
+                     "stage": "ACTIVATION_FINISHED", "details": {"background_traffic": {"enabled": False}}},
+                    {**identity, "timestamp": times["ping_verify_started_at"],
+                     "stage": "PING_VERIFY_STARTED", "details": {}},
+                    {**identity, "timestamp": times["ping_verify_finished_at"],
+                     "stage": "PING_VERIFY_FINISHED", "details": {"passed": edges, "total": edges}},
+                    {**identity, "timestamp": times["iperf_verify_started_at"],
+                     "stage": "IPERF3_VERIFY_STARTED", "details": {}},
+                    {**identity, "timestamp": times["data_plane_verified_at"],
+                     "stage": "DATA_PLANE_VERIFIED", "details": {"passed": edges, "total": edges, "failure_reason": ""}},
+                    {**identity, "timestamp": times["data_plane_verified_at"],
+                     "stage": "BACKGROUND_TRAFFIC_RESULT", "details": {"enabled": False}},
+                ]
+                events.extend(sorted(run_events, key=lambda item: (item["timestamp"], item["stage"])))
         with runs.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
             writer.writeheader()
@@ -2246,10 +2516,25 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             rows[0]["failure_stage"] = "DATA_PLANE_VERIFICATION"
             rows[0]["success"] = "false"
+            rows[0]["formation_failed"] = "true"
+            rows[0]["failure_reason"] = "data_plane_verification_failed:ping=3/3:iperf3=2/3"
+            rows[0]["iperf_flows_passed"] = "2"
             with runs.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
                 writer.writeheader()
                 writer.writerows(rows)
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            for event in payloads:
+                if event["run_id"] == rows[0]["run_id"] and event["stage"] == "DATA_PLANE_VERIFIED":
+                    event["stage"] = "FORMATION_FAILED"
+                    event["details"] = {
+                        "passed": 2, "total": 3,
+                        "failure_reason": rows[0]["failure_reason"],
+                    }
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads),
+                encoding="utf-8",
+            )
 
             result = validate_completed_nominal_artifacts(runs, events, scope, config)
 
@@ -2296,6 +2581,49 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 writer.writerows(rows)
 
             with self.assertRaisesRegex(ValueError, "sequence|invocation"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_nominal_validator_rejects_fabricated_two_event_stream(self) -> None:
+        """Counts alone must not authenticate events lacking measured causal stages."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                first = next(csv.DictReader(handle))
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            kept = [
+                item for item in payloads
+                if item["run_id"] != first["run_id"]
+                or item["stage"] in {"TASK_RECEIVED", "DATA_PLANE_VERIFIED"}
+            ]
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in kept),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "mandatory|causal"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_nominal_validator_rejects_event_identity_and_timestamp_drift(self) -> None:
+        """An event from another run or a fabricated row timestamp must fail audit."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            payloads[0]["seed"] = 999
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "identity"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+            runs, events, scope, config = self._nominal_fixture(Path(directory) / "time")
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            target = next(item for item in payloads if item["stage"] == "MAPPING_FINISHED")
+            target["timestamp"] += 0.01
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "timestamp|monotonic"):
                 validate_completed_nominal_artifacts(runs, events, scope, config)
 
     def test_launcher_orders_transactional_smoke_pilot_formal_before_exp2(self) -> None:

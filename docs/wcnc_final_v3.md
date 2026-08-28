@@ -202,8 +202,12 @@ raw/exp1_transactional/execution_commit.txt
 The two `execution_commit.txt` files identify the commit that actually ran
 each measured arm; they need not be equal. An existing nominal staging tree
 may be reused only when the read-only validator proves the exact 750-row grid,
-paired fingerprints, frozen configuration hash, and complete terminal event
-provenance, and its original execution commit is present. A nonzero nominal
+paired fingerprints, frozen configuration hash, and causally complete event
+provenance (identity, stage timestamps, counts, and terminal outcome), and its
+original execution commit is present. An incomplete nominal attempt is never
+overwritten: it is retained and the launcher starts the next numbered tree in
+`exp1_netns_staging_v3_attempts/`, recording the validated selection in
+`environment/exp1_nominal_staging_path.txt`. A nonzero nominal
 runner exit caused by retained trial failures is not itself masked: the
 launcher continues only after this artifact audit and successful
 normalization. Missing, duplicated, fabricated, or hash-drifted artifacts fail
@@ -219,13 +223,27 @@ Exp2--Exp4 was still missing. Those experiments remain explicit post-Exp1
 steps; figures and the final PASS audit cannot complete until their formal raw
 artifacts exist.
 
-Individual transactional experiments can be resumed with:
+The Exp1 transactional runner appends only an exact schedule prefix. The
+launcher writes `execution_commit.txt` before the first trial. `--resume` is
+accepted only when it equals current `HEAD` and existing rows/events are a
+causally valid, unmodified prefix of the same frozen grid. A complete artifact
+is validation-only; a missing/skipped row, changed commit, or event tampering
+fails closed. A manual resume repeats the original command with `--resume`:
 
 ```bash
-.venv/bin/python -m experiments.run_wcnc_final_v3 --experiment exp2 --seeds 0:99
-.venv/bin/python -m experiments.run_wcnc_final_v3 --experiment exp3 --seeds 0:99
-.venv/bin/python -m experiments.run_wcnc_final_v3 --experiment exp4 --seeds 0:99
+sudo -E env -u WCNC_EXP1_INSIDE_USERNS -u WCNC_EXP1_PARENT_NETNS_INODE \
+  .venv/bin/python -m experiments.exp1_transactional_formation \
+  --config configs/exp1_transactional_formation_v1.yaml \
+  --output-dir results/paper/wcnc_final_v3/exp1_transactional_staging_v1 \
+  --require-complete-grid --resume
 ```
+
+Exp2--Exp4 run under
+`simulation_staging/<experiment>-<commit>-<protocol-signature>/`, never in
+canonical raw. Before immutable whole-tree publication, the launcher verifies
+the exact 0--99 seed grid, applicable method set, paired fingerprint, schema,
+and execution commit. Extra provenance files already in canonical raw remain;
+any same-name byte difference aborts before any staged file is copied.
 
 Aggregation, figures, and final integrity audit (in this order):
 

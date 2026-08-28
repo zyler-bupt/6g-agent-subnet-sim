@@ -34,6 +34,7 @@ SCOPED_SOURCES = (
     "experiments/paper_protocol.py", "experiments/run_wcnc_final_v3.py",
     "experiments/exp1_netns_verified_formation.py", "experiments/exp2_cross_layer_robustness.py",
     "experiments/exp1_transactional_formation.py",
+    "src/controller/formation_transactions.py",
     "experiments/exp3_business_elasticity.py", "experiments/exp4_failure.py",
     "src/controller/cross_layer_coordinator.py", "src/controller/business_reconfiguration.py",
     "src/controller/paper_failure_recovery.py", "src/simulation/demand_capacity_ratio.py",
@@ -42,6 +43,8 @@ SCOPED_SOURCES = (
     "scripts/aggregate_wcnc_final_v3.py", "scripts/plot_wcnc_final_v3.py",
     "scripts/normalize_wcnc_final_v3_exp1.py",
     "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
+    "scripts/validate_wcnc_final_v3_exp1_nominal.py",
+    "scripts/publish_wcnc_final_v3_staging.py",
     "scripts/audit_wcnc_final_v3.py",
     "scripts/run_wcnc_final_v3_remote.sh",
 )
@@ -55,6 +58,50 @@ def configuration_sha(path: Path) -> str:
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _git_blob_sha(repo: Path, commit: str, path: str) -> str:
+    if not __import__("re").fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError(f"invalid execution commit: {commit!r}")
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{path}"], cwd=repo,
+        capture_output=True, check=True,
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def _arm_evidence(
+    root: Path, repo: Path, *, arm_root: str, raw_path: str,
+    config_path: str, sources: tuple[str, ...],
+) -> dict[str, object]:
+    execution_commit = _execution_commit(root / arm_root)
+    source_hashes: dict[str, str] = {}
+    execution_config_hash = None
+    execution_schema_hash = None
+    if execution_commit is not None:
+        source_hashes = {
+            path: _git_blob_sha(repo, execution_commit, path) for path in sources
+        }
+        execution_config_hash = _git_blob_sha(repo, execution_commit, config_path)
+        execution_schema_hash = _git_blob_sha(
+            repo, execution_commit, "configs/wcnc_final_v3_raw_schema.json"
+        )
+        if execution_config_hash != sha(repo / config_path):
+            raise ValueError(f"{arm_root} execution config is incompatible with current frozen config")
+        if execution_schema_hash != sha(repo / "configs/wcnc_final_v3_raw_schema.json"):
+            raise ValueError(f"{arm_root} execution schema is incompatible with current frozen schema")
+    canonical_raw = root / raw_path
+    return {
+        "raw_path": raw_path,
+        "trials_sha256": sha(canonical_raw) if canonical_raw.exists() else None,
+        "config_sha256": sha(repo / config_path),
+        "schema_sha256": sha(repo / "configs/wcnc_final_v3_raw_schema.json"),
+        "execution_config_sha256": execution_config_hash,
+        "execution_schema_sha256": execution_schema_hash,
+        "source_hashes": source_hashes,
+        "execution_commit_path": f"{arm_root}/execution_commit.txt",
+        "execution_commit": execution_commit,
+    }
 
 
 def _truth(value: object) -> bool:
@@ -114,37 +161,21 @@ def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
         if path.is_file()
     } if (root / "figures").exists() else {}
     exp1_arms = {
-        "nominal": {
-            "raw_path": "raw/exp1/trials.csv",
-            "trials_sha256": sha(nominal_raw) if nominal_raw.exists() else None,
-            "config_sha256": sha(repo / "configs/exp1_netns_verified_formation_v3.yaml"),
-            "schema_sha256": sha(repo / "configs/wcnc_final_v3_raw_schema.json"),
-            "source_hashes": {
-                name: sha(repo / name)
-                for name in (
-                    "experiments/exp1_netns_verified_formation.py",
-                    "scripts/normalize_wcnc_final_v3_exp1.py",
-                )
-            },
-            # Missing execution evidence stays explicit rather than inferred.
-            "execution_commit_path": "raw/exp1/execution_commit.txt",
-            "execution_commit": _execution_commit(root / "raw" / "exp1"),
-        },
-        "exp1_transactional_v1": {
-            "raw_path": "raw/exp1_transactional/trials.csv",
-            "trials_sha256": sha(transactional_raw) if transactional_raw.exists() else None,
-            "config_sha256": sha(repo / "configs/exp1_transactional_formation_v1.yaml"),
-            "schema_sha256": sha(repo / "configs/wcnc_final_v3_raw_schema.json"),
-            "source_hashes": {
-                name: sha(repo / name)
-                for name in (
-                    "experiments/exp1_transactional_formation.py",
-                    "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
-                )
-            },
-            "execution_commit_path": "raw/exp1_transactional/execution_commit.txt",
-            "execution_commit": _execution_commit(root / "raw" / "exp1_transactional"),
-        },
+        "nominal": _arm_evidence(
+            root, repo, arm_root="raw/exp1", raw_path="raw/exp1/trials.csv",
+            config_path="configs/exp1_netns_verified_formation_v3.yaml",
+            sources=("experiments/exp1_netns_verified_formation.py",
+                     "scripts/normalize_wcnc_final_v3_exp1.py",
+                     "scripts/validate_wcnc_final_v3_exp1_nominal.py"),
+        ),
+        "exp1_transactional_v1": _arm_evidence(
+            root, repo, arm_root="raw/exp1_transactional",
+            raw_path="raw/exp1_transactional/trials.csv",
+            config_path="configs/exp1_transactional_formation_v1.yaml",
+            sources=("experiments/exp1_transactional_formation.py",
+                     "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
+                     "src/controller/formation_transactions.py"),
+        ),
     }
     return {
         "protocol_id": PROTOCOL_ID, "git_commit": commit,
@@ -425,6 +456,7 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                 "sources": {
                     "experiments/exp1_netns_verified_formation.py",
                     "scripts/normalize_wcnc_final_v3_exp1.py",
+                    "scripts/validate_wcnc_final_v3_exp1_nominal.py",
                 },
             },
             "exp1_transactional_v1": {
@@ -434,6 +466,7 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                 "sources": {
                     "experiments/exp1_transactional_formation.py",
                     "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
+                    "src/controller/formation_transactions.py",
                 },
             },
         }
@@ -442,6 +475,22 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
             arm_contract_ok = arm_paths == {contract["raw_path"] for contract in arm_contracts.values()}
             for arm_name, contract in arm_contracts.items():
                 entry = arms[arm_name]
+                recorded_commit = entry.get("execution_commit") if isinstance(entry, dict) else None
+                try:
+                    recorded_source_hashes = {
+                        name: _git_blob_sha(Path("."), str(recorded_commit), name)
+                        for name in contract["sources"]
+                    }
+                    recorded_config_hash = _git_blob_sha(
+                        Path("."), str(recorded_commit), contract["config_path"]
+                    )
+                    recorded_schema_hash = _git_blob_sha(
+                        Path("."), str(recorded_commit), "configs/wcnc_final_v3_raw_schema.json"
+                    )
+                except (ValueError, subprocess.CalledProcessError):
+                    recorded_source_hashes = {}
+                    recorded_config_hash = None
+                    recorded_schema_hash = None
                 arm_contract_ok = arm_contract_ok and isinstance(entry, dict) and (
                     entry.get("raw_path") == contract["raw_path"]
                     and entry.get("execution_commit_path") == contract["execution_commit_path"]
@@ -449,7 +498,11 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                     and entry.get("schema_sha256") == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
                     and isinstance(entry.get("source_hashes"), dict)
                     and set(entry["source_hashes"]) == contract["sources"]
-                    and all(sha(Path(name)) == digest for name, digest in entry["source_hashes"].items())
+                    and entry["source_hashes"] == recorded_source_hashes
+                    and entry.get("execution_config_sha256") == recorded_config_hash
+                    and entry.get("execution_schema_sha256") == recorded_schema_hash
+                    and recorded_config_hash == sha(Path(contract["config_path"]))
+                    and recorded_schema_hash == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
                 )
             arms_ok = arm_contract_ok
         checks["exp1_arm_manifest_complete"] = arms_ok

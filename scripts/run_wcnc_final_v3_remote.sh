@@ -34,6 +34,7 @@ protocol_files=(
   scripts/audit_wcnc_final_v3.py
   scripts/normalize_wcnc_final_v3_exp1.py
   scripts/normalize_wcnc_final_v3_exp1_transactional.py
+  scripts/publish_wcnc_final_v3_staging.py
   scripts/validate_wcnc_final_v3_exp1_nominal.py
   scripts/plot_wcnc_final_v3.py
   scripts/run_wcnc_final_v3_remote.sh
@@ -154,14 +155,43 @@ run_nominal_smoke() {
 }
 
 run_nominal_formal_with_readonly_audit() {
-  local output_dir="$protocol_root/exp1_netns_staging_v3"
+  local base_dir="$protocol_root/exp1_netns_staging_v3"
+  local attempts_dir="$protocol_root/exp1_netns_staging_v3_attempts"
+  local selection="$protocol_root/environment/exp1_nominal_staging_path.txt"
+  local output_dir=""
   local runner_status=0
-  if [[ ! -d "$output_dir/raw" ]]; then
+  if [[ -s "$selection" ]]; then
+    output_dir="$(<"$selection")"
+  else
+    local candidate
+    for candidate in "$base_dir" "$attempts_dir"/attempt-*; do
+      [[ -d "$candidate/raw" ]] || continue
+      if .venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
+          --runs "$candidate/raw/runs.csv" --events "$candidate/raw/events.jsonl" \
+          --scope "$candidate/raw/measurement_scope.json" \
+          --config configs/exp1_netns_verified_formation_v3.yaml >/dev/null 2>&1; then
+        output_dir="$candidate"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$output_dir" ]]; then
+    if [[ ! -e "$base_dir" ]]; then
+      output_dir="$base_dir"
+    else
+      mkdir -p "$attempts_dir"
+      local attempt=1
+      while [[ -e "$attempts_dir/attempt-$(printf '%03d' "$attempt")" ]]; do
+        attempt=$((attempt + 1))
+      done
+      output_dir="$attempts_dir/attempt-$(printf '%03d' "$attempt")"
+    fi
+    mkdir -p "$output_dir"
+    git rev-parse HEAD > "$output_dir/execution_commit.txt"
     run_netns_python "$output_dir" -m experiments.exp1_netns_verified_formation \
       --config configs/exp1_netns_verified_formation_v3.yaml \
       --output-dir "$output_dir" --seeds 0:49 --task-sizes 4,8,12,16,20 \
       --methods proposed,cspf,global_sfc_embedding || runner_status=$?
-    git rev-parse HEAD > "$output_dir/execution_commit.txt"
   fi
   test -s "$output_dir/execution_commit.txt" || {
     echo "nominal staging lacks its original execution commit provenance" >&2
@@ -171,6 +201,7 @@ run_nominal_formal_with_readonly_audit() {
     --runs "$output_dir/raw/runs.csv" --events "$output_dir/raw/events.jsonl" \
     --scope "$output_dir/raw/measurement_scope.json" \
     --config configs/exp1_netns_verified_formation_v3.yaml
+  printf '%s\n' "$output_dir" > "$selection"
   if [[ "$runner_status" -ne 0 ]]; then
     echo "nominal runner returned $runner_status; exact 750-row artifact/event audit passed" >&2
   fi
@@ -179,9 +210,23 @@ run_nominal_formal_with_readonly_audit() {
 run_exp1_transactional() {
   local output_dir="$1"
   shift
+  local resume_args=()
+  mkdir -p "$output_dir"
+  if [[ -d "$output_dir/raw" ]]; then
+    test -s "$output_dir/execution_commit.txt" || {
+      echo "transactional raw prefix lacks execution commit provenance" >&2
+      return 3
+    }
+    [[ "$(<"$output_dir/execution_commit.txt")" == "$current_commit" ]] || {
+      echo "transactional raw prefix execution commit differs from current HEAD" >&2
+      return 3
+    }
+    resume_args=(--resume)
+  else
+    git rev-parse HEAD > "$output_dir/execution_commit.txt"
+  fi
   run_netns_python "$output_dir" -m experiments.exp1_transactional_formation \
-    --output-dir "$output_dir" "$@"
-  git rev-parse HEAD > "$output_dir/execution_commit.txt"
+    --output-dir "$output_dir" "${resume_args[@]}" "$@"
 }
 
 publish_immutable_file() {
@@ -210,7 +255,11 @@ require_immutable_compatible() {
 }
 
 normalize_nominal_arm() {
-  local source_dir="$protocol_root/exp1_netns_staging_v3/raw"
+  local selection="$protocol_root/environment/exp1_nominal_staging_path.txt"
+  test -s "$selection" || { echo "nominal staging selection is missing" >&2; return 3; }
+  local selected_dir source_dir
+  selected_dir="$(<"$selection")"
+  source_dir="$selected_dir/raw"
   local staging="$protocol_root/normalization_staging/exp1"
   mkdir -p "$staging"
   .venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
@@ -220,7 +269,7 @@ normalize_nominal_arm() {
   .venv/bin/python scripts/normalize_wcnc_final_v3_exp1.py \
     --source "$source_dir/runs.csv" --target "$staging/trials.csv" \
     --config configs/exp1_netns_verified_formation_v3.yaml
-  cp -- "$protocol_root/exp1_netns_staging_v3/execution_commit.txt" \
+  cp -- "$selected_dir/execution_commit.txt" \
     "$staging/execution_commit.txt"
   require_immutable_compatible "$staging/trials.csv" "$protocol_root/raw/exp1/trials.csv"
   require_immutable_compatible "$staging/execution_commit.txt" "$protocol_root/raw/exp1/execution_commit.txt"
@@ -248,6 +297,32 @@ normalize_transactional_arm() {
   publish_immutable_file "$source_dir/attempts.jsonl" "$protocol_root/raw/exp1_transactional/attempts.jsonl"
   publish_immutable_file "$source_dir/measurement_scope.json" "$protocol_root/raw/exp1_transactional/measurement_scope.json"
   publish_immutable_file "$staging/execution_commit.txt" "$protocol_root/raw/exp1_transactional/execution_commit.txt"
+}
+
+run_and_publish_simulated_formal() {
+  local experiment="$1"
+  local staging_root="$protocol_root/simulation_staging/${experiment}-${current_commit}-${protocol_signature:0:12}"
+  local staged_raw="$staging_root/raw/$experiment"
+  local canonical_raw="$protocol_root/raw/$experiment"
+  mkdir -p "$staged_raw"
+  if [[ -e "$staged_raw/trials.csv" ]]; then
+    test -s "$staged_raw/execution_commit.txt" || {
+      echo "$experiment staging lacks execution commit provenance" >&2
+      return 3
+    }
+    [[ "$(<"$staged_raw/execution_commit.txt")" == "$current_commit" ]] || {
+      echo "$experiment staging execution commit differs from current HEAD" >&2
+      return 3
+    }
+  else
+    git rev-parse HEAD > "$staged_raw/execution_commit.txt"
+    .venv/bin/python -m experiments.run_wcnc_final_v3 \
+      --experiment "$experiment" --seeds 0:99 --output-root "$staging_root"
+  fi
+  .venv/bin/python scripts/publish_wcnc_final_v3_staging.py \
+    --source "$staged_raw" --target "$canonical_raw" \
+    --experiment "$experiment" --seeds 0:99 \
+    --config configs/wcnc_final_v3.yaml
 }
 
 verify_required_figures() {
@@ -291,7 +366,7 @@ verify_required_figures() {
 }
 
 run_step exp1_smoke "$protocol_root/pilot/exp1_netns_smoke_v3" run_nominal_smoke
-run_step exp1_nominal_formal "$protocol_root/exp1_netns_staging_v3" \
+run_step exp1_nominal_formal "$protocol_root/environment/exp1_nominal_staging_path.txt" \
   run_nominal_formal_with_readonly_audit
 run_step exp1_nominal_normalize "$protocol_root/raw/exp1" normalize_nominal_arm
 
@@ -313,15 +388,9 @@ run_step exp1_transactional_normalize "$protocol_root/raw/exp1_transactional" \
   normalize_transactional_arm
 
 # Exp2--Exp4 begin only after both measured Exp1 arms are immutable and complete.
-run_step exp2 "$protocol_root/raw/exp2" \
-  .venv/bin/python -m experiments.run_wcnc_final_v3 \
-  --experiment exp2 --seeds 0:99 --output-root "$protocol_root"
-run_step exp3 "$protocol_root/raw/exp3" \
-  .venv/bin/python -m experiments.run_wcnc_final_v3 \
-  --experiment exp3 --seeds 0:99 --output-root "$protocol_root"
-run_step exp4 "$protocol_root/raw/exp4" \
-  .venv/bin/python -m experiments.run_wcnc_final_v3 \
-  --experiment exp4 --seeds 0:99 --output-root "$protocol_root"
+run_step exp2 "$protocol_root/raw/exp2" run_and_publish_simulated_formal exp2
+run_step exp3 "$protocol_root/raw/exp3" run_and_publish_simulated_formal exp3
+run_step exp4 "$protocol_root/raw/exp4" run_and_publish_simulated_formal exp4
 
 run_always aggregate "$protocol_root/aggregated" \
   .venv/bin/python scripts/aggregate_wcnc_final_v3.py --root "$protocol_root"

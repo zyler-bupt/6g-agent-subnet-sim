@@ -1198,6 +1198,27 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             manifest = build_manifest(Path(directory), repo=Path("."))
         self.assertEqual(set(manifest["exp1_arms"]), {"nominal", "exp1_transactional_v1"})
 
+    def test_manifest_arm_sources_are_read_from_recorded_execution_commit(self) -> None:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for arm in ("exp1", "exp1_transactional"):
+                arm_root = root / "raw" / arm
+                arm_root.mkdir(parents=True)
+                (arm_root / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
+            manifest = build_manifest(root, repo=Path("."))
+        nominal = manifest["exp1_arms"]["nominal"]
+        self.assertIn("scripts/validate_wcnc_final_v3_exp1_nominal.py", nominal["source_hashes"])
+        transactional_arm = manifest["exp1_arms"]["exp1_transactional_v1"]
+        self.assertIn("src/controller/formation_transactions.py", transactional_arm["source_hashes"])
+        for path, digest in transactional_arm["source_hashes"].items():
+            blob = subprocess.run(
+                ["git", "show", f"{head}:{path}"], capture_output=True, check=True
+            ).stdout
+            self.assertEqual(digest, hashlib.sha256(blob).hexdigest())
+
     def test_exp1_baselines_have_executable_deterministic_planners(self) -> None:
         edges = (FormationEdge("e1", 0, 1, 1.0), FormationEdge("e2", 1, 2, 1.0))
         for method in ("proposed", "cspf", "global_sfc_embedding"):
