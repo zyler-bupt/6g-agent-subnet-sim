@@ -30,6 +30,7 @@ from scripts.normalize_wcnc_final_v3_exp1_transactional import (
 from scripts.plot_wcnc_final_v3 import load
 from scripts.audit_wcnc_final_v3 import (
     audit,
+    build_manifest,
     exp1_canonical_grid_errors,
     exp1_paired_eligibility_errors,
 )
@@ -1003,6 +1004,111 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("CSPF-based Formation", route_svg)
             self.assertNotIn("CSPF Recovery", route_svg)
+
+    def test_transactional_plot_reads_only_aggregate_csv_and_is_repeatable(self) -> None:
+        """Changing or removing raw inputs cannot affect transactional figures."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metrics = root / "aggregated" / "exp1_transactional" / "metrics.csv"
+            metrics.parent.mkdir(parents=True)
+            fields = (
+                "protocol_id", "experiment", "series", "method_id", "x_name",
+                "x_value", "metric", "estimate", "ci_low", "ci_high",
+                "numerator", "denominator", "interval", "raw_path", "raw_sha256",
+            )
+            with metrics.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for scenario_index, scenario in enumerate((
+                    "stale_version", "prepare_ack_timeout", "command_rejection",
+                )):
+                    for method_index, method in enumerate((
+                        "proposed", "cspf", "global_sfc_embedding",
+                    )):
+                        for size in (4, 8, 12, 16, 20):
+                            for metric_index, metric in enumerate((
+                                "method_owned_formation_latency_ms",
+                                "time_to_correct_formation_ms",
+                                "rollback_scope_objects",
+                                "wasted_rule_commands",
+                            )):
+                                estimate = float(
+                                    scenario_index + method_index + metric_index + size
+                                )
+                                writer.writerow({
+                                    "protocol_id": "wcnc_final_v3",
+                                    "experiment": "exp1_transactional",
+                                    "series": scenario,
+                                    "method_id": method, "x_name": "num_agents",
+                                    "x_value": size, "metric": metric,
+                                    "estimate": estimate, "ci_low": estimate - 0.25,
+                                    "ci_high": estimate + 0.25, "numerator": 50,
+                                    "denominator": 50,
+                                    "interval": "fixture", "raw_path": "not-read.csv",
+                                    "raw_sha256": "0" * 64,
+                                })
+            # An invalid raw tree proves the plotter consumes only metrics.csv.
+            raw = root / "raw" / "exp1_transactional" / "trials.csv"
+            raw.parent.mkdir(parents=True)
+            raw.write_text("this is not CSV\n", encoding="utf-8")
+            environment = dict(os.environ)
+            environment["MPLCONFIGDIR"] = str(root / "mpl")
+            command = (
+                sys.executable, "scripts/plot_wcnc_final_v3.py", "--root", str(root),
+                "--experiment", "exp1_transactional",
+            )
+            subprocess.run(command, check=True, env=environment, text=True, capture_output=True)
+            figures = root / "figures"
+            names = (
+                "method_owned_formation_latency_ms", "time_to_correct_formation_ms",
+                "rollback_scope_objects", "wasted_rule_commands",
+            )
+            first_hashes = {
+                f"{name}.{suffix}": hashlib.sha256(
+                    (figures / f"exp1_transactional_{name}.{suffix}").read_bytes()
+                ).hexdigest()
+                for name in names for suffix in ("pdf", "png", "svg")
+            }
+            self.assertFalse((figures / "exp1_transactional_success_rate.pdf").exists())
+            subprocess.run(command, check=True, env=environment, text=True, capture_output=True)
+            second_hashes = {
+                f"{name}.{suffix}": hashlib.sha256(
+                    (figures / f"exp1_transactional_{name}.{suffix}").read_bytes()
+                ).hexdigest()
+                for name in names for suffix in ("pdf", "png", "svg")
+            }
+            self.assertEqual(first_hashes, second_hashes)
+
+    def test_transactional_audit_rejects_paired_fingerprint_drift_and_missing_attempts(self) -> None:
+        """A formal arm needs paired fault/verifier fingerprints and causal evidence."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            raw = root / "raw" / "exp1_transactional" / "trials.csv"
+            raw.parent.mkdir(parents=True)
+            normalize_transactional(runs, raw, attempts_path=attempts)
+            with raw.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+                fields = list(rows[0])
+            rows[0]["fault_schedule_fingerprint"] = "d" * 64
+            rows[0]["verifier_fingerprint"] = "e" * 64
+            with raw.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader(); writer.writerows(rows)
+            report = audit(root, {
+                "raw_artifact_hashes": {
+                    str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (root / "raw").glob("**/*") if path.is_file()
+                },
+            })
+            self.assertIn("paired fault schedule drift", report["errors"])
+            self.assertIn("paired verifier fingerprint drift", report["errors"])
+            self.assertIn("missing transactional attempt provenance", report["errors"])
+
+    def test_manifest_keeps_nominal_and_transactional_execution_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = build_manifest(Path(directory), repo=Path("."))
+        self.assertEqual(set(manifest["exp1_arms"]), {"nominal", "exp1_transactional_v1"})
 
     def test_exp1_baselines_have_executable_deterministic_planners(self) -> None:
         edges = (FormationEdge("e1", 0, 1, 1.0), FormationEdge("e2", 1, 2, 1.0))
