@@ -4,7 +4,8 @@ The frozen protocol is `configs/wcnc_final_v3.yaml`. Formal artifacts live only 
 
 ## Result modes
 
-- Exp1: `measured_netns`; all three methods use the same Linux netns/veth/tc setup and the same ping/iperf3 verifier.
+- Exp1 nominal and `exp1_transactional_v1`: `measured_netns`; all three
+  methods use the same Linux netns/veth/tc setup and final ping/iperf3 verifier.
 - Exp2–Exp4: `transactional_simulation`; latency is simulation/control-plane time and is never described as physical testbed latency.
 
 ## Baselines
@@ -81,7 +82,32 @@ primary method comparison.  Success is retained in the aggregate table with
 Wilson numerator/denominator intervals, but Exp1 does not create a standalone
 success-rate main figure when the methods are near saturation.
 
-## Pilot
+## Exp1 transactional arm
+
+`exp1_transactional_v1` is a separate robustness arm, not a replacement for
+the nominal Exp1 artifact. It injects deterministic deployment faults
+(`stale_version`, `prepare_ack_timeout`, and `command_rejection`) at the common
+transaction executor after method planning. These are configuration-version,
+ACK, and command-installation faults. They are not Exp2 cross-layer capacity or
+proposal conflicts, and this runner does not use the Exp2 oracle.
+
+The primary latency values have distinct meanings:
+
+- `Method-owned formation latency` includes planning, prepare, commit,
+  rollback, and method-scoped retry, but excludes the common final verifier;
+- `Time to correct formation` ends only at the first verified-correct subnet
+  and therefore includes that verifier;
+- failed and timeout trials remain in unconditional success denominators;
+- time-to-correct is conditional on verified success and is interpreted next
+  to the unconditional counts in the aggregate table.
+
+The four transactional figures show measured method-owned latency,
+time-to-correct, rollback scope, and wasted rule commands. There is no
+standalone transactional success plot unless a future frozen protocol makes
+it scientifically informative. Plotting reads aggregated CSV only and neither
+smooths values nor enforces a trend.
+
+## Pilot and smoke commands
 
 ```bash
 .venv/bin/python scripts/pilot_wcnc_final_v3.py
@@ -89,6 +115,35 @@ success-rate main figure when the methods are near saturation.
 ```
 
 Pilot selection may inspect only oracle class coverage, runtime, and exceptions.
+
+Run the six-trial transactional Linux smoke (one class, one size, two seeds,
+three methods) with:
+
+```bash
+sudo -E env \
+  -u WCNC_EXP1_INSIDE_USERNS \
+  -u WCNC_EXP1_PARENT_NETNS_INODE \
+  .venv/bin/python -m experiments.exp1_transactional_formation \
+  --config configs/exp1_transactional_formation_pilot_v1.yaml \
+  --output-dir results/paper/wcnc_final_v3/pilot/exp1_transactional_smoke \
+  --seeds 9000:9001 \
+  --task-sizes 4 \
+  --scenario-classes command_rejection \
+  --methods proposed,cspf,global_sfc_embedding \
+  --require-complete-grid
+```
+
+Run the frozen 900-row pilot with no grid overrides:
+
+```bash
+sudo -E env \
+  -u WCNC_EXP1_INSIDE_USERNS \
+  -u WCNC_EXP1_PARENT_NETNS_INODE \
+  .venv/bin/python -m experiments.exp1_transactional_formation \
+  --config configs/exp1_transactional_formation_pilot_v1.yaml \
+  --output-dir results/paper/wcnc_final_v3/pilot/exp1_transactional \
+  --require-complete-grid
+```
 
 ## Formal run
 
@@ -116,6 +171,54 @@ sudo env \
 
 The runner rejects a manually forged namespace sentinel. Formal runs return non-zero if any trial fails or the expected grid is incomplete.
 
+The launcher runs, in order: nominal smoke and formal validation,
+transactional smoke, the 900-row transactional pilot, the 2250-row
+transactional formal arm, Exp2--Exp4, aggregation, plotting, and the final
+manifest audit. The exact transactional formal command is:
+
+```bash
+sudo -E env \
+  -u WCNC_EXP1_INSIDE_USERNS \
+  -u WCNC_EXP1_PARENT_NETNS_INODE \
+  .venv/bin/python -m experiments.exp1_transactional_formation \
+  --config configs/exp1_transactional_formation_v1.yaml \
+  --output-dir results/paper/wcnc_final_v3/exp1_transactional_staging_v1 \
+  --require-complete-grid
+```
+
+The formal methods, fault classes, sizes, and seeds are read from the frozen
+config; formal CLI grid overrides are forbidden. Normalization publishes into
+separate immutable directories:
+
+```text
+raw/exp1/trials.csv
+raw/exp1/execution_commit.txt
+raw/exp1_transactional/trials.csv
+raw/exp1_transactional/attempts.jsonl
+raw/exp1_transactional/normalization_manifest.json
+raw/exp1_transactional/execution_commit.txt
+```
+
+The two `execution_commit.txt` files identify the commit that actually ran
+each measured arm; they need not be equal. An existing nominal staging tree
+may be reused only when the read-only validator proves the exact 750-row grid,
+paired fingerprints, frozen configuration hash, and complete terminal event
+provenance, and its original execution commit is present. A nonzero nominal
+runner exit caused by retained trial failures is not itself masked: the
+launcher continues only after this artifact audit and successful
+normalization. Missing, duplicated, fabricated, or hash-drifted artifacts fail
+closed. Transactional command failures are never converted to success.
+
+Step markers bind the repository commit, complete protocol-file signature,
+exact command signature, and current artifact hash. Therefore a changed
+command or artifact cannot be skipped by an old marker. Canonical raw files
+are copied only when absent; an existing different file is never overwritten.
+
+At the time this orchestration was implemented, canonical formal raw for
+Exp2--Exp4 was still missing. Those experiments remain explicit post-Exp1
+steps; figures and the final PASS audit cannot complete until their formal raw
+artifacts exist.
+
 Individual transactional experiments can be resumed with:
 
 ```bash
@@ -124,12 +227,12 @@ Individual transactional experiments can be resumed with:
 .venv/bin/python -m experiments.run_wcnc_final_v3 --experiment exp4 --seeds 0:99
 ```
 
-Aggregation, integrity audit, and figures:
+Aggregation, figures, and final integrity audit (in this order):
 
 ```bash
 .venv/bin/python scripts/aggregate_wcnc_final_v3.py
-.venv/bin/python scripts/audit_wcnc_final_v3.py --write-manifest
 MPLCONFIGDIR=/tmp/wcnc-v3-mpl .venv/bin/python scripts/plot_wcnc_final_v3.py
+.venv/bin/python scripts/audit_wcnc_final_v3.py --write-manifest
 ```
 
 The plotter accepts only aggregated rows tagged `wcnc_final_v3` and rejects paths containing `demo` or `synthetic`.

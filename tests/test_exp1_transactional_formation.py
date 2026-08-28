@@ -9,13 +9,18 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 import experiments.exp1_netns_verified_formation as exp1
 import experiments.exp1_transactional_formation as transactional
+from scripts.validate_wcnc_final_v3_exp1_nominal import (
+    validate_completed_nominal_artifacts,
+)
 from experiments.exp1_netns_verified_formation import FormationEdge
 from experiments.exp1_transactional_formation import (
     TransactionalFormationRun,
@@ -2154,3 +2159,217 @@ class TransactionalAggregationTests(unittest.TestCase):
         self.assertEqual(metric["excluded_pairs"], "1")
         self.assertEqual(metric["estimate"], "")
         self.assertEqual(metric["exclusion_reason"], "not_successful_verified_both")
+
+
+class RemoteLauncherContractTests(unittest.TestCase):
+    METHODS = ("proposed", "cspf", "global_sfc_embedding")
+    SIZES = (4, 8, 12, 16, 20)
+
+    @staticmethod
+    def _configuration_hash(config_path: Path) -> str:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _nominal_fixture(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        repo = Path(__file__).resolve().parents[1]
+        config = repo / "configs" / "exp1_netns_verified_formation_v3.yaml"
+        configuration_hash = self._configuration_hash(config)
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        runs = raw / "runs.csv"
+        fields = (
+            "run_id", "num_agents", "seed", "method_id",
+            "scenario_fingerprint", "configuration_sha256", "result_mode",
+            "run_sequence", "block_index", "order_position",
+            "method_order_position",
+        )
+        rows = []
+        events = []
+        config_payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+        schedule = exp1.build_experiment_schedule(config_payload, tuple(range(50)))
+        for scheduled in schedule:
+            fingerprint = f"scenario-{scheduled.num_agents}-{scheduled.seed}"
+            method_order = exp1.counterbalanced_method_order(
+                self.METHODS, scheduled.seed
+            )
+            for method_position, method in enumerate(method_order):
+                sequence = (scheduled.run_sequence - 1) * 3 + method_position + 1
+                run_id = (
+                    f"agents={scheduled.num_agents}:seed={scheduled.seed}:method={method}"
+                )
+                rows.append({
+                    "run_id": run_id,
+                    "num_agents": scheduled.num_agents,
+                    "seed": scheduled.seed,
+                    "method_id": method,
+                    "scenario_fingerprint": fingerprint,
+                    "configuration_sha256": configuration_hash,
+                    "result_mode": "real_linux_netns_veth_tc_data_plane",
+                    "run_sequence": sequence,
+                    "block_index": scheduled.block_index,
+                    "order_position": scheduled.order_position,
+                    "method_order_position": method_position,
+                })
+                events.extend((
+                    {"run_id": run_id, "timestamp": sequence * 2.0,
+                     "stage": "TASK_RECEIVED", "details": {}},
+                    {"run_id": run_id, "timestamp": sequence * 2.0 + 1.0,
+                     "stage": "DATA_PLANE_VERIFIED", "details": {}},
+                ))
+        with runs.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+        attempts = raw / "events.jsonl"
+        attempts.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        scope = raw / "measurement_scope.json"
+        scope.write_text(json.dumps({
+            "configuration_sha256": configuration_hash,
+            "seeds": list(range(50)),
+            "task_sizes": list(self.SIZES),
+            "methods": list(self.METHODS),
+            "schedule": [asdict(item) for item in schedule],
+            "schedule_policy": "five-seed blocks with Latin task-size rotation",
+            "method_schedule_policy": "paired-seed deterministic Latin rotation",
+        }), encoding="utf-8")
+        return runs, attempts, scope, config
+
+    def test_complete_nominal_grid_can_continue_despite_trial_failures(self) -> None:
+        """A nonzero nominal runner is acceptable only after its artifacts pass audit."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["failure_stage"] = "DATA_PLANE_VERIFICATION"
+            rows[0]["success"] = "false"
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+
+            result = validate_completed_nominal_artifacts(runs, events, scope, config)
+
+        self.assertTrue(result.complete)
+        self.assertEqual(result.raw_rows, 750)
+        self.assertEqual(result.event_runs, 750)
+
+    def test_incomplete_or_fabricated_nominal_artifacts_fail_closed(self) -> None:
+        """Deleting a grid row or its terminal event must block continuation."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))[:-1]
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(ValueError, "750|grid"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+            runs, events, scope, config = self._nominal_fixture(Path(directory) / "fake")
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            payloads = [item for item in payloads if not (
+                item["run_id"] == "agents=20:seed=49:method=global_sfc_embedding"
+                and item["stage"] == "DATA_PLANE_VERIFIED"
+            )]
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "terminal event"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_nominal_validator_rejects_invocation_sequence_drift(self) -> None:
+        """A complete Cartesian set with fabricated execution order is not canonical."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["run_sequence"] = rows[1]["run_sequence"]
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+
+            with self.assertRaisesRegex(ValueError, "sequence|invocation"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_launcher_orders_transactional_smoke_pilot_formal_before_exp2(self) -> None:
+        """Reordering Exp2 ahead of the measured transactional arm breaks provenance."""
+        script = Path("scripts/run_wcnc_final_v3_remote.sh").read_text(encoding="utf-8")
+        positions = [
+            script.index("run_step exp1_transactional_smoke"),
+            script.index("run_step exp1_transactional_pilot"),
+            script.index("run_step exp1_transactional_formal"),
+            script.index("run_step exp1_transactional_normalize"),
+            script.index("run_step exp2"),
+        ]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("--seeds 9000:9001", script)
+        self.assertIn("--task-sizes 4", script)
+        self.assertIn("--scenario-classes command_rejection", script)
+        self.assertIn("--methods proposed,cspf,global_sfc_embedding", script)
+        self.assertIn("configs/exp1_transactional_formation_pilot_v1.yaml", script)
+        self.assertIn("configs/exp1_transactional_formation_v1.yaml", script)
+        self.assertIn("--require-complete-grid", script)
+
+    def test_launcher_preserves_separate_arm_provenance_and_failure_status(self) -> None:
+        """Sharing commit evidence or masking transactional failure invalidates the arms."""
+        script = Path("scripts/run_wcnc_final_v3_remote.sh").read_text(encoding="utf-8")
+        self.assertIn('raw/exp1/execution_commit.txt', script)
+        self.assertIn('raw/exp1_transactional/execution_commit.txt', script)
+        self.assertIn("validate_wcnc_final_v3_exp1_nominal.py", script)
+        self.assertNotIn("run_exp1_transactional ||", script)
+        self.assertNotIn("exp1_transactional_formal ||", script)
+
+    def test_launcher_plots_before_final_manifest_audit(self) -> None:
+        """The final manifest cannot bind figure hashes if audit runs before plotting."""
+        script = Path("scripts/run_wcnc_final_v3_remote.sh").read_text(encoding="utf-8")
+        self.assertLess(
+            script.index("run_always figures"),
+            script.index("run_always final_audit"),
+        )
+        self.assertIn("--write-manifest", script[script.index("run_always final_audit"):])
+
+    def test_launcher_requires_explicit_twenty_figure_families(self) -> None:
+        """A count-only check can accept missing figures plus unrelated stale files."""
+        script = Path("scripts/run_wcnc_final_v3_remote.sh").read_text(encoding="utf-8")
+        expected = (
+            "exp1_conditional_verified_latency_ms",
+            "exp1_route_install_latency_ms",
+            "exp2_feasible_qos_satisfaction_rate",
+            "exp2_pre_verification_correct_decision_rate",
+            "exp3_success_rate",
+            "exp3_conditional_verified_latency_ms",
+            "exp3_modification_scope_ratio",
+            "exp4_link_failure_success_rate",
+            "exp4_link_failure_conditional_verified_latency_ms",
+            "exp4_link_failure_modification_scope_ratio",
+            "exp4_agent_failure_success_rate",
+            "exp4_agent_failure_conditional_verified_latency_ms",
+            "exp4_agent_failure_modification_scope_ratio",
+            "exp4_capacity_degradation_success_rate",
+            "exp4_capacity_degradation_conditional_verified_latency_ms",
+            "exp4_capacity_degradation_modification_scope_ratio",
+            "exp1_transactional_method_owned_formation_latency_ms",
+            "exp1_transactional_time_to_correct_formation_ms",
+            "exp1_transactional_rollback_scope_objects",
+            "exp1_transactional_wasted_rule_commands",
+        )
+        for stem in expected:
+            self.assertIn(stem, script)
+        self.assertIn("exp1_transactional_success_rate", script)
+        self.assertNotIn('[[ "$count" -eq 16 ]]', script)
+
+    def test_step_markers_bind_commit_protocol_command_and_artifact(self) -> None:
+        """A stale marker must not skip a changed command or changed artifact."""
+        script = Path("scripts/run_wcnc_final_v3_remote.sh").read_text(encoding="utf-8")
+        for field in (
+            "git_commit=$current_commit", "protocol_signature=$protocol_signature",
+            "command_signature=$command_signature", "artifact_hash=$current_artifact_hash",
+        ):
+            self.assertIn(field, script)
