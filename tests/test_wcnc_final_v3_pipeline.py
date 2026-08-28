@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import json
@@ -22,7 +23,10 @@ from experiments.exp1_transactional_formation import (
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
 from scripts.normalize_wcnc_final_v3_exp1 import _configuration_sha256, normalize
-from scripts.normalize_wcnc_final_v3_exp1_transactional import normalize_transactional
+from scripts.normalize_wcnc_final_v3_exp1_transactional import (
+    _validate_attempt_events,
+    normalize_transactional,
+)
 from scripts.plot_wcnc_final_v3 import load
 from scripts.audit_wcnc_final_v3 import (
     audit,
@@ -32,6 +36,174 @@ from scripts.audit_wcnc_final_v3 import (
 
 
 class WcncFinalV3PipelineTests(unittest.TestCase):
+    @staticmethod
+    def _causal_transactional_stream() -> tuple[dict[str, str], list[dict[str, object]]]:
+        row = {
+            "run_id": "causal-run", "run_sequence": "1", "method_id": "proposed",
+            "scenario_class": "stale_version", "seed": "0", "num_agents": "4",
+            "success": "True", "timeout": "False", "failure_stage": "",
+            "failure_reason": "", "verified_correct": "True",
+            "infrastructure_cleanup_success": "True", "cleanup_failure_reason": "",
+            "logical_fault_target": "edge-0@gateway-0",
+            "fault_schedule_fingerprint": stable_fingerprint({
+                "fault_class": "stale_version", "num_agents": 4, "seed": 0,
+                "logical_edge_id": "edge-0", "gateway_index": 0,
+                "reject_attempt": 1,
+            }),
+            "attempt_count": "4", "prepare_attempts": "2",
+            "commit_attempts": "1", "rollback_count": "0",
+        }
+        identity = {
+            "run_id": row["run_id"], "run_sequence": 1, "method_id": "proposed",
+            "scenario_class": "stale_version", "seed": 0, "num_agents": 4,
+            "success": True, "timeout": False, "failure_stage": "",
+            "failure_reason": "",
+        }
+
+        def transaction(
+            operation: str, transaction_id: str, attempt_index: int,
+            *, accepted: bool, phase: str,
+        ) -> dict[str, object]:
+            return {
+                **identity, "stage": f"TRANSACTION_{operation.upper()}",
+                "details": {
+                    "transaction_id": transaction_id,
+                    "attempt_index": attempt_index, "operation": operation,
+                    "phase": phase, "accepted": accepted,
+                    "started_ns": 1, "ended_ns": 2,
+                    "affected_objects": ["edge-0"], "commands_attempted": 1,
+                    "reason": "fixture fault" if not accepted else "",
+                    "readback_before_fingerprint": "r" * 64,
+                    "readback_after_fingerprint": "s" * 64,
+                },
+            }
+
+        events = [
+            {**identity, "stage": "TASK_RECEIVED", "details": {}},
+            {**identity, "stage": "PLAN_FINISHED", "details": {
+                "method_id": "proposed", "fault_schedule_visible": False,
+            }},
+            {**identity, "stage": "COMMON_INFRASTRUCTURE_INSTALLED", "details": {
+                "fingerprint": "c" * 64, "provenance": "fixture",
+                "command_count": 1, "method_owned": False,
+            }},
+            {**identity, "stage": "FAULT_INJECTED", "details": {
+                "fault_class": "stale_version", "fault_attempt": 1,
+                "logical_edge_id": "edge-0", "gateway_index": 0,
+                "mechanism": "observed_version_mismatch", "reason": "fixture fault",
+            }},
+            transaction("prepare", "tx-0", 0, accepted=False, phase="rejected"),
+            transaction("abort", "tx-0", 0, accepted=True, phase="aborted"),
+            transaction("prepare", "tx-1", 1, accepted=True, phase="prepared"),
+            transaction("commit", "tx-1", 1, accepted=True, phase="committed"),
+            {**identity, "stage": "VERIFIED_CORRECT", "details": {}},
+            {**identity, "stage": "TERMINAL_ROW_READY", "details": {
+                "success": True, "timeout": False, "failure_stage": "",
+                "failure_reason": "", "verified_correct": True,
+            }},
+        ]
+        WcncFinalV3PipelineTests._resequence_events(events)
+        return row, events
+
+    @staticmethod
+    def _resequence_events(events: list[dict[str, object]]) -> None:
+        for sequence, event in enumerate(events, start=1):
+            event["event_sequence"] = sequence
+            event["timestamp"] = float(sequence)
+
+    def test_transactional_event_causality_rejects_invalid_operation_graphs(self) -> None:
+        cases = (
+            "commit_without_prepare", "commit_after_abort", "rollback_without_commit",
+            "duplicate_prepare", "duplicate_commit", "success_without_accepted_commit",
+            "wrong_fault_mechanism", "missing_fault", "fault_after_rejection",
+            "transaction_before_common", "verified_before_commit",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                row, events = self._causal_transactional_stream()
+                row = copy.deepcopy(row)
+                events = copy.deepcopy(events)
+                if case == "commit_without_prepare":
+                    del events[6]
+                    row["attempt_count"] = "3"
+                    row["prepare_attempts"] = "1"
+                elif case == "commit_after_abort":
+                    abort = copy.deepcopy(events[5])
+                    abort["details"]["transaction_id"] = "tx-1"
+                    abort["details"]["attempt_index"] = 1
+                    events.insert(7, abort)
+                    row["attempt_count"] = "5"
+                elif case == "rollback_without_commit":
+                    events[7]["stage"] = "TRANSACTION_ROLLBACK"
+                    events[7]["details"].update({
+                        "operation": "rollback", "phase": "rolled_back",
+                    })
+                    row["commit_attempts"] = "0"
+                    row["rollback_count"] = "1"
+                elif case == "duplicate_prepare":
+                    events.insert(7, copy.deepcopy(events[6]))
+                    row["attempt_count"] = "5"
+                    row["prepare_attempts"] = "3"
+                elif case == "duplicate_commit":
+                    events.insert(8, copy.deepcopy(events[7]))
+                    row["attempt_count"] = "5"
+                    row["commit_attempts"] = "2"
+                elif case == "success_without_accepted_commit":
+                    events[7]["details"].update({
+                        "accepted": False, "phase": "rejected",
+                        "reason": "commit rejected",
+                    })
+                elif case == "wrong_fault_mechanism":
+                    events[3]["details"]["mechanism"] = "executor_rejection"
+                elif case == "missing_fault":
+                    del events[3]
+                elif case == "fault_after_rejection":
+                    fault = events.pop(3)
+                    events.insert(5, fault)
+                elif case == "transaction_before_common":
+                    common = events.pop(2)
+                    events.insert(5, common)
+                else:
+                    verified = events.pop(8)
+                    events.insert(7, verified)
+                self._resequence_events(events)
+
+                with self.assertRaises(ValueError):
+                    _validate_attempt_events([row], events)
+
+    def test_transactional_event_causality_accepts_retry_and_pre_prepare_failure(self) -> None:
+        row, events = self._causal_transactional_stream()
+        first_attempt = _validate_attempt_events([row], events)
+        self.assertFalse(first_attempt[row["run_id"]])
+
+        failed_row = copy.deepcopy(row)
+        failed_row.update({
+            "success": "False", "failure_stage": "PLAN",
+            "failure_reason": "RuntimeError: plan failed", "verified_correct": "False",
+            "attempt_count": "0", "prepare_attempts": "0", "commit_attempts": "0",
+        })
+        identity = {
+            "run_id": failed_row["run_id"], "run_sequence": 1,
+            "method_id": failed_row["method_id"],
+            "scenario_class": failed_row["scenario_class"], "seed": 0,
+            "num_agents": 4, "success": False, "timeout": False,
+            "failure_stage": "PLAN", "failure_reason": "RuntimeError: plan failed",
+        }
+        failed_events = [
+            {**identity, "stage": "TASK_RECEIVED", "details": {}},
+            {**identity, "stage": "TRIAL_FAILED", "details": {
+                "failure_stage": "PLAN", "reason": "RuntimeError: plan failed",
+            }},
+            {**identity, "stage": "TERMINAL_ROW_READY", "details": {
+                "success": False, "timeout": False, "failure_stage": "PLAN",
+                "failure_reason": "RuntimeError: plan failed", "verified_correct": False,
+            }},
+        ]
+        self._resequence_events(failed_events)
+
+        pre_prepare = _validate_attempt_events([failed_row], failed_events)
+        self.assertFalse(pre_prepare[failed_row["run_id"]])
+
     def _write_task4_shaped_transactional_artifacts(self, root: Path) -> tuple[Path, Path]:
         config = load_transactional_config(
             Path("configs/exp1_transactional_formation_v1.yaml")
@@ -80,16 +252,19 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     "seed": scheduled.seed, "num_agents": scheduled.num_agents,
                     "num_gateways": 4, "num_business_edges": 2,
                     "method_id": scheduled.method_id,
-                    "fault_schedule_fingerprint": hashlib.sha256(
-                        f"fault|{scheduled.scenario_class}|{scheduled.num_agents}|{scheduled.seed}".encode()
-                    ).hexdigest(),
+                    "fault_schedule_fingerprint": stable_fingerprint({
+                        "fault_class": scheduled.scenario_class,
+                        "num_agents": scheduled.num_agents, "seed": scheduled.seed,
+                        "logical_edge_id": "edge-0", "gateway_index": 0,
+                        "reject_attempt": 1,
+                    }),
                     "logical_fault_target": "edge-0@gateway-0",
                     "observation_version_fingerprint": "o" * 64,
                     "verifier_fingerprint": "v" * 64,
                     "common_infrastructure_fingerprint": "c" * 64,
                     "common_infrastructure_provenance": "runner",
                     "configuration_sha256": stable_fingerprint(config),
-                    "attempt_count": 2, "prepare_attempts": 1, "commit_attempts": 1,
+                    "attempt_count": 4, "prepare_attempts": 2, "commit_attempts": 1,
                     "rollback_count": 0, "rollback_scope_objects": "[]",
                     "wasted_rule_commands": 0, "partial_state_exposure_ms": 0.0,
                     "planning_latency_ms": 1.0, "common_infrastructure_latency_ms": 1.0,
@@ -116,6 +291,16 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     {**identity, "event_sequence": 1, "timestamp": 1.0,
                      "stage": "TASK_RECEIVED", "details": {}},
                     {**identity, "event_sequence": 2, "timestamp": 2.0,
+                     "stage": "PLAN_FINISHED", "details": {
+                         "method_id": scheduled.method_id,
+                         "fault_schedule_visible": False,
+                     }},
+                    {**identity, "event_sequence": 3, "timestamp": 3.0,
+                     "stage": "COMMON_INFRASTRUCTURE_INSTALLED", "details": {
+                         "fingerprint": "c" * 64, "provenance": "runner",
+                         "command_count": 1, "method_owned": False,
+                     }},
+                    {**identity, "event_sequence": 4, "timestamp": 4.0,
                      "stage": "FAULT_INJECTED", "details": {
                          "fault_class": scheduled.scenario_class,
                          "fault_attempt": 1, "logical_edge_id": "edge-0",
@@ -127,27 +312,45 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                          }[scheduled.scenario_class],
                          "reason": "fixture fault",
                      }},
-                    {**identity, "event_sequence": 3, "timestamp": 3.0,
+                    {**identity, "event_sequence": 5, "timestamp": 5.0,
                      "stage": "TRANSACTION_PREPARE", "details": {
                          "transaction_id": "tx-0", "attempt_index": 0,
+                         "operation": "prepare", "phase": "rejected",
+                         "accepted": False, "started_ns": 1, "ended_ns": 2,
+                         "affected_objects": ["edge-0"], "commands_attempted": 1,
+                         "reason": "fixture fault", "readback_before_fingerprint": "r" * 64,
+                         "readback_after_fingerprint": "s" * 64,
+                     }},
+                    {**identity, "event_sequence": 6, "timestamp": 6.0,
+                     "stage": "TRANSACTION_ABORT", "details": {
+                         "transaction_id": "tx-0", "attempt_index": 0,
+                         "operation": "abort", "phase": "aborted",
+                         "accepted": True, "started_ns": 3, "ended_ns": 4,
+                         "affected_objects": ["edge-0"], "commands_attempted": 1,
+                         "reason": "", "readback_before_fingerprint": "s" * 64,
+                         "readback_after_fingerprint": "t" * 64,
+                     }},
+                    {**identity, "event_sequence": 7, "timestamp": 7.0,
+                     "stage": "TRANSACTION_PREPARE", "details": {
+                         "transaction_id": "tx-1", "attempt_index": 1,
                          "operation": "prepare", "phase": "prepared",
-                         "accepted": True, "started_ns": 1, "ended_ns": 2,
+                         "accepted": True, "started_ns": 5, "ended_ns": 6,
                          "affected_objects": ["edge-0"], "commands_attempted": 1,
                          "reason": "", "readback_before_fingerprint": "r" * 64,
                          "readback_after_fingerprint": "s" * 64,
                      }},
-                    {**identity, "event_sequence": 4, "timestamp": 4.0,
+                    {**identity, "event_sequence": 8, "timestamp": 8.0,
                      "stage": "TRANSACTION_COMMIT", "details": {
-                         "transaction_id": "tx-0", "attempt_index": 0,
+                         "transaction_id": "tx-1", "attempt_index": 1,
                          "operation": "commit", "phase": "committed",
                          "accepted": True, "started_ns": 3, "ended_ns": 4,
                          "affected_objects": ["edge-0"], "commands_attempted": 1,
                          "reason": "", "readback_before_fingerprint": "s" * 64,
                          "readback_after_fingerprint": "t" * 64,
                      }},
-                    {**identity, "event_sequence": 5, "timestamp": 5.0,
+                    {**identity, "event_sequence": 9, "timestamp": 9.0,
                      "stage": "VERIFIED_CORRECT", "details": {}},
-                    {**identity, "event_sequence": 6, "timestamp": 6.0,
+                    {**identity, "event_sequence": 10, "timestamp": 10.0,
                      "stage": "TERMINAL_ROW_READY", "details": {
                          "success": True, "timeout": False, "failure_stage": "",
                          "failure_reason": "", "verified_correct": True,
@@ -187,7 +390,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
         self.assertTrue(metrics)
         self.assertEqual({row["result_mode"] for row in rows}, {"measured_netns"})
         self.assertTrue(all(row["scenario_fingerprint"] for row in rows))
-        self.assertEqual({row["first_attempt_commit"] for row in rows}, {"true"})
+        self.assertEqual({row["first_attempt_commit"] for row in rows}, {"false"})
         self.assertEqual(manifest["row_count"], 2250)
         self.assertEqual(manifest["trials_sha256"], target_sha256)
 
@@ -270,11 +473,11 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     elif case == "arbitrary_stage":
                         events[0]["stage"] = "ARBITRARY_REVIEWER_STAGE"
                     elif case == "illegal_operation":
-                        events[2]["details"]["operation"] = "rollback"
+                        events[4]["details"]["operation"] = "rollback"
                     elif case == "illegal_phase":
-                        events[2]["details"]["phase"] = "committed"
+                        events[4]["details"]["phase"] = "committed"
                     elif case == "fault_mismatch":
-                        events[1]["details"]["fault_class"] = "not_the_row_class"
+                        events[3]["details"]["fault_class"] = "not_the_row_class"
                     elif case == "cleanup_mismatch":
                         events[0]["stage"] = "BACKGROUND_CLEANUP_FAILED"
                         events[0]["details"] = {"reason": "fabricated cleanup"}
@@ -283,7 +486,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     elif case == "duplicate_sequence":
                         events[1]["event_sequence"] = 1
                     elif case == "run_block_reordered":
-                        events[0:12] = events[6:12] + events[0:6]
+                        events[0:20] = events[10:20] + events[0:10]
                     else:
                         events[0], events[1] = events[1], events[0]
                     attempts.write_text(

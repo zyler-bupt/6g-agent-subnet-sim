@@ -231,6 +231,24 @@ def _validate_rows(
             or row["logical_fault_target"] == CONSTRUCTION_FAULT_TARGET
         ):
             raise ValueError("transactional formal input has an invalid fault schedule fingerprint")
+        else:
+            try:
+                logical_edge_id, gateway_text = row["logical_fault_target"].rsplit(
+                    "@gateway-", 1
+                )
+                gateway_index = int(gateway_text)
+            except (ValueError, TypeError) as error:
+                raise ValueError("transactional logical fault target is invalid") from error
+            expected_fault_fingerprint = stable_fingerprint({
+                "fault_class": row["scenario_class"],
+                "num_agents": int(row["num_agents"]),
+                "seed": int(row["seed"]),
+                "logical_edge_id": logical_edge_id,
+                "gateway_index": gateway_index,
+                "reject_attempt": 1,
+            })
+            if row["fault_schedule_fingerprint"] != expected_fault_fingerprint:
+                raise ValueError("transactional fault fingerprint does not match logical provenance")
         if not row["scenario_fingerprint"].strip():
             raise ValueError("transactional formal input has a missing scenario fingerprint")
         expected_scenario_fingerprint = _logical_scenario_fingerprint(
@@ -339,11 +357,23 @@ def _validate_fault_event(event: Mapping[str, object], row: Mapping[str, str]) -
         or f"{logical_edge_id}@gateway-{gateway_index}" != row["logical_fault_target"]
     ):
         raise ValueError("fault event target does not match its trial")
-    mechanisms = {
-        "executor_rejection", "observed_version_mismatch", "threading.Event.wait",
-    }
-    if details.get("mechanism") not in mechanisms or not isinstance(details.get("reason"), str):
+    expected_mechanism = {
+        "stale_version": "observed_version_mismatch",
+        "prepare_ack_timeout": "threading.Event.wait",
+        "command_rejection": "executor_rejection",
+    }[row["scenario_class"]]
+    if details.get("mechanism") != expected_mechanism or not isinstance(details.get("reason"), str):
         raise ValueError("fault event has invalid mechanism provenance")
+    expected_fingerprint = stable_fingerprint({
+        "fault_class": details["fault_class"],
+        "num_agents": int(row["num_agents"]),
+        "seed": int(row["seed"]),
+        "logical_edge_id": logical_edge_id,
+        "gateway_index": gateway_index,
+        "reject_attempt": details["fault_attempt"],
+    })
+    if row["fault_schedule_fingerprint"] != expected_fingerprint:
+        raise ValueError("fault event does not reproduce the row fingerprint")
 
 
 def _validate_lifecycle_event(event: Mapping[str, object], row: Mapping[str, str]) -> None:
@@ -372,6 +402,143 @@ def _validate_lifecycle_event(event: Mapping[str, object], row: Mapping[str, str
         or not details["reason"]
     ):
         raise ValueError("cleanup lifecycle event disagrees with its trial")
+
+
+def _validate_ordered_event_causality(
+    stream: list[dict[str, object]], row: Mapping[str, str],
+) -> bool:
+    stages = [str(event["stage"]) for event in stream]
+    positions = {stage: stages.index(stage) for stage in LIFECYCLE_STAGES if stage in stages}
+    transaction_positions = [
+        index for index, stage in enumerate(stages)
+        if stage in TRANSACTION_STAGE_OPERATIONS
+    ]
+    method_positions = transaction_positions + [
+        index for index, stage in enumerate(stages) if stage == "FAULT_INJECTED"
+    ]
+    for earlier, later in (
+        ("TASK_RECEIVED", "PLAN_FINISHED"),
+        ("PLAN_FINISHED", "COMMON_INFRASTRUCTURE_INSTALLED"),
+    ):
+        if later in positions and (
+            earlier not in positions or positions[earlier] >= positions[later]
+        ):
+            raise ValueError("transactional lifecycle milestones are out of order")
+    if method_positions:
+        required = (
+            "TASK_RECEIVED", "PLAN_FINISHED", "COMMON_INFRASTRUCTURE_INSTALLED",
+        )
+        if any(stage not in positions for stage in required):
+            raise ValueError("transaction work lacks required lifecycle milestones")
+        if positions["COMMON_INFRASTRUCTURE_INSTALLED"] >= min(method_positions):
+            raise ValueError("transaction work starts before common infrastructure")
+    if "VERIFIED_CORRECT" in positions:
+        if "TRIAL_FAILED" in positions:
+            raise ValueError("verified-correct and trial-failed lifecycles cannot coexist")
+        if any(position > positions["VERIFIED_CORRECT"] for position in transaction_positions):
+            raise ValueError("transaction operation occurs after verified-correct")
+    for cleanup_stage in ("BACKGROUND_CLEANUP_FAILED", "TOPOLOGY_TEARDOWN_FAILED"):
+        if cleanup_stage not in positions:
+            continue
+        prior_outcomes = [
+            positions[stage] for stage in ("VERIFIED_CORRECT", "TRIAL_FAILED")
+            if stage in positions
+        ]
+        if len(prior_outcomes) != 1 or prior_outcomes[0] >= positions[cleanup_stage]:
+            raise ValueError("cleanup lifecycle is not ordered after its trial outcome")
+    if row["success"].lower() == "true" and row["verified_correct"].lower() != "true":
+        raise ValueError("successful trial is not verified-correct")
+    if (
+        row["verified_correct"].lower() == "true"
+        and row["success"].lower() != "true"
+        and not ({"BACKGROUND_CLEANUP_FAILED", "TOPOLOGY_TEARDOWN_FAILED"} & set(stages))
+    ):
+        raise ValueError("verified trial failure lacks cleanup or teardown evidence")
+
+    states: dict[tuple[str, int], str] = {}
+    accepted_commits: list[Mapping[str, object]] = []
+    verified_position = positions.get("VERIFIED_CORRECT")
+    for event in stream:
+        stage = str(event["stage"])
+        if stage not in TRANSACTION_STAGE_OPERATIONS:
+            continue
+        details = _require_event_details(event)
+        key = (str(details["transaction_id"]), int(details["attempt_index"]))
+        operation = str(details["operation"])
+        state = states.get(key)
+        if operation == "prepare":
+            if state is not None:
+                raise ValueError("transaction attempt contains a duplicate prepare")
+            states[key] = "prepared" if details["accepted"] else "rejected"
+        elif operation == "commit":
+            if state != "prepared":
+                raise ValueError("transaction commit lacks an earlier accepted prepare")
+            states[key] = "committed" if details["accepted"] else "commit_rejected"
+            if details["accepted"]:
+                accepted_commits.append(details)
+        elif operation == "abort":
+            if state not in {"prepared", "rejected"}:
+                raise ValueError("transaction abort lacks an earlier prepare or rejection")
+            states[key] = "aborted"
+        else:
+            if state != "committed":
+                raise ValueError("transaction rollback lacks an earlier accepted commit")
+            states[key] = "rolled_back"
+
+    if row["verified_correct"].lower() == "true":
+        if not accepted_commits:
+            raise ValueError("verified trial has no accepted commit")
+        if any(state not in {"committed", "aborted"} for state in states.values()):
+            raise ValueError("verified trial has incomplete transaction attempts")
+        if verified_position is None or not all(
+            verified_position > index
+            for index, event in enumerate(stream)
+            if event["stage"] == "TRANSACTION_COMMIT"
+            and bool(_require_event_details(event)["accepted"])
+        ):
+            raise ValueError("verified-correct precedes an accepted commit")
+
+    fault_events = [
+        (index, event) for index, event in enumerate(stream)
+        if event["stage"] == "FAULT_INJECTED"
+    ]
+    logical_edge_id = row["logical_fault_target"].split("@gateway-", 1)[0]
+    target_initial_prepares = [
+        (index, event)
+        for index, event in enumerate(stream)
+        if event["stage"] == "TRANSACTION_PREPARE"
+        and int(_require_event_details(event)["attempt_index"]) == 0
+        and logical_edge_id in _require_event_details(event)["affected_objects"]
+    ]
+    if target_initial_prepares:
+        if len(target_initial_prepares) != 1 or len(fault_events) != 1:
+            raise ValueError("fault-target prepare lacks exactly one injection")
+        prepare_position, prepare_event = target_initial_prepares[0]
+        fault_position, fault_event = fault_events[0]
+        prepare_details = _require_event_details(prepare_event)
+        fault_details = _require_event_details(fault_event)
+        if (
+            bool(prepare_details["accepted"])
+            or prepare_details["phase"] != "rejected"
+            or fault_position >= prepare_position
+            or int(fault_details["fault_attempt"]) != int(prepare_details["attempt_index"]) + 1
+            or fault_details["reason"] != prepare_details["reason"]
+        ):
+            raise ValueError("fault injection is not causal to its rejected prepare")
+    elif fault_events:
+        raise ValueError("fault injection has no corresponding target prepare")
+
+    transaction_events = [
+        event for event in stream if event["stage"] in TRANSACTION_STAGE_OPERATIONS
+    ]
+    return (
+        row["success"].lower() == "true"
+        and bool(accepted_commits)
+        and all(
+            int(_require_event_details(event)["attempt_index"]) == 0
+            for event in transaction_events
+        )
+    )
 
 
 def _validate_attempt_events(
@@ -483,14 +650,7 @@ def _validate_attempt_events(
             raise ValueError("failed trial lacks its TRIAL_FAILED lifecycle event")
         if construction_failure and stage_counts["FAULT_INJECTED"]:
             raise ValueError("topology construction failure cannot inject a fault")
-        first_attempt_commit[run_id] = (
-            row["success"].lower() == "true"
-            and bool(transaction_events)
-            and all(
-                int(_require_event_details(event)["attempt_index"]) == 0
-                for event in transaction_events
-            )
-        )
+        first_attempt_commit[run_id] = _validate_ordered_event_causality(stream, row)
         details = terminals[0].get("details")
         if not isinstance(details, Mapping):
             raise ValueError("transactional terminal attempt event has no details")

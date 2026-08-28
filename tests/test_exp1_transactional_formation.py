@@ -29,6 +29,7 @@ from scripts.aggregate_wcnc_final_v3 import (
     _write_transactional_paired_differences,
     aggregate_transactional,
 )
+from scripts.normalize_wcnc_final_v3_exp1_transactional import _validate_attempt_events
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -1621,6 +1622,8 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             run_lines = (raw / "runs.csv").read_text(encoding="utf-8").splitlines()
             run_bytes = (raw / "runs.csv").read_bytes()
             attempt_bytes = (raw / "attempts.jsonl").read_bytes()
+            with (raw / "runs.csv").open(encoding="utf-8", newline="") as handle:
+                persisted_rows = list(csv.DictReader(handle))
 
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0].success)
@@ -1640,6 +1643,8 @@ class TransactionalRunnerContractTests(unittest.TestCase):
         self.assertEqual(scope["attempts_jsonl_sha256"], hashlib.sha256(attempt_bytes).hexdigest())
         self.assertEqual(scope["row_count"], 1)
         events = [json.loads(line) for line in attempt_lines]
+        first_attempt = _validate_attempt_events(persisted_rows, events)
+        self.assertFalse(first_attempt[rows[0].run_id])
         self.assertGreater(len(events), 1)
         self.assertEqual([event["event_sequence"] for event in events], list(range(1, len(events) + 1)))
         self.assertTrue(all(event["run_sequence"] == 1 for event in events))
