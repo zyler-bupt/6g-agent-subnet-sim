@@ -510,8 +510,20 @@ def _validate_ordered_event_causality(
         and int(_require_event_details(event)["attempt_index"]) == 0
         and logical_edge_id in _require_event_details(event)["affected_objects"]
     ]
-    if target_initial_prepares:
-        if len(target_initial_prepares) != 1 or len(fault_events) != 1:
+    construction_failure = row["failure_stage"] == "TOPOLOGY_CONSTRUCTION"
+    causal_pre_prepare_failure = (
+        row["success"].lower() != "true"
+        and row["verified_correct"].lower() != "true"
+        and not transaction_positions
+        and row["failure_stage"] in {
+            "PREPARATION", "PLAN", "COMMON_INFRASTRUCTURE",
+        }
+    )
+    requires_fault_evidence = not construction_failure and not causal_pre_prepare_failure
+    if requires_fault_evidence:
+        if len(target_initial_prepares) != 1:
+            raise ValueError("transactional trial lacks exactly one fault-target prepare")
+        if len(fault_events) != 1:
             raise ValueError("fault-target prepare lacks exactly one injection")
         prepare_position, prepare_event = target_initial_prepares[0]
         fault_position, fault_event = fault_events[0]
@@ -525,8 +537,8 @@ def _validate_ordered_event_causality(
             or fault_details["reason"] != prepare_details["reason"]
         ):
             raise ValueError("fault injection is not causal to its rejected prepare")
-    elif fault_events:
-        raise ValueError("fault injection has no corresponding target prepare")
+    elif fault_events or target_initial_prepares:
+        raise ValueError("no-fault trial has transaction fault evidence")
 
     transaction_events = [
         event for event in stream if event["stage"] in TRANSACTION_STAGE_OPERATIONS

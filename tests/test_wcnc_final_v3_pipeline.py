@@ -204,6 +204,45 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
         pre_prepare = _validate_attempt_events([failed_row], failed_events)
         self.assertFalse(pre_prepare[failed_row["run_id"]])
 
+    def test_successful_transaction_on_non_target_does_not_satisfy_fault_trial(self) -> None:
+        row, events = self._causal_transactional_stream()
+        del events[3:6]
+        for event in events:
+            if event["stage"] in {"TRANSACTION_PREPARE", "TRANSACTION_COMMIT"}:
+                event["details"]["attempt_index"] = 0
+                event["details"]["affected_objects"] = ["edge-1"]
+        row.update({
+            "attempt_count": "2", "prepare_attempts": "1",
+            "commit_attempts": "1",
+        })
+        self._resequence_events(events)
+
+        with self.assertRaisesRegex(ValueError, "fault-target prepare"):
+            _validate_attempt_events([row], events)
+
+    def test_target_prepare_requires_fault_injection(self) -> None:
+        row, events = self._causal_transactional_stream()
+        del events[3]
+        self._resequence_events(events)
+
+        with self.assertRaisesRegex(ValueError, "exactly one injection"):
+            _validate_attempt_events([row], events)
+
+    def test_target_prepare_rejects_duplicate_fault_injection(self) -> None:
+        row, events = self._causal_transactional_stream()
+        events.insert(4, copy.deepcopy(events[3]))
+        self._resequence_events(events)
+
+        with self.assertRaisesRegex(ValueError, "FAULT_INJECTED is duplicated"):
+            _validate_attempt_events([row], events)
+
+    def test_target_fault_injection_accepts_rejected_initial_prepare_and_retry(self) -> None:
+        row, events = self._causal_transactional_stream()
+
+        first_attempt = _validate_attempt_events([row], events)
+
+        self.assertFalse(first_attempt[row["run_id"]])
+
     def _write_task4_shaped_transactional_artifacts(self, root: Path) -> tuple[Path, Path]:
         config = load_transactional_config(
             Path("configs/exp1_transactional_formation_v1.yaml")
