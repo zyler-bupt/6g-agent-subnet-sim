@@ -37,6 +37,7 @@ from src.controller.formation_transactions import (
 
 
 ARM_ID = "exp1_transactional_v1"
+CONSTRUCTION_FAULT_TARGET = "unavailable_before_topology"
 METHODS = ("proposed", "cspf", "global_sfc_embedding")
 SCENARIO_CLASSES = (
     "stale_version",
@@ -368,7 +369,6 @@ def run_transactional_trial(
     scenario_fingerprint = _logical_scenario_fingerprint(
         config, scenario_class, seed, num_agents
     )
-    attempt_count = 1
     rollback_scope: set[str] = set()
     wasted_rule_commands = 0
     rollback_count = 0
@@ -578,7 +578,6 @@ def run_transactional_trial(
                 if retry_used or int(transaction_config["max_attempts"]) < 2:
                     raise RuntimeError(rejected[0][1].reason or "prepare rejected")
                 retry_used = True
-                attempt_count = 2
                 failed_object = (
                     rejected[0][0].logical_edge_id
                     or rejected[0][0].chain_id
@@ -778,7 +777,7 @@ def run_transactional_trial(
         common_infrastructure_fingerprint=common_fingerprint,
         common_infrastructure_provenance=common_provenance,
         configuration_sha256=configuration_sha256,
-        attempt_count=attempt_count,
+        attempt_count=len(engine.attempts) if engine is not None else 0,
         prepare_attempts=int(prepare_attempts),
         commit_attempts=int(commit_attempts),
         rollback_count=rollback_count,
@@ -842,6 +841,19 @@ def _logical_scenario_fingerprint(
         "transaction": config["transaction"],
         "verification": config["verification"],
         "timeout_s": config["simulation"]["timeout_s"],  # type: ignore[index]
+    })
+
+
+def _construction_fault_schedule_fingerprint(
+    protocol_id: str, scenario_class: str, num_agents: int, seed: int,
+) -> str:
+    """Pair construction failures without inventing a topology or transaction."""
+    return stable_fingerprint({
+        "protocol_id": protocol_id,
+        "scenario_class": scenario_class,
+        "num_agents": num_agents,
+        "seed": seed,
+        "logical_fault_target": CONSTRUCTION_FAULT_TARGET,
     })
 
 
@@ -1422,8 +1434,13 @@ def _construction_failure(
         scenario_fingerprint=_logical_scenario_fingerprint(
             config, scheduled.scenario_class, scheduled.seed, scheduled.num_agents,
         ),
-        fault_schedule_fingerprint="",
-        logical_fault_target="",
+        fault_schedule_fingerprint=_construction_fault_schedule_fingerprint(
+            str(config["experiment"]["protocol_id"]),  # type: ignore[index]
+            scheduled.scenario_class,
+            scheduled.num_agents,
+            scheduled.seed,
+        ),
+        logical_fault_target=CONSTRUCTION_FAULT_TARGET,
         observation_version_fingerprint="",
         verifier_fingerprint="",
         common_infrastructure_fingerprint="",

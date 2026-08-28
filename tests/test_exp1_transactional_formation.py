@@ -1563,6 +1563,19 @@ class TransactionalRunnerContractTests(unittest.TestCase):
                 len([event for event in events if event["stage"] == "FAULT_INJECTED"]),
                 1,
             )
+            transaction_events = [
+                event for event in events
+                if event["stage"].startswith("TRANSACTION_")
+            ]
+            self.assertEqual(row.attempt_count, len(transaction_events))
+            self.assertEqual(
+                row.prepare_attempts,
+                sum(event["stage"] == "TRANSACTION_PREPARE" for event in events),
+            )
+            self.assertEqual(
+                row.commit_attempts,
+                sum(event["stage"] == "TRANSACTION_COMMIT" for event in events),
+            )
             self.assertTrue(topology.verifier_calls)
 
         self.assertEqual(len({row.fault_schedule_fingerprint for row in paired}), 1)

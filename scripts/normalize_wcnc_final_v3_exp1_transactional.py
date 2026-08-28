@@ -17,10 +17,12 @@ from typing import Any
 
 from experiments.exp1_transactional_formation import (
     ARM_ID,
+    CONSTRUCTION_FAULT_TARGET,
     METHODS,
     SCENARIO_CLASSES,
     TASK_SIZES,
     _grid_payload,
+    _construction_fault_schedule_fingerprint,
     _logical_scenario_fingerprint,
     build_transactional_schedule,
     load_transactional_config,
@@ -34,6 +36,30 @@ CANONICAL_TARGET = Path(
     "results/paper/wcnc_final_v3/raw/exp1_transactional/trials.csv"
 )
 TERMINAL_STAGE = "TERMINAL_ROW_READY"
+TRANSACTION_STAGE_OPERATIONS = {
+    "TRANSACTION_PREPARE": "prepare",
+    "TRANSACTION_COMMIT": "commit",
+    "TRANSACTION_ABORT": "abort",
+    "TRANSACTION_ROLLBACK": "rollback",
+}
+TRANSACTION_OPERATION_PHASES = {
+    "prepare": frozenset({"prepared", "rejected"}),
+    "commit": frozenset({"committed", "rejected"}),
+    "abort": frozenset({"aborted", "prepared", "rejected"}),
+    "rollback": frozenset({"rolled_back", "committed"}),
+}
+LIFECYCLE_STAGES = frozenset({
+    "TASK_RECEIVED",
+    "PLAN_FINISHED",
+    "COMMON_INFRASTRUCTURE_INSTALLED",
+    "FAULT_INJECTED",
+    "VERIFIED_CORRECT",
+    "TRIAL_FAILED",
+    "BACKGROUND_CLEANUP_FAILED",
+    "TOPOLOGY_TEARDOWN_FAILED",
+    TERMINAL_STAGE,
+})
+ALLOWED_EVENT_STAGES = LIFECYCLE_STAGES | frozenset(TRANSACTION_STAGE_OPERATIONS)
 CHECKED_IN_FORMAL_CONFIG = (
     Path(__file__).resolve().parents[1]
     / "configs" / "exp1_transactional_formation_v1.yaml"
@@ -187,8 +213,24 @@ def _validate_rows(
         )
         if int(row["run_sequence"]) != expected_sequences.get(grid_key):
             raise ValueError("transactional run sequence does not match the frozen schedule")
-        if not row["fault_schedule_fingerprint"].strip():
-            raise ValueError("transactional formal input has a missing fault schedule fingerprint")
+        construction_failure = row["failure_stage"] == "TOPOLOGY_CONSTRUCTION"
+        expected_construction_fingerprint = _construction_fault_schedule_fingerprint(
+            row["protocol_id"], row["scenario_class"],
+            int(row["num_agents"]), int(row["seed"]),
+        )
+        if construction_failure:
+            if (
+                row["fault_schedule_fingerprint"] != expected_construction_fingerprint
+                or row["logical_fault_target"] != CONSTRUCTION_FAULT_TARGET
+                or int(row["attempt_count"]) != 0
+            ):
+                raise ValueError("transactional topology construction sentinel is invalid")
+        elif (
+            not row["fault_schedule_fingerprint"].strip()
+            or row["fault_schedule_fingerprint"] == expected_construction_fingerprint
+            or row["logical_fault_target"] == CONSTRUCTION_FAULT_TARGET
+        ):
+            raise ValueError("transactional formal input has an invalid fault schedule fingerprint")
         if not row["scenario_fingerprint"].strip():
             raise ValueError("transactional formal input has a missing scenario fingerprint")
         expected_scenario_fingerprint = _logical_scenario_fingerprint(
@@ -244,7 +286,97 @@ def _validate_paired_fault_fingerprints(rows: list[dict[str, str]]) -> None:
             raise ValueError(f"transactional paired trial {key!r} has divergent fault fingerprints")
 
 
-def _validate_attempt_events(rows: list[dict[str, str]], events: list[dict[str, object]]) -> None:
+def _require_event_details(event: Mapping[str, object]) -> Mapping[str, object]:
+    details = event.get("details")
+    if not isinstance(details, Mapping):
+        raise ValueError("transactional attempt event details must be an object")
+    return details
+
+
+def _validate_transaction_event(event: Mapping[str, object]) -> None:
+    stage = str(event["stage"])
+    operation = TRANSACTION_STAGE_OPERATIONS[stage]
+    details = _require_event_details(event)
+    if details.get("operation") != operation:
+        raise ValueError("transaction event operation does not match its stage")
+    if details.get("phase") not in TRANSACTION_OPERATION_PHASES[operation]:
+        raise ValueError("transaction event has an illegal operation phase")
+    if not isinstance(details.get("transaction_id"), str) or not details["transaction_id"]:
+        raise ValueError("transaction event has no transaction identity")
+    if not isinstance(details.get("accepted"), bool):
+        raise ValueError("transaction event accepted flag must be boolean")
+    for field in ("attempt_index", "started_ns", "ended_ns", "commands_attempted"):
+        value = details.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"transaction event {field} must be a nonnegative integer")
+    if int(details["ended_ns"]) < int(details["started_ns"]):
+        raise ValueError("transaction event ends before it starts")
+    affected = details.get("affected_objects")
+    if not isinstance(affected, list) or any(not isinstance(item, str) for item in affected):
+        raise ValueError("transaction event affected_objects must be a string array")
+    for field in (
+        "reason", "readback_before_fingerprint", "readback_after_fingerprint",
+    ):
+        if not isinstance(details.get(field), str):
+            raise ValueError(f"transaction event {field} must be a string")
+
+
+def _validate_fault_event(event: Mapping[str, object], row: Mapping[str, str]) -> None:
+    details = _require_event_details(event)
+    if details.get("fault_class") != row["scenario_class"]:
+        raise ValueError("fault event class does not match its trial")
+    if (
+        not isinstance(details.get("fault_attempt"), int)
+        or isinstance(details.get("fault_attempt"), bool)
+        or int(details["fault_attempt"]) < 1
+    ):
+        raise ValueError("fault event attempt must be a positive integer")
+    logical_edge_id = details.get("logical_edge_id")
+    gateway_index = details.get("gateway_index")
+    if (
+        not isinstance(logical_edge_id, str) or not logical_edge_id
+        or not isinstance(gateway_index, int) or isinstance(gateway_index, bool)
+        or f"{logical_edge_id}@gateway-{gateway_index}" != row["logical_fault_target"]
+    ):
+        raise ValueError("fault event target does not match its trial")
+    mechanisms = {
+        "executor_rejection", "observed_version_mismatch", "threading.Event.wait",
+    }
+    if details.get("mechanism") not in mechanisms or not isinstance(details.get("reason"), str):
+        raise ValueError("fault event has invalid mechanism provenance")
+
+
+def _validate_lifecycle_event(event: Mapping[str, object], row: Mapping[str, str]) -> None:
+    stage = str(event["stage"])
+    details = _require_event_details(event)
+    if stage == "PLAN_FINISHED" and (
+        details.get("method_id") != row["method_id"]
+        or details.get("fault_schedule_visible") is not False
+    ):
+        raise ValueError("plan event has invalid hidden-fault provenance")
+    if stage == "FAULT_INJECTED":
+        _validate_fault_event(event, row)
+    if stage == "VERIFIED_CORRECT" and row["verified_correct"].lower() != "true":
+        raise ValueError("verified-correct event disagrees with its trial")
+    if stage == "TRIAL_FAILED" and (
+        row["success"].lower() == "true"
+        or details.get("failure_stage") != row["failure_stage"]
+        or details.get("reason") != row["failure_reason"]
+    ):
+        raise ValueError("trial-failed event disagrees with its trial")
+    if stage in {"BACKGROUND_CLEANUP_FAILED", "TOPOLOGY_TEARDOWN_FAILED"} and (
+        row["success"].lower() == "true"
+        or row["infrastructure_cleanup_success"].lower() == "true"
+        or not row["cleanup_failure_reason"]
+        or not isinstance(details.get("reason"), str)
+        or not details["reason"]
+    ):
+        raise ValueError("cleanup lifecycle event disagrees with its trial")
+
+
+def _validate_attempt_events(
+    rows: list[dict[str, str]], events: list[dict[str, object]],
+) -> dict[str, bool]:
     rows_by_id = {row["run_id"]: row for row in rows}
     grouped: dict[str, list[dict[str, object]]] = {}
     block_order: list[str] = []
@@ -270,6 +402,8 @@ def _validate_attempt_events(rows: list[dict[str, str]], events: list[dict[str, 
                 raise ValueError(f"attempt event {field} does not match its terminal row")
         if not isinstance(event.get("stage"), str) or not event["stage"]:
             raise ValueError("attempt event has an invalid stage")
+        if event["stage"] not in ALLOWED_EVENT_STAGES:
+            raise ValueError("attempt event has an unknown stage")
         try:
             timestamp = float(event["timestamp"])
             sequence = int(event["event_sequence"])
@@ -277,12 +411,17 @@ def _validate_attempt_events(rows: list[dict[str, str]], events: list[dict[str, 
             raise ValueError("attempt event lacks a numeric timestamp or sequence") from error
         if not math.isfinite(timestamp) or sequence < 1:
             raise ValueError("attempt event has an invalid timestamp or sequence")
+        if event["stage"] in TRANSACTION_STAGE_OPERATIONS:
+            _validate_transaction_event(event)
+        else:
+            _validate_lifecycle_event(event, row)
         grouped.setdefault(run_id, []).append(event)
     expected_block_order = [
         row["run_id"] for row in sorted(rows, key=lambda item: int(item["run_sequence"]))
     ]
     if block_order != expected_block_order:
         raise ValueError("transactional attempt run blocks do not follow run sequence")
+    first_attempt_commit: dict[str, bool] = {}
     for run_id, row in rows_by_id.items():
         stream = grouped.get(run_id, [])
         if not stream:
@@ -300,12 +439,65 @@ def _validate_attempt_events(rows: list[dict[str, str]], events: list[dict[str, 
             raise ValueError("transactional terminal attempt event must close its stream")
         if len(stream) < 2 or not any(event["stage"] != TERMINAL_STAGE for event in stream):
             raise ValueError("each transactional trial requires a real attempt or transition event")
+        stage_counts = {
+            stage: sum(event["stage"] == stage for event in stream)
+            for stage in ALLOWED_EVENT_STAGES
+        }
+        transaction_events = [
+            event for event in stream if event["stage"] in TRANSACTION_STAGE_OPERATIONS
+        ]
+        if len(transaction_events) != int(row["attempt_count"]):
+            raise ValueError("transaction event count does not match attempt_count")
+        if stage_counts["TRANSACTION_PREPARE"] != int(row["prepare_attempts"]):
+            raise ValueError("transaction prepare count does not match prepare_attempts")
+        if stage_counts["TRANSACTION_COMMIT"] != int(row["commit_attempts"]):
+            raise ValueError("transaction commit count does not match commit_attempts")
+        accepted_rollbacks = sum(
+            event["stage"] == "TRANSACTION_ROLLBACK"
+            and bool(_require_event_details(event)["accepted"])
+            for event in stream
+        )
+        if accepted_rollbacks != int(row["rollback_count"]):
+            raise ValueError("transaction rollback count does not match rollback_count")
+        construction_failure = row["failure_stage"] == "TOPOLOGY_CONSTRUCTION"
+        if construction_failure and [event["stage"] for event in stream] != [
+            "TRIAL_FAILED", TERMINAL_STAGE,
+        ]:
+            raise ValueError("topology construction failure has fabricated lifecycle events")
+        if int(row["attempt_count"]) > 0 and not transaction_events:
+            raise ValueError("transactional trial has no real transaction events")
+        for singleton_stage in LIFECYCLE_STAGES - {TERMINAL_STAGE}:
+            if stage_counts[singleton_stage] > 1:
+                raise ValueError(f"transactional lifecycle stage {singleton_stage} is duplicated")
+        verified_events = stage_counts["VERIFIED_CORRECT"]
+        if verified_events != int(row["verified_correct"].lower() == "true"):
+            raise ValueError("verified-correct lifecycle count disagrees with its trial")
+        trial_failed_events = stage_counts["TRIAL_FAILED"]
+        if row["success"].lower() == "true" and trial_failed_events:
+            raise ValueError("successful trial cannot contain TRIAL_FAILED")
+        if (
+            row["success"].lower() != "true"
+            and row["failure_stage"] not in {"BACKGROUND_CLEANUP", "TOPOLOGY_TEARDOWN"}
+            and trial_failed_events != 1
+        ):
+            raise ValueError("failed trial lacks its TRIAL_FAILED lifecycle event")
+        if construction_failure and stage_counts["FAULT_INJECTED"]:
+            raise ValueError("topology construction failure cannot inject a fault")
+        first_attempt_commit[run_id] = (
+            row["success"].lower() == "true"
+            and bool(transaction_events)
+            and all(
+                int(_require_event_details(event)["attempt_index"]) == 0
+                for event in transaction_events
+            )
+        )
         details = terminals[0].get("details")
         if not isinstance(details, Mapping):
             raise ValueError("transactional terminal attempt event has no details")
         for field in ("success", "timeout", "failure_stage", "failure_reason", "verified_correct"):
             if field not in details or str(details[field]) != row[field]:
                 raise ValueError("transactional terminal attempt event disagrees with its terminal row")
+    return first_attempt_commit
 
 
 def _read_scope(path: Path) -> dict[str, object]:
@@ -515,14 +707,14 @@ def normalize_transactional(
         source_runs_sha256=source_runs_sha256,
         source_attempts_sha256=source_attempts_sha256,
     )
-    _validate_attempt_events(rows, events)
+    first_attempt_commit = _validate_attempt_events(rows, events)
     canonical: list[dict[str, str]] = []
     for source_row in rows:
         row = dict(source_row)
         row["trial_id"] = row["run_id"]
         row["result_mode"] = "measured_netns"
         row["first_attempt_commit"] = str(
-            _truth(row["success"]) and int(row["attempt_count"]) == 1
+            first_attempt_commit[row["run_id"]]
         ).lower()
         row["source_runs_sha256"] = source_runs_sha256
         row["source_attempts_sha256"] = source_attempts_sha256

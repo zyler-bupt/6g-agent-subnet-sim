@@ -17,6 +17,7 @@ from experiments.exp1_transactional_formation import (
     _logical_scenario_fingerprint,
     build_transactional_schedule,
     load_transactional_config,
+    run_transactional_experiment,
 )
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
@@ -88,7 +89,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     "common_infrastructure_fingerprint": "c" * 64,
                     "common_infrastructure_provenance": "runner",
                     "configuration_sha256": stable_fingerprint(config),
-                    "attempt_count": 1, "prepare_attempts": 1, "commit_attempts": 1,
+                    "attempt_count": 2, "prepare_attempts": 1, "commit_attempts": 1,
                     "rollback_count": 0, "rollback_scope_objects": "[]",
                     "wasted_rule_commands": 0, "partial_state_exposure_ms": 0.0,
                     "planning_latency_ms": 1.0, "common_infrastructure_latency_ms": 1.0,
@@ -115,6 +116,38 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     {**identity, "event_sequence": 1, "timestamp": 1.0,
                      "stage": "TASK_RECEIVED", "details": {}},
                     {**identity, "event_sequence": 2, "timestamp": 2.0,
+                     "stage": "FAULT_INJECTED", "details": {
+                         "fault_class": scheduled.scenario_class,
+                         "fault_attempt": 1, "logical_edge_id": "edge-0",
+                         "gateway_index": 0,
+                         "mechanism": {
+                             "stale_version": "observed_version_mismatch",
+                             "prepare_ack_timeout": "threading.Event.wait",
+                             "command_rejection": "executor_rejection",
+                         }[scheduled.scenario_class],
+                         "reason": "fixture fault",
+                     }},
+                    {**identity, "event_sequence": 3, "timestamp": 3.0,
+                     "stage": "TRANSACTION_PREPARE", "details": {
+                         "transaction_id": "tx-0", "attempt_index": 0,
+                         "operation": "prepare", "phase": "prepared",
+                         "accepted": True, "started_ns": 1, "ended_ns": 2,
+                         "affected_objects": ["edge-0"], "commands_attempted": 1,
+                         "reason": "", "readback_before_fingerprint": "r" * 64,
+                         "readback_after_fingerprint": "s" * 64,
+                     }},
+                    {**identity, "event_sequence": 4, "timestamp": 4.0,
+                     "stage": "TRANSACTION_COMMIT", "details": {
+                         "transaction_id": "tx-0", "attempt_index": 0,
+                         "operation": "commit", "phase": "committed",
+                         "accepted": True, "started_ns": 3, "ended_ns": 4,
+                         "affected_objects": ["edge-0"], "commands_attempted": 1,
+                         "reason": "", "readback_before_fingerprint": "s" * 64,
+                         "readback_after_fingerprint": "t" * 64,
+                     }},
+                    {**identity, "event_sequence": 5, "timestamp": 5.0,
+                     "stage": "VERIFIED_CORRECT", "details": {}},
+                    {**identity, "event_sequence": 6, "timestamp": 6.0,
                      "stage": "TERMINAL_ROW_READY", "details": {
                          "success": True, "timeout": False, "failure_stage": "",
                          "failure_reason": "", "verified_correct": True,
@@ -154,6 +187,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
         self.assertTrue(metrics)
         self.assertEqual({row["result_mode"] for row in rows}, {"measured_netns"})
         self.assertTrue(all(row["scenario_fingerprint"] for row in rows))
+        self.assertEqual({row["first_attempt_commit"] for row in rows}, {"true"})
         self.assertEqual(manifest["row_count"], 2250)
         self.assertEqual(manifest["trials_sha256"], target_sha256)
 
@@ -162,7 +196,9 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             "scope", "runs", "attempts", "terminal_only", "run_sequence",
             "event_outcome", "malformed", "duplicate_sequence", "reordered",
             "run_block_reordered", "row_sequence", "scenario_fingerprint",
-            "schema_boolean", "config",
+            "count_mismatch", "prepare_count_mismatch", "commit_count_mismatch",
+            "arbitrary_stage", "illegal_operation", "illegal_phase",
+            "fault_mismatch", "cleanup_mismatch", "schema_boolean", "config",
         )
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
@@ -177,7 +213,10 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                     runs.write_bytes(runs.read_bytes() + b"\n")
                 elif case == "attempts":
                     attempts.write_bytes(attempts.read_bytes() + b"\n")
-                elif case in {"row_sequence", "scenario_fingerprint", "schema_boolean"}:
+                elif case in {
+                    "row_sequence", "scenario_fingerprint", "count_mismatch",
+                    "prepare_count_mismatch", "commit_count_mismatch", "schema_boolean",
+                }:
                     with runs.open(encoding="utf-8", newline="") as handle:
                         run_rows = list(csv.DictReader(handle))
                         fields = list(run_rows[0])
@@ -185,6 +224,12 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                         run_rows[0]["run_sequence"] = "999"
                     elif case == "scenario_fingerprint":
                         run_rows[0]["scenario_fingerprint"] = "x" * 64
+                    elif case == "count_mismatch":
+                        run_rows[0]["attempt_count"] = "99"
+                    elif case == "prepare_count_mismatch":
+                        run_rows[0]["prepare_attempts"] = "99"
+                    elif case == "commit_count_mismatch":
+                        run_rows[0]["commit_attempts"] = "99"
                     else:
                         run_rows[0]["success"] = "maybe"
                     with runs.open("w", encoding="utf-8", newline="") as handle:
@@ -210,7 +255,8 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                 elif case in {
                     "terminal_only", "run_sequence", "malformed",
                     "event_outcome", "duplicate_sequence", "reordered",
-                    "run_block_reordered",
+                    "run_block_reordered", "arbitrary_stage", "illegal_operation",
+                    "illegal_phase", "fault_mismatch", "cleanup_mismatch",
                 }:
                     events = [json.loads(line) for line in attempts.read_text(encoding="utf-8").splitlines()]
                     if case == "terminal_only":
@@ -221,12 +267,23 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                         events[0]["run_sequence"] = 999
                     elif case == "event_outcome":
                         events[0]["success"] = False
+                    elif case == "arbitrary_stage":
+                        events[0]["stage"] = "ARBITRARY_REVIEWER_STAGE"
+                    elif case == "illegal_operation":
+                        events[2]["details"]["operation"] = "rollback"
+                    elif case == "illegal_phase":
+                        events[2]["details"]["phase"] = "committed"
+                    elif case == "fault_mismatch":
+                        events[1]["details"]["fault_class"] = "not_the_row_class"
+                    elif case == "cleanup_mismatch":
+                        events[0]["stage"] = "BACKGROUND_CLEANUP_FAILED"
+                        events[0]["details"] = {"reason": "fabricated cleanup"}
                     elif case == "malformed":
                         del events[0]["timestamp"]
                     elif case == "duplicate_sequence":
                         events[1]["event_sequence"] = 1
                     elif case == "run_block_reordered":
-                        events[0:4] = events[2:4] + events[0:2]
+                        events[0:12] = events[6:12] + events[0:6]
                     else:
                         events[0], events[1] = events[1], events[0]
                     attempts.write_text(
@@ -248,6 +305,54 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                         config_path or Path("configs/exp1_transactional_formation_v1.yaml"),
                         attempts,
                     )
+
+    def test_transactional_normalizer_accepts_complete_producer_construction_failures(self) -> None:
+        config = load_transactional_config(
+            Path("configs/exp1_transactional_formation_v1.yaml")
+        )
+
+        def fail_topology(_num_agents: int, _num_gateways: int) -> object:
+            raise RuntimeError("reviewed topology construction failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            produced = run_transactional_experiment(
+                config,
+                root / "producer",
+                require_complete_grid=True,
+                topology_factory=fail_topology,
+            )
+            raw = root / "producer" / "raw"
+            normalized = normalize_transactional(
+                raw / "runs.csv", root / "trials.csv",
+                attempts_path=raw / "attempts.jsonl",
+                scope_path=raw / "measurement_scope.json",
+            )
+            events = [
+                json.loads(line)
+                for line in (raw / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(len(produced), 2250)
+        self.assertEqual(len(normalized), 2250)
+        self.assertEqual({row.attempt_count for row in produced}, {0})
+        self.assertEqual(
+            {row.logical_fault_target for row in produced},
+            {"unavailable_before_topology"},
+        )
+        paired_fingerprints: dict[tuple[str, int, int], set[str]] = {}
+        for row in produced:
+            key = (row.scenario_class, row.num_agents, row.seed)
+            paired_fingerprints.setdefault(key, set()).add(
+                row.fault_schedule_fingerprint
+            )
+        self.assertTrue(
+            all(len(fingerprints) == 1 for fingerprints in paired_fingerprints.values())
+        )
+        self.assertEqual(
+            [event["stage"] for event in events[:2]],
+            ["TRIAL_FAILED", "TERMINAL_ROW_READY"],
+        )
 
     def test_transactional_aggregation_rejects_bare_canonical_grid_without_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
