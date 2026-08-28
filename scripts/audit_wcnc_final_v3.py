@@ -224,7 +224,7 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
             and normalization_manifest.get("raw_schema_file_sha256") == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
             and all(row.get("configuration_sha256") == stable_fingerprint(transactional_config) for row in rows)
         )
-    except (OSError, TypeError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, RuntimeError, json.JSONDecodeError):
         canonical_metadata_ok = False
     checks["exp1_transactional_canonical_metadata"] = canonical_metadata_ok
     if not canonical_metadata_ok:
@@ -324,6 +324,8 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
     else:
         try:
             figure_data = json.loads(figure_manifest.read_text(encoding="utf-8"))
+            if not isinstance(figure_data, dict):
+                raise TypeError("figure manifest is not an object")
             metrics_sha = sha(aggregate) if aggregate.exists() else None
             aggregate_rows = _read_csv(aggregate) if aggregate.exists() else []
             rowset_sha = hashlib.sha256(
@@ -346,7 +348,8 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
             }
             figure_hashes = figure_data.get("figure_hashes")
             figures_ok = (
-                figure_data.get("experiment") == "exp1_transactional"
+                figure_data.get("protocol_id") == PROTOCOL_ID
+                and figure_data.get("experiment") == "exp1_transactional"
                 and figure_data.get("input_metrics_path") == "aggregated/exp1_transactional/metrics.csv"
                 and figure_data.get("input_metrics_sha256") == metrics_sha
                 and figure_data.get("input_metrics_row_count") == len(aggregate_rows)
@@ -362,7 +365,7 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
                     for name, digest in figure_hashes.items()
                 )
             )
-        except (OSError, TypeError, json.JSONDecodeError):
+        except (OSError, TypeError, ValueError, RuntimeError, json.JSONDecodeError):
             figures_ok = False
         checks["exp1_transactional_figure_provenance"] = figures_ok
         if not figures_ok:
@@ -417,6 +420,7 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
         arm_contracts = {
             "nominal": {
                 "raw_path": "raw/exp1/trials.csv",
+                "execution_commit_path": "raw/exp1/execution_commit.txt",
                 "config_path": "configs/exp1_netns_verified_formation_v3.yaml",
                 "sources": {
                     "experiments/exp1_netns_verified_formation.py",
@@ -425,6 +429,7 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
             },
             "exp1_transactional_v1": {
                 "raw_path": "raw/exp1_transactional/trials.csv",
+                "execution_commit_path": "raw/exp1_transactional/execution_commit.txt",
                 "config_path": "configs/exp1_transactional_formation_v1.yaml",
                 "sources": {
                     "experiments/exp1_transactional_formation.py",
@@ -439,6 +444,7 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                 entry = arms[arm_name]
                 arm_contract_ok = arm_contract_ok and isinstance(entry, dict) and (
                     entry.get("raw_path") == contract["raw_path"]
+                    and entry.get("execution_commit_path") == contract["execution_commit_path"]
                     and entry.get("config_sha256") == sha(Path(contract["config_path"]))
                     and entry.get("schema_sha256") == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
                     and isinstance(entry.get("source_hashes"), dict)

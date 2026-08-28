@@ -1149,6 +1149,32 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             self.assertIn("Exp1 arm manifest drift", report["errors"])
             self.assertIn("nominal execution commit drift", report["errors"])
 
+    def test_audit_rejects_swapped_execution_commit_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = build_manifest(root, repo=Path("."))
+            arms = manifest["exp1_arms"]
+            arms["nominal"]["execution_commit_path"] = "raw/exp1_transactional/execution_commit.txt"
+            arms["exp1_transactional_v1"]["execution_commit_path"] = "raw/exp1/execution_commit.txt"
+            report = audit(root, manifest)
+            self.assertIn("Exp1 arm manifest drift", report["errors"])
+
+    def test_audit_handles_nonobject_figure_manifest_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            raw = root / "raw" / "exp1_transactional" / "trials.csv"
+            raw.parent.mkdir(parents=True)
+            normalize_transactional(runs, raw, attempts_path=attempts)
+            (root / "figures").mkdir()
+            (root / "figures" / "figure_manifest.json").write_text("[]", encoding="utf-8")
+            report = audit(root, {"raw_artifact_hashes": {
+                str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (root / "raw").glob("**/*") if path.is_file()
+            }})
+            self.assertEqual(report["status"], "FAIL")
+            self.assertIn("transactional aggregate to figure provenance drift", report["errors"])
+
     def test_manifest_keeps_nominal_and_transactional_execution_arms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest = build_manifest(Path(directory), repo=Path("."))
