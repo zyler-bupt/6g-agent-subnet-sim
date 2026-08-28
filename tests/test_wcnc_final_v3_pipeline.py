@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1104,6 +1105,49 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             self.assertIn("paired fault schedule drift", report["errors"])
             self.assertIn("paired verifier fingerprint drift", report["errors"])
             self.assertIn("missing transactional attempt provenance", report["errors"])
+
+    def test_transactional_audit_reports_invalid_normalization_manifest_with_attempts(self) -> None:
+        """Malformed normalizer evidence is an audit failure, never an audit crash."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            raw = root / "raw" / "exp1_transactional" / "trials.csv"
+            raw.parent.mkdir(parents=True)
+            normalize_transactional(runs, raw, attempts_path=attempts)
+            shutil.copyfile(attempts, raw.with_name("attempts.jsonl"))
+            raw.with_name("normalization_manifest.json").write_text("{", encoding="utf-8")
+            report = audit(root, {
+                "raw_artifact_hashes": {
+                    str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (root / "raw").glob("**/*") if path.is_file()
+                },
+            })
+            self.assertEqual(report["status"], "FAIL")
+            self.assertIn("transactional canonical metadata drift", report["errors"])
+            self.assertIn("transactional attempt provenance drift", report["errors"])
+
+    def test_audit_rejects_noncanonical_arm_paths_and_fake_execution_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = audit(root, {
+                "raw_artifact_hashes": {},
+                "exp1_arms": {
+                    "nominal": {
+                        "raw_path": "raw/exp1_transactional/trials.csv",
+                        "trials_sha256": None,
+                        "execution_commit_path": "raw/exp1/execution_commit.txt",
+                        "execution_commit": "f" * 40,
+                    },
+                    "exp1_transactional_v1": {
+                        "raw_path": "raw/exp1/trials.csv",
+                        "trials_sha256": None,
+                        "execution_commit_path": "raw/exp1_transactional/execution_commit.txt",
+                        "execution_commit": "f" * 40,
+                    },
+                },
+            })
+            self.assertIn("Exp1 arm manifest drift", report["errors"])
+            self.assertIn("nominal execution commit drift", report["errors"])
 
     def test_manifest_keeps_nominal_and_transactional_execution_arms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

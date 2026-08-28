@@ -165,9 +165,8 @@ def plot_transactional_metric(rows: list[dict[str, str]], metric: str, output: P
                 linewidth=1.8, markersize=4.4,
                 label=display_label("exp1", method),
             )
-            if not legend_handles:
-                legend_handles.append(line)
-            elif method not in {handle.get_label() for handle in legend_handles}:
+            if method not in {handle.get_gid() for handle in legend_handles}:
+                line.set_gid(method)
                 legend_handles.append(line)
         if not any_visible:
             axis.text(0.5, 0.5, "N/A", ha="center", va="center", transform=axis.transAxes)
@@ -200,6 +199,13 @@ def _write_transactional_figure_manifest(root: Path, metrics_path: Path, figures
         "experiment": "exp1_transactional",
         "input_metrics_path": str(metrics_path.relative_to(root)),
         "input_metrics_sha256": hashlib.sha256(metrics_path.read_bytes()).hexdigest(),
+        "input_metrics_row_count": len(load(metrics_path)),
+        "input_metrics_rowset_sha256": hashlib.sha256(
+            "\n".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":"))
+                for row in sorted(load(metrics_path), key=lambda row: json.dumps(row, sort_keys=True))
+            ).encode("utf-8")
+        ).hexdigest(),
         "plotting_script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "figure_hashes": {
             str(path.relative_to(root / "figures")): hashlib.sha256(path.read_bytes()).hexdigest()

@@ -8,6 +8,7 @@ import json
 import platform
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,11 +27,13 @@ from scripts.normalize_wcnc_final_v3_exp1_transactional import (
     _validate_attempt_events,
     _validate_canonical_rows as validate_transactional_canonical_rows,
 )
+from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
 
 
 SCOPED_SOURCES = (
     "experiments/paper_protocol.py", "experiments/run_wcnc_final_v3.py",
     "experiments/exp1_netns_verified_formation.py", "experiments/exp2_cross_layer_robustness.py",
+    "experiments/exp1_transactional_formation.py",
     "experiments/exp3_business_elasticity.py", "experiments/exp4_failure.py",
     "src/controller/cross_layer_coordinator.py", "src/controller/business_reconfiguration.py",
     "src/controller/paper_failure_recovery.py", "src/simulation/demand_capacity_ratio.py",
@@ -204,9 +207,13 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
         errors.append("missing transactional raw arm")
         return
     rows = _read_csv(raw_path)
+    normalization_manifest: dict[str, object] | None = None
     normalization_manifest_path = raw_path.with_name("normalization_manifest.json")
     try:
-        normalization_manifest = json.loads(normalization_manifest_path.read_text(encoding="utf-8"))
+        loaded_manifest = json.loads(normalization_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_manifest, dict):
+            raise TypeError("normalization manifest is not an object")
+        normalization_manifest = loaded_manifest
         transactional_config = load_transactional_config(
             Path("configs/exp1_transactional_formation_v1.yaml")
         )
@@ -279,6 +286,8 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
                 raise ValueError("attempt events duplicate identifiers")
             validate_transactional_canonical_rows(rows)
             _validate_attempt_events(rows, events)
+            if normalization_manifest is None:
+                raise ValueError("normalization manifest is unavailable")
             if normalization_manifest.get("source_attempts_sha256") != sha(attempts_path):
                 raise ValueError("attempt provenance hash disagrees with normalizer")
             checks["exp1_transactional_attempt_provenance"] = True
@@ -286,16 +295,25 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
             checks["exp1_transactional_attempt_provenance"] = False
             errors.append("transactional attempt provenance drift")
     aggregate = root / "aggregated" / "exp1_transactional" / "metrics.csv"
+    paired = aggregate.with_name("paired_differences.csv")
     if not aggregate.exists():
         checks["exp1_transactional_aggregate_provenance"] = False
         errors.append("missing transactional aggregate provenance")
     else:
         raw_sha = sha(raw_path)
-        aggregate_ok = all(
-            row.get("raw_sha256") == raw_sha
-            and Path(row.get("raw_path", "")).resolve() == raw_path.resolve()
-            for row in _read_csv(aggregate)
-        )
+        aggregate_ok = False
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                expected = Path(directory) / "metrics.csv"
+                aggregate_experiment("exp1_transactional", raw_path, expected)
+                expected_paired = expected.with_name("paired_differences.csv")
+                aggregate_ok = (
+                    aggregate.read_bytes() == expected.read_bytes()
+                    and paired.is_file()
+                    and paired.read_bytes() == expected_paired.read_bytes()
+                )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            aggregate_ok = False
         checks["exp1_transactional_aggregate_provenance"] = aggregate_ok
         if not aggregate_ok:
             errors.append("transactional raw to aggregate provenance drift")
@@ -307,14 +325,41 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
         try:
             figure_data = json.loads(figure_manifest.read_text(encoding="utf-8"))
             metrics_sha = sha(aggregate) if aggregate.exists() else None
+            aggregate_rows = _read_csv(aggregate) if aggregate.exists() else []
+            rowset_sha = hashlib.sha256(
+                "\n".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":"))
+                    for row in sorted(aggregate_rows, key=lambda row: json.dumps(row, sort_keys=True))
+                ).encode("utf-8")
+            ).hexdigest()
+            expected_figures = {
+                f"exp1_transactional_{metric}.{suffix}"
+                for metric in (
+                    "method_owned_formation_latency_ms", "time_to_correct_formation_ms",
+                    "rollback_scope_objects", "wasted_rule_commands",
+                )
+                for suffix in ("pdf", "png", "svg")
+            }
+            actual_figures = {
+                path.name for path in (root / "figures").glob("exp1_transactional_*")
+                if path.suffix in {".pdf", ".png", ".svg"}
+            }
+            figure_hashes = figure_data.get("figure_hashes")
             figures_ok = (
                 figure_data.get("experiment") == "exp1_transactional"
+                and figure_data.get("input_metrics_path") == "aggregated/exp1_transactional/metrics.csv"
                 and figure_data.get("input_metrics_sha256") == metrics_sha
+                and figure_data.get("input_metrics_row_count") == len(aggregate_rows)
+                and figure_data.get("input_metrics_rowset_sha256") == rowset_sha
                 and figure_data.get("plotting_script_sha256") == sha(Path("scripts/plot_wcnc_final_v3.py"))
+                and isinstance(figure_hashes, dict)
+                and set(figure_hashes) == expected_figures
+                and actual_figures == expected_figures
+                and not any((root / "figures" / f"exp1_transactional_success_rate.{suffix}").exists() for suffix in ("pdf", "png", "svg"))
                 and all(
                     (root / "figures" / name).is_file()
                     and sha(root / "figures" / name) == digest
-                    for name, digest in figure_data.get("figure_hashes", {}).items()
+                    for name, digest in figure_hashes.items()
                 )
             )
         except (OSError, TypeError, json.JSONDecodeError):
@@ -369,10 +414,42 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
     if arms is not None:
         expected_arms = {"nominal", "exp1_transactional_v1"}
         arms_ok = isinstance(arms, dict) and set(arms) == expected_arms
+        arm_contracts = {
+            "nominal": {
+                "raw_path": "raw/exp1/trials.csv",
+                "config_path": "configs/exp1_netns_verified_formation_v3.yaml",
+                "sources": {
+                    "experiments/exp1_netns_verified_formation.py",
+                    "scripts/normalize_wcnc_final_v3_exp1.py",
+                },
+            },
+            "exp1_transactional_v1": {
+                "raw_path": "raw/exp1_transactional/trials.csv",
+                "config_path": "configs/exp1_transactional_formation_v1.yaml",
+                "sources": {
+                    "experiments/exp1_transactional_formation.py",
+                    "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
+                },
+            },
+        }
+        if arms_ok and isinstance(arms, dict):
+            arm_paths = {entry.get("raw_path") for entry in arms.values() if isinstance(entry, dict)}
+            arm_contract_ok = arm_paths == {contract["raw_path"] for contract in arm_contracts.values()}
+            for arm_name, contract in arm_contracts.items():
+                entry = arms[arm_name]
+                arm_contract_ok = arm_contract_ok and isinstance(entry, dict) and (
+                    entry.get("raw_path") == contract["raw_path"]
+                    and entry.get("config_sha256") == sha(Path(contract["config_path"]))
+                    and entry.get("schema_sha256") == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
+                    and isinstance(entry.get("source_hashes"), dict)
+                    and set(entry["source_hashes"]) == contract["sources"]
+                    and all(sha(Path(name)) == digest for name, digest in entry["source_hashes"].items())
+                )
+            arms_ok = arm_contract_ok
         checks["exp1_arm_manifest_complete"] = arms_ok
         if not arms_ok:
             errors.append("Exp1 arm manifest drift")
-        elif isinstance(arms, dict):
+        if isinstance(arms, dict) and set(arms) == expected_arms:
             for arm_name, entry in arms.items():
                 if not isinstance(entry, dict):
                     errors.append("Exp1 arm manifest drift")
@@ -389,6 +466,15 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                     if commit_path.is_file() else None
                 )
                 commit_ok = current_commit == entry.get("execution_commit")
+                commit_ok = commit_ok and isinstance(current_commit, str) and bool(
+                    __import__("re").fullmatch(r"[0-9a-f]{40}", current_commit)
+                )
+                if commit_ok:
+                    resolved = subprocess.run(
+                        ["git", "cat-file", "-e", f"{current_commit}^{{commit}}"],
+                        text=True, capture_output=True,
+                    )
+                    commit_ok = resolved.returncode == 0
                 checks[f"{arm_name}_execution_commit_immutable"] = commit_ok
                 if not commit_ok:
                     errors.append(f"{arm_name} execution commit drift")
