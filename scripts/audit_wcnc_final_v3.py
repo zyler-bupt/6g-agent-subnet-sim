@@ -224,7 +224,7 @@ def _transactional_audit(root: Path, errors: list[str], checks: dict[str, object
             and normalization_manifest.get("raw_schema_file_sha256") == sha(Path("configs/wcnc_final_v3_raw_schema.json"))
             and all(row.get("configuration_sha256") == stable_fingerprint(transactional_config) for row in rows)
         )
-    except (OSError, TypeError, ValueError, RuntimeError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, RuntimeError, yaml.YAMLError, json.JSONDecodeError):
         canonical_metadata_ok = False
     checks["exp1_transactional_canonical_metadata"] = canonical_metadata_ok
     if not canonical_metadata_ok:
@@ -518,15 +518,16 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
             grid_complete = not grid_errors
             checks["exp1_canonical_grid_complete"] = grid_complete
             errors.extend(grid_errors)
-            expected_configuration_hash = configuration_sha(
-                Path("configs/exp1_netns_verified_formation_v3.yaml")
-            )
+            try:
+                expected_configuration_hash = configuration_sha(
+                    Path("configs/exp1_netns_verified_formation_v3.yaml")
+                )
+            except yaml.YAMLError:
+                expected_configuration_hash = None
             observed_configuration_hashes = {
                 row.get("configuration_sha256", "") for row in rows
             }
-            configuration_match = observed_configuration_hashes == {
-                expected_configuration_hash
-            }
+            configuration_match = expected_configuration_hash is not None and observed_configuration_hashes == {expected_configuration_hash}
             checks["exp1_configuration_hash_matches"] = configuration_match
             if not configuration_match:
                 errors.append("Exp1 configuration hash drift")

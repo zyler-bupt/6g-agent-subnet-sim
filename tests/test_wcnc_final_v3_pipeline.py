@@ -10,7 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+
+import yaml
 
 from experiments.exp1_netns_verified_formation import FormationEdge, _plan_canonical_formation
 from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, stable_fingerprint
@@ -1174,6 +1177,21 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             }})
             self.assertEqual(report["status"], "FAIL")
             self.assertIn("transactional aggregate to figure provenance drift", report["errors"])
+
+    def test_audit_handles_invalid_transactional_yaml_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            raw = root / "raw" / "exp1_transactional" / "trials.csv"
+            raw.parent.mkdir(parents=True)
+            normalize_transactional(runs, raw, attempts_path=attempts)
+            with patch("scripts.audit_wcnc_final_v3.load_transactional_config", side_effect=yaml.YAMLError("bad yaml")):
+                report = audit(root, {"raw_artifact_hashes": {
+                    str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (root / "raw").glob("**/*") if path.is_file()
+                }})
+            self.assertEqual(report["status"], "FAIL")
+            self.assertIn("transactional canonical metadata drift", report["errors"])
 
     def test_manifest_keeps_nominal_and_transactional_execution_arms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
