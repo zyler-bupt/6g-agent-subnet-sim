@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -10,7 +11,13 @@ import unittest
 from pathlib import Path
 
 from experiments.exp1_netns_verified_formation import FormationEdge, _plan_canonical_formation
-from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS
+from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, stable_fingerprint
+from experiments.exp1_transactional_formation import (
+    _grid_payload,
+    _logical_scenario_fingerprint,
+    build_transactional_schedule,
+    load_transactional_config,
+)
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
 from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
 from scripts.normalize_wcnc_final_v3_exp1 import _configuration_sha256, normalize
@@ -24,6 +31,262 @@ from scripts.audit_wcnc_final_v3 import (
 
 
 class WcncFinalV3PipelineTests(unittest.TestCase):
+    def _write_task4_shaped_transactional_artifacts(self, root: Path) -> tuple[Path, Path]:
+        config = load_transactional_config(
+            Path("configs/exp1_transactional_formation_v1.yaml")
+        )
+        runs = root / "runs.csv"
+        attempts = root / "attempts.jsonl"
+        scope = root / "measurement_scope.json"
+        fields = (
+            "protocol_id", "arm_id", "phase", "result_mode",
+            "execution_mode_detail", "run_id", "run_sequence", "scenario_class",
+            "scenario_fingerprint", "seed", "num_agents", "num_gateways",
+            "num_business_edges", "method_id", "fault_schedule_fingerprint",
+            "logical_fault_target", "observation_version_fingerprint",
+            "verifier_fingerprint", "common_infrastructure_fingerprint",
+            "common_infrastructure_provenance", "configuration_sha256",
+            "attempt_count", "prepare_attempts", "commit_attempts", "rollback_count",
+            "rollback_scope_objects", "wasted_rule_commands",
+            "partial_state_exposure_ms", "planning_latency_ms",
+            "common_infrastructure_latency_ms", "prepare_latency_ms",
+            "commit_latency_ms", "rollback_replan_latency_ms",
+            "method_owned_formation_latency_ms", "final_verification_latency_ms",
+            "time_to_correct_formation_ms", "verified_correct",
+            "infrastructure_cleanup_success", "cleanup_failure_reason",
+            "leaked_state_fingerprint", "success", "timeout", "failure_stage",
+            "failure_reason",
+        )
+        events = []
+        with runs.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for scheduled in build_transactional_schedule(config):
+                run_id = (
+                    f"agents={scheduled.num_agents}:seed={scheduled.seed}:"
+                    f"scenario={scheduled.scenario_class}:method={scheduled.method_id}"
+                )
+                row = {
+                    "protocol_id": "wcnc_final_v3", "arm_id": "exp1_transactional_v1",
+                    "phase": "formal", "result_mode": "measured_netns",
+                    "execution_mode_detail": "real_linux_netns_transactional_formation",
+                    "run_id": run_id, "run_sequence": scheduled.run_sequence,
+                    "scenario_class": scheduled.scenario_class,
+                    "scenario_fingerprint": _logical_scenario_fingerprint(
+                        config, scheduled.scenario_class, scheduled.seed,
+                        scheduled.num_agents,
+                    ),
+                    "seed": scheduled.seed, "num_agents": scheduled.num_agents,
+                    "num_gateways": 4, "num_business_edges": 2,
+                    "method_id": scheduled.method_id,
+                    "fault_schedule_fingerprint": hashlib.sha256(
+                        f"fault|{scheduled.scenario_class}|{scheduled.num_agents}|{scheduled.seed}".encode()
+                    ).hexdigest(),
+                    "logical_fault_target": "edge-0@gateway-0",
+                    "observation_version_fingerprint": "o" * 64,
+                    "verifier_fingerprint": "v" * 64,
+                    "common_infrastructure_fingerprint": "c" * 64,
+                    "common_infrastructure_provenance": "runner",
+                    "configuration_sha256": stable_fingerprint(config),
+                    "attempt_count": 1, "prepare_attempts": 1, "commit_attempts": 1,
+                    "rollback_count": 0, "rollback_scope_objects": "[]",
+                    "wasted_rule_commands": 0, "partial_state_exposure_ms": 0.0,
+                    "planning_latency_ms": 1.0, "common_infrastructure_latency_ms": 1.0,
+                    "prepare_latency_ms": 1.0, "commit_latency_ms": 1.0,
+                    "rollback_replan_latency_ms": 0.0,
+                    "method_owned_formation_latency_ms": 3.0,
+                    "final_verification_latency_ms": 1.0,
+                    "time_to_correct_formation_ms": 4.0,
+                    "verified_correct": True, "infrastructure_cleanup_success": True,
+                    "cleanup_failure_reason": "", "leaked_state_fingerprint": "",
+                    "success": True, "timeout": False, "failure_stage": "",
+                    "failure_reason": "",
+                }
+                writer.writerow(row)
+                identity = {
+                    "run_id": run_id, "run_sequence": scheduled.run_sequence,
+                    "method_id": scheduled.method_id,
+                    "scenario_class": scheduled.scenario_class,
+                    "seed": scheduled.seed, "num_agents": scheduled.num_agents,
+                    "success": True, "timeout": False, "failure_stage": "",
+                    "failure_reason": "",
+                }
+                events.extend((
+                    {**identity, "event_sequence": 1, "timestamp": 1.0,
+                     "stage": "TASK_RECEIVED", "details": {}},
+                    {**identity, "event_sequence": 2, "timestamp": 2.0,
+                     "stage": "TERMINAL_ROW_READY", "details": {
+                         "success": True, "timeout": False, "failure_stage": "",
+                         "failure_reason": "", "verified_correct": True,
+                     }},
+                ))
+        attempts.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        grid = _grid_payload(build_transactional_schedule(config))
+        scope.write_text(json.dumps({
+            "protocol_id": "wcnc_final_v3", "arm_id": "exp1_transactional_v1",
+            "phase": "formal", "configuration_sha256": stable_fingerprint(config),
+            "frozen_config_grid": grid, "invocation_grid": grid,
+            "invocation_grid_sha256": stable_fingerprint(grid),
+            "grid_source": "frozen_config", "completed_rows": 2250,
+            "row_count": 2250, "event_count": len(events),
+            "runs_csv_sha256": hashlib.sha256(runs.read_bytes()).hexdigest(),
+            "attempts_jsonl_sha256": hashlib.sha256(attempts.read_bytes()).hexdigest(),
+        }, sort_keys=True), encoding="utf-8")
+        return runs, attempts
+
+    def test_transactional_normalizer_accepts_runner_shaped_artifacts_and_emits_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            target = root / "trials.csv"
+            rows = normalize_transactional(runs, target, attempts_path=attempts)
+            metrics = aggregate_experiment(
+                "exp1_transactional", target, root / "metrics.csv"
+            )
+            manifest = json.loads(
+                (root / "normalization_manifest.json").read_text(encoding="utf-8")
+            )
+            target_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+        self.assertEqual(len(rows), 2250)
+        self.assertTrue(metrics)
+        self.assertEqual({row["result_mode"] for row in rows}, {"measured_netns"})
+        self.assertTrue(all(row["scenario_fingerprint"] for row in rows))
+        self.assertEqual(manifest["row_count"], 2250)
+        self.assertEqual(manifest["trials_sha256"], target_sha256)
+
+    def test_transactional_normalizer_rejects_tampered_provenance_streams_and_config(self) -> None:
+        cases = (
+            "scope", "runs", "attempts", "terminal_only", "run_sequence",
+            "event_outcome", "malformed", "duplicate_sequence", "reordered",
+            "run_block_reordered", "row_sequence", "scenario_fingerprint",
+            "schema_boolean", "config",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+                scope_path = root / "measurement_scope.json"
+                scope = json.loads(scope_path.read_text(encoding="utf-8"))
+                config_path: Path | None = None
+                if case == "scope":
+                    scope["row_count"] = 0
+                elif case == "runs":
+                    runs.write_bytes(runs.read_bytes() + b"\n")
+                elif case == "attempts":
+                    attempts.write_bytes(attempts.read_bytes() + b"\n")
+                elif case in {"row_sequence", "scenario_fingerprint", "schema_boolean"}:
+                    with runs.open(encoding="utf-8", newline="") as handle:
+                        run_rows = list(csv.DictReader(handle))
+                        fields = list(run_rows[0])
+                    if case == "row_sequence":
+                        run_rows[0]["run_sequence"] = "999"
+                    elif case == "scenario_fingerprint":
+                        run_rows[0]["scenario_fingerprint"] = "x" * 64
+                    else:
+                        run_rows[0]["success"] = "maybe"
+                    with runs.open("w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=fields)
+                        writer.writeheader()
+                        writer.writerows(run_rows)
+                    scope["runs_csv_sha256"] = hashlib.sha256(runs.read_bytes()).hexdigest()
+                    if case in {"row_sequence", "schema_boolean"}:
+                        events = [json.loads(line) for line in attempts.read_text(encoding="utf-8").splitlines()]
+                        for event in events:
+                            if event["run_id"] == run_rows[0]["run_id"]:
+                                if case == "row_sequence":
+                                    event["run_sequence"] = 999
+                                else:
+                                    event["success"] = "maybe"
+                                    if event["stage"] == "TERMINAL_ROW_READY":
+                                        event["details"]["success"] = "maybe"
+                        attempts.write_text(
+                            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+                            encoding="utf-8",
+                        )
+                        scope["attempts_jsonl_sha256"] = hashlib.sha256(attempts.read_bytes()).hexdigest()
+                elif case in {
+                    "terminal_only", "run_sequence", "malformed",
+                    "event_outcome", "duplicate_sequence", "reordered",
+                    "run_block_reordered",
+                }:
+                    events = [json.loads(line) for line in attempts.read_text(encoding="utf-8").splitlines()]
+                    if case == "terminal_only":
+                        events = [event for event in events if event["stage"] == "TERMINAL_ROW_READY"]
+                        for event in events:
+                            event["event_sequence"] = 1
+                    elif case == "run_sequence":
+                        events[0]["run_sequence"] = 999
+                    elif case == "event_outcome":
+                        events[0]["success"] = False
+                    elif case == "malformed":
+                        del events[0]["timestamp"]
+                    elif case == "duplicate_sequence":
+                        events[1]["event_sequence"] = 1
+                    elif case == "run_block_reordered":
+                        events[0:4] = events[2:4] + events[0:2]
+                    else:
+                        events[0], events[1] = events[1], events[0]
+                    attempts.write_text(
+                        "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+                        encoding="utf-8",
+                    )
+                    scope["event_count"] = len(events)
+                    scope["attempts_jsonl_sha256"] = hashlib.sha256(attempts.read_bytes()).hexdigest()
+                else:
+                    config_path = root / "altered_formal.yaml"
+                    config_path.write_bytes(
+                        Path("configs/exp1_transactional_formation_v1.yaml").read_bytes()
+                        + b"\n"
+                    )
+                scope_path.write_text(json.dumps(scope, sort_keys=True), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    normalize_transactional(
+                        runs, root / "trials.csv",
+                        config_path or Path("configs/exp1_transactional_formation_v1.yaml"),
+                        attempts,
+                    )
+
+    def test_transactional_aggregation_rejects_bare_canonical_grid_without_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+            target = root / "trials.csv"
+            normalize_transactional(runs, target, attempts_path=attempts)
+            (root / "normalization_manifest.json").unlink()
+            with self.assertRaisesRegex(ValueError, "normalization manifest"):
+                aggregate_experiment("exp1_transactional", target, root / "metrics.csv")
+
+    def test_transactional_aggregation_validates_schema_and_manifest_counts(self) -> None:
+        for case in ("schema", "event_count", "schema_hash"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                runs, attempts = self._write_task4_shaped_transactional_artifacts(root)
+                target = root / "trials.csv"
+                normalize_transactional(runs, target, attempts_path=attempts)
+                manifest_path = root / "normalization_manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if case == "schema":
+                    with target.open(encoding="utf-8", newline="") as handle:
+                        rows = list(csv.DictReader(handle))
+                        fields = list(rows[0])
+                    rows[0]["success"] = "maybe"
+                    with target.open("w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=fields)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    manifest["trials_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+                elif case == "event_count":
+                    manifest["event_count"] = 0
+                else:
+                    manifest["raw_schema_file_sha256"] = "0" * 64
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaises(ValueError):
+                    aggregate_experiment("exp1_transactional", target, root / "metrics.csv")
+
     def test_transactional_normalizer_requires_exact_2250_grid(self) -> None:
         """A formal transactional artifact cannot be normalized from a partial run."""
         with tempfile.TemporaryDirectory() as directory:

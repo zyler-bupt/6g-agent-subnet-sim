@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import csv
 import subprocess
 import tempfile
 import threading
@@ -24,7 +25,10 @@ from experiments.exp1_transactional_formation import (
     run_transactional_trial,
 )
 from experiments.paper_protocol import TRANSACTIONAL_EXP1_PROTOCOL
-from scripts.aggregate_wcnc_final_v3 import aggregate_transactional
+from scripts.aggregate_wcnc_final_v3 import (
+    _write_transactional_paired_differences,
+    aggregate_transactional,
+)
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -1602,6 +1606,8 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             scope = json.loads((raw / "measurement_scope.json").read_text(encoding="utf-8"))
             attempt_lines = (raw / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
             run_lines = (raw / "runs.csv").read_text(encoding="utf-8").splitlines()
+            run_bytes = (raw / "runs.csv").read_bytes()
+            attempt_bytes = (raw / "attempts.jsonl").read_bytes()
 
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0].success)
@@ -1614,6 +1620,38 @@ class TransactionalRunnerContractTests(unittest.TestCase):
         self.assertNotEqual(scope["invocation_grid"], scope["frozen_config_grid"])
         self.assertNotEqual(
             scope["configuration_sha256"], scope["invocation_grid_sha256"]
+        )
+        self.assertEqual(rows[0].result_mode, "measured_netns")
+        self.assertTrue(rows[0].scenario_fingerprint)
+        self.assertEqual(scope["runs_csv_sha256"], hashlib.sha256(run_bytes).hexdigest())
+        self.assertEqual(scope["attempts_jsonl_sha256"], hashlib.sha256(attempt_bytes).hexdigest())
+        self.assertEqual(scope["row_count"], 1)
+        events = [json.loads(line) for line in attempt_lines]
+        self.assertGreater(len(events), 1)
+        self.assertEqual([event["event_sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertTrue(all(event["run_sequence"] == 1 for event in events))
+        self.assertTrue(all(event["method_id"] == "proposed" for event in events))
+        for event in events:
+            self.assertEqual(event["success"], rows[0].success)
+            self.assertEqual(event["timeout"], rows[0].timeout)
+            self.assertEqual(event["failure_stage"], rows[0].failure_stage)
+            self.assertEqual(event["failure_reason"], rows[0].failure_reason)
+
+    def test_logical_scenario_fingerprint_includes_frozen_transaction_policy(self) -> None:
+        original = transactional._logical_scenario_fingerprint(
+            self.formal, "command_rejection", 7, 8,
+        )
+        changed = dict(self.formal)
+        changed["transaction"] = {
+            **self.formal["transaction"],
+            "max_attempts": int(self.formal["transaction"]["max_attempts"]) + 1,
+        }
+
+        self.assertNotEqual(
+            original,
+            transactional._logical_scenario_fingerprint(
+                changed, "command_rejection", 7, 8,
+            ),
         )
 
     def test_override_safety_rejects_formal_default_output_and_existing_raw(self) -> None:
@@ -2065,3 +2103,36 @@ class TransactionalAggregationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "fault fingerprints"):
             aggregate_transactional(rows)
+
+    def test_paired_output_reports_explicit_zero_valid_conditional_pairs(self) -> None:
+        """Conditional metrics must show excluded pairs instead of disappearing."""
+        rows = [
+            {
+                "scenario_class": "command_rejection", "num_agents": 4,
+                "seed": 0, "fault_schedule_fingerprint": "shared",
+                "method_id": method, "success": False, "timeout": True,
+                "verified_correct": False, "attempt_count": 2,
+                "method_owned_formation_latency_ms": 1.0,
+                "time_to_correct_formation_ms": None,
+                "rollback_scope_objects": "[]", "wasted_rule_commands": 1,
+                "partial_state_exposure_ms": 1.0,
+            }
+            for method in ("proposed", "cspf", "global_sfc_embedding")
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paired_differences.csv"
+            _write_transactional_paired_differences(
+                rows, path, Path("trials.csv"), "a" * 64,
+            )
+            with path.open(encoding="utf-8", newline="") as handle:
+                output = list(csv.DictReader(handle))
+        metric = next(
+            row for row in output
+            if row["method_id"] == "cspf"
+            and row["metric"] == "time_to_correct_formation_ms"
+        )
+        self.assertEqual(metric["eligible_pairs"], "1")
+        self.assertEqual(metric["paired_trials"], "0")
+        self.assertEqual(metric["excluded_pairs"], "1")
+        self.assertEqual(metric["estimate"], "")
+        self.assertEqual(metric["exclusion_reason"], "not_successful_verified_both")

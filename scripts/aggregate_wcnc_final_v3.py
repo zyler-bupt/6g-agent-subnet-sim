@@ -9,6 +9,16 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
+from experiments.exp1_transactional_formation import (
+    ARM_ID as TRANSACTIONAL_ARM_ID,
+    load_transactional_config,
+)
+from experiments.paper_protocol import PROTOCOL_ID, stable_fingerprint
+from scripts.normalize_wcnc_final_v3_exp1_transactional import (
+    RAW_SCHEMA_PATH as TRANSACTIONAL_RAW_SCHEMA_PATH,
+    _validate_canonical_rows,
+)
+
 
 def read_rows(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
@@ -38,6 +48,8 @@ def cluster_bootstrap(values: list[tuple[int, float]], iterations: int = 5000) -
         clusters[seed].append(value)
     keys = sorted(clusters)
     mean = sum(value for _, value in values) / len(values)
+    if all(value == values[0][1] for _, value in values):
+        return mean, mean, mean
     rng = random.Random("wcnc_final_v3_cluster_bootstrap")
     samples = []
     for _ in range(iterations):
@@ -61,6 +73,18 @@ TRANSACTIONAL_FORMAL_SCENARIOS = (
 )
 TRANSACTIONAL_FORMAL_SIZES = (4, 8, 12, 16, 20)
 TRANSACTIONAL_FORMAL_SEEDS = tuple(range(50))
+TRANSACTIONAL_CANONICAL_REQUIRED = frozenset({
+    "protocol_id", "arm_id", "phase", "result_mode", "trial_id", "run_id",
+    "scenario_class", "scenario_fingerprint", "seed", "num_agents", "method_id",
+    "fault_schedule_fingerprint", "configuration_sha256", "execution_mode_detail",
+    "success", "timeout", "failure_stage", "failure_reason", "verified_correct",
+    "infrastructure_cleanup_success", "cleanup_failure_reason",
+    "leaked_state_fingerprint", "source_runs_sha256", "source_attempts_sha256",
+})
+TRANSACTIONAL_FORMAL_CONFIG = (
+    Path(__file__).resolve().parents[1]
+    / "configs" / "exp1_transactional_formation_v1.yaml"
+)
 
 
 def _number(value: object) -> float | None:
@@ -157,6 +181,75 @@ def _validate_transactional_pairing(rows: list[dict[str, object]]) -> None:
             raise ValueError(f"transactional paired trial {key!r} has divergent fault fingerprints")
 
 
+def _validate_transactional_canonical_artifact(
+    raw_path: Path, rows: list[dict[str, str]], raw_sha: str,
+) -> None:
+    manifest_path = raw_path.with_name("normalization_manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("transactional aggregation requires a normalization manifest") from error
+    if not isinstance(manifest, dict):
+        raise ValueError("transactional normalization manifest must be an object")
+    config = load_transactional_config(TRANSACTIONAL_FORMAL_CONFIG)
+    expected_config_hash = stable_fingerprint(config)
+    expected_manifest = {
+        "protocol_id": PROTOCOL_ID,
+        "arm_id": TRANSACTIONAL_ARM_ID,
+        "phase": "formal",
+        "result_mode": "measured_netns",
+        "configuration_sha256": expected_config_hash,
+        "trials_sha256": raw_sha,
+        "row_count": len(rows),
+        "raw_schema_file_sha256": hashlib.sha256(
+            TRANSACTIONAL_RAW_SCHEMA_PATH.read_bytes()
+        ).hexdigest(),
+    }
+    for field, value in expected_manifest.items():
+        if manifest.get(field) != value:
+            raise ValueError(f"transactional normalization manifest mismatch: {field}")
+    if manifest.get("canonical_config") != config:
+        raise ValueError("transactional normalization manifest canonical config is untrusted")
+    if manifest.get("formal_config_file_sha256") != hashlib.sha256(
+        TRANSACTIONAL_FORMAL_CONFIG.read_bytes()
+    ).hexdigest():
+        raise ValueError("transactional normalization manifest config file hash is untrusted")
+    if manifest.get("formal_config_path") != "configs/exp1_transactional_formation_v1.yaml":
+        raise ValueError("transactional normalization manifest config path is untrusted")
+    event_count = manifest.get("event_count")
+    if not isinstance(event_count, int) or event_count < 2 * len(rows):
+        raise ValueError("transactional normalization manifest event count is invalid")
+    source_hashes = {
+        "source_runs_sha256": manifest.get("source_runs_sha256"),
+        "source_attempts_sha256": manifest.get("source_attempts_sha256"),
+        "source_measurement_scope_sha256": manifest.get("source_measurement_scope_sha256"),
+    }
+    if not all(
+        isinstance(value, str) and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        for value in source_hashes.values()
+    ):
+        raise ValueError("transactional normalization manifest lacks source provenance hashes")
+    _validate_canonical_rows(rows)
+    for index, row in enumerate(rows, start=2):
+        missing = sorted(TRANSACTIONAL_CANONICAL_REQUIRED - set(row))
+        if missing:
+            raise ValueError(f"transactional canonical row {index} is missing: {','.join(missing)}")
+        if (
+            row["protocol_id"] != PROTOCOL_ID
+            or row["arm_id"] != TRANSACTIONAL_ARM_ID
+            or row["phase"] != "formal"
+            or row["result_mode"] != "measured_netns"
+            or row["configuration_sha256"] != expected_config_hash
+        ):
+            raise ValueError("transactional canonical row has untrusted arm provenance")
+        if (
+            row["source_runs_sha256"] != source_hashes["source_runs_sha256"]
+            or row["source_attempts_sha256"] != source_hashes["source_attempts_sha256"]
+        ):
+            raise ValueError("transactional canonical row source provenance disagrees with manifest")
+
+
 def aggregate_transactional(
     rows: list[dict[str, object]],
     *,
@@ -224,6 +317,8 @@ def _write_transactional_paired_differences(
             raise ValueError("transactional paired analysis has duplicate trial identities")
         indexed[key] = row
     differences: dict[tuple[str, int, str, str], list[tuple[int, float]]] = defaultdict(list)
+    eligible: dict[tuple[str, int, str, str], int] = defaultdict(int)
+    exclusion_reasons: dict[tuple[str, int, str, str], set[str]] = defaultdict(set)
     rate_metrics = (
         ("success_rate", lambda row: float(truth(row.get("success")))),
         ("timeout_rate", lambda row: float(truth(row.get("timeout")))),
@@ -236,32 +331,45 @@ def _write_transactional_paired_differences(
         if proposed is None:
             continue
         for metric, value in rate_metrics:
-            differences[(scenario_class, num_agents, method, metric)].append(
+            key = (scenario_class, num_agents, method, metric)
+            eligible[key] += 1
+            differences[key].append(
                 (seed, value(row) - value(proposed))
             )
         for metric, successful_verified_only in TRANSACTIONAL_CONTINUOUS:
+            key = (scenario_class, num_agents, method, metric)
+            eligible[key] += 1
             if successful_verified_only and not (
                 truth(row.get("success")) and truth(row.get("verified_correct"))
                 and truth(proposed.get("success")) and truth(proposed.get("verified_correct"))
             ):
+                exclusion_reasons[key].add("not_successful_verified_both")
                 continue
             baseline_value = _transactional_value(row, metric)
             proposed_value = _transactional_value(proposed, metric)
             if baseline_value is None or proposed_value is None:
+                exclusion_reasons[key].add("missing_source_value")
                 continue
-            differences[(scenario_class, num_agents, method, metric)].append(
+            differences[key].append(
                 (seed, baseline_value - proposed_value)
             )
     output: list[dict[str, object]] = []
-    for (scenario_class, num_agents, method, metric), values in sorted(differences.items()):
+    for (scenario_class, num_agents, method, metric), count in sorted(eligible.items()):
+        values = differences[(scenario_class, num_agents, method, metric)]
         estimate, low, high = cluster_bootstrap(values)
+        paired_trials = len(values)
+        excluded_pairs = count - paired_trials
         output.append({
             "protocol_id": "wcnc_final_v3", "experiment": "exp1_transactional",
             "series": scenario_class, "method_id": method,
             "reference_method_id": "proposed", "x_name": "num_agents",
             "x_value": num_agents, "metric": metric,
-            "paired_difference": estimate, "ci_low": low, "ci_high": high,
-            "paired_trials": len(values),
+            "paired_difference": estimate if paired_trials else "",
+            "estimate": estimate if paired_trials else "",
+            "ci_low": low if paired_trials else "", "ci_high": high if paired_trials else "",
+            "eligible_pairs": count, "paired_trials": paired_trials,
+            "excluded_pairs": excluded_pairs,
+            "exclusion_reason": ";".join(sorted(exclusion_reasons[(scenario_class, num_agents, method, metric)])),
             "interval": "paired_topology_cluster_bootstrap_95",
             "raw_path": str(raw_path), "raw_sha256": raw_sha,
         })
@@ -270,7 +378,8 @@ def _write_transactional_paired_differences(
         fields = list(output[0]) if output else [
             "protocol_id", "experiment", "series", "method_id",
             "reference_method_id", "x_name", "x_value", "metric",
-            "paired_difference", "ci_low", "ci_high", "paired_trials",
+            "paired_difference", "estimate", "ci_low", "ci_high", "eligible_pairs",
+            "paired_trials", "excluded_pairs", "exclusion_reason",
             "interval", "raw_path", "raw_sha256",
         ]
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -299,6 +408,7 @@ def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[di
         grid_errors = _transactional_formal_grid_errors(rows)
         if grid_errors:
             raise ValueError("; ".join(grid_errors))
+        _validate_transactional_canonical_artifact(raw_path, rows, raw_sha)
         out = aggregate_transactional(rows, raw_path=raw_path, raw_sha=raw_sha)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fields = list(out[0]) if out else []

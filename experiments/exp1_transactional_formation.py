@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import ipaddress
 import json
 import os
@@ -74,6 +75,8 @@ class TransactionalFormationRun:
     protocol_id: str
     arm_id: str
     phase: str
+    result_mode: str
+    execution_mode_detail: str
     run_id: str
     run_sequence: int
     scenario_class: str
@@ -82,6 +85,7 @@ class TransactionalFormationRun:
     num_gateways: int
     num_business_edges: int
     method_id: str
+    scenario_fingerprint: str
     fault_schedule_fingerprint: str
     logical_fault_target: str
     observation_version_fingerprint: str
@@ -361,6 +365,9 @@ def run_transactional_trial(
     observation_fingerprint = ""
     verifier_fingerprint = ""
     configuration_sha256 = stable_fingerprint(config)
+    scenario_fingerprint = _logical_scenario_fingerprint(
+        config, scenario_class, seed, num_agents
+    )
     attempt_count = 1
     rollback_scope: set[str] = set()
     wasted_rule_commands = 0
@@ -753,6 +760,8 @@ def run_transactional_trial(
         protocol_id=str(experiment["protocol_id"]),
         arm_id=str(experiment["arm_id"]),
         phase=str(experiment["phase"]),
+        result_mode="measured_netns",
+        execution_mode_detail=str(simulation["result_mode"]),
         run_id=run_id,
         run_sequence=run_sequence,
         scenario_class=scenario_class,
@@ -761,6 +770,7 @@ def run_transactional_trial(
         num_gateways=int(getattr(topology, "num_gateways", 0)),
         num_business_edges=len(edges),
         method_id=method_id,
+        scenario_fingerprint=scenario_fingerprint,
         fault_schedule_fingerprint=fault_fingerprint,
         logical_fault_target=logical_target,
         observation_version_fingerprint=observation_fingerprint,
@@ -809,11 +819,40 @@ def run_transactional_trial(
             run_id,
             ended,
             "TERMINAL_ROW_READY",
-            {"success": row.success, "timeout": row.timeout},
+            _terminal_details(row),
         )
     )
     events.sort(key=lambda item: (float(item["timestamp"]), str(item["stage"])))
     return row, events
+
+
+def _logical_scenario_fingerprint(
+    config: Mapping[str, object], scenario_class: str, seed: int, num_agents: int,
+) -> str:
+    """Fingerprint logical scenario inputs only; never method-specific process IDs."""
+    return stable_fingerprint({
+        "protocol_id": config["experiment"]["protocol_id"],  # type: ignore[index]
+        "arm_id": config["experiment"]["arm_id"],  # type: ignore[index]
+        "phase": config["experiment"]["phase"],  # type: ignore[index]
+        "scenario_class": scenario_class,
+        "seed": seed,
+        "num_agents": num_agents,
+        "task": config["task"],
+        "traffic_control": config["traffic_control"],
+        "transaction": config["transaction"],
+        "verification": config["verification"],
+        "timeout_s": config["simulation"]["timeout_s"],  # type: ignore[index]
+    })
+
+
+def _terminal_details(row: TransactionalFormationRun) -> dict[str, object]:
+    return {
+        "success": row.success,
+        "timeout": row.timeout,
+        "failure_stage": row.failure_stage,
+        "failure_reason": row.failure_reason,
+        "verified_correct": row.verified_correct,
+    }
 
 
 def run_transactional_experiment(
@@ -860,6 +899,10 @@ def run_transactional_experiment(
         "common_infrastructure": "canonical topology commands installed outside method transactions",
         "attempts_written_before_terminal_rows": True,
         "completed_rows": 0,
+        "row_count": 0,
+        "event_count": 0,
+        "runs_csv_sha256": "",
+        "attempts_jsonl_sha256": "",
     }
     scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with runs_path.open("w", encoding="utf-8", newline="") as handle:
@@ -901,18 +944,22 @@ def run_transactional_experiment(
                 row.run_id,
                 time.perf_counter(),
                 "TERMINAL_ROW_READY",
-                {"success": row.success, "timeout": row.timeout},
+                _terminal_details(row),
             )
         )
-        events.sort(key=lambda item: (float(item["timestamp"]), str(item["stage"])))
+        events = _finalize_persisted_events(events, row)
         _append_jsonl(attempts_path, events)
         _append_csv(runs_path, row)
         rows.append(row)
+        scope["event_count"] = int(scope["event_count"]) + len(events)
 
     if require_complete_grid:
         _validate_complete_grid(rows, schedule)
     scope["completed_rows"] = len(rows)
+    scope["row_count"] = len(rows)
     scope["complete_grid_validated"] = bool(require_complete_grid)
+    scope["runs_csv_sha256"] = hashlib.sha256(runs_path.read_bytes()).hexdigest()
+    scope["attempts_jsonl_sha256"] = hashlib.sha256(attempts_path.read_bytes()).hexdigest()
     scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return rows
 
@@ -1268,6 +1315,40 @@ def _validate_complete_grid(
         )
 
 
+def _finalize_persisted_events(
+    events: Sequence[Mapping[str, object]], row: TransactionalFormationRun,
+) -> list[dict[str, object]]:
+    """Attach immutable trial identity and an auditable per-run event sequence."""
+    materialized = [dict(event) for event in events]
+    materialized.sort(
+        key=lambda item: (
+            float(item["timestamp"]),
+            item["stage"] == "TERMINAL_ROW_READY",
+            str(item["stage"]),
+        )
+    )
+    finalized: list[dict[str, object]] = []
+    for sequence, event in enumerate(materialized, start=1):
+        if event.get("run_id") != row.run_id:
+            raise RuntimeError("transactional event does not belong to its terminal row")
+        event.update({
+            "event_sequence": sequence,
+            "run_sequence": row.run_sequence,
+            "method_id": row.method_id,
+            "scenario_class": row.scenario_class,
+            "seed": row.seed,
+            "num_agents": row.num_agents,
+            "success": row.success,
+            "timeout": row.timeout,
+            "failure_stage": row.failure_stage,
+            "failure_reason": row.failure_reason,
+        })
+        if event.get("stage") == "TERMINAL_ROW_READY":
+            event["details"] = _terminal_details(row)
+        finalized.append(event)
+    return finalized
+
+
 def _append_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for row in rows:
@@ -1328,6 +1409,8 @@ def _construction_failure(
         protocol_id=str(config["experiment"]["protocol_id"]),  # type: ignore[index]
         arm_id=str(config["experiment"]["arm_id"]),  # type: ignore[index]
         phase=str(config["experiment"]["phase"]),  # type: ignore[index]
+        result_mode="measured_netns",
+        execution_mode_detail=str(config["simulation"]["result_mode"]),  # type: ignore[index]
         run_id=run_id,
         run_sequence=scheduled.run_sequence,
         scenario_class=scheduled.scenario_class,
@@ -1336,6 +1419,9 @@ def _construction_failure(
         num_gateways=num_gateways,
         num_business_edges=0,
         method_id=scheduled.method_id,
+        scenario_fingerprint=_logical_scenario_fingerprint(
+            config, scheduled.scenario_class, scheduled.seed, scheduled.num_agents,
+        ),
         fault_schedule_fingerprint="",
         logical_fault_target="",
         observation_version_fingerprint="",
@@ -1372,7 +1458,7 @@ def _construction_failure(
             run_id, now, "TRIAL_FAILED",
             {"failure_stage": row.failure_stage, "reason": reason},
         ),
-        _event(run_id, now, "TERMINAL_ROW_READY", {"success": False, "timeout": row.timeout}),
+        _event(run_id, now, "TERMINAL_ROW_READY", _terminal_details(row)),
     ]
 
 
