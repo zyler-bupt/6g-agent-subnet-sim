@@ -82,6 +82,20 @@ class PaperFailureScenarioTests(unittest.TestCase):
             snapshot.pre_capacity_mbps * 0.70,
         )
 
+    def test_capacity_sweep_keeps_the_same_fault_target_for_a_seed(self) -> None:
+        snapshots = [
+            generate_paper_failure_snapshot(
+                "capacity_degradation", 1.0 - ratio,
+                seed=7, event_id=0, capacity_ratio=ratio,
+            )
+            for ratio in (1.1, 1.0, 0.9, 0.75, 0.6)
+        ]
+
+        self.assertEqual(len({item.topology_fingerprint for item in snapshots}), 1)
+        self.assertEqual(len({item.qos_fingerprint for item in snapshots}), 1)
+        self.assertEqual(len({item.base.target_edge_id for item in snapshots}), 1)
+        self.assertEqual(len({item.failed_link for item in snapshots}), 1)
+
 
 class PaperFailureStrategyTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_failure_verification_does_not_invent_capacity_failure(self) -> None:

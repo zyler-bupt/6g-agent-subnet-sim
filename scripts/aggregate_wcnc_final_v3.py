@@ -397,8 +397,8 @@ def _x(exp: str, row: dict[str, str]) -> tuple[str, float]:
     if row["failure_type"] == "capacity_degradation":
         return "post_fault_capacity_ratio", float(row["post_fault_capacity_ratio"])
     if row["failure_type"] == "agent_failure":
-        return "dependency_closure_ratio", float(row["dependency_closure_ratio"])
-    return "affected_flow_ratio", float(row["affected_flow_ratio"])
+        return "target_dependency_closure_ratio", float(row["failure_severity"])
+    return "target_affected_flow_ratio", float(row["failure_severity"])
 
 
 def aggregate_experiment(exp: str, raw_path: Path, output_path: Path) -> list[dict[str, object]]:

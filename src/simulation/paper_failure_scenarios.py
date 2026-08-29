@@ -317,9 +317,8 @@ def generate_paper_failure_snapshot(
             ),
         )
     else:
-        ratio_for_salt = capacity_ratio if capacity_ratio is not None else 1.0 - severity
         generated = _select_independent_event(
-            generated, seed, event_id, selection_salt=f"capacity:{ratio_for_salt:g}"
+            generated, seed, event_id, selection_salt="capacity:paired-target"
         )
     affected_demand = sum(
         edge.data_rate_mbps

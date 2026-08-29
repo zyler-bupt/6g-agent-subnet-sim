@@ -75,6 +75,8 @@ def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
         "gamma": r"Load factor $\gamma$", "num_agents": "Number of Agents",
         "affected_dependency_scope_percent": "Affected scope (%)",
         "affected_flow_ratio": "Affected-flow ratio", "dependency_closure_ratio": "Dependency-closure ratio",
+        "target_affected_flow_ratio": "Target affected-flow ratio",
+        "target_dependency_closure_ratio": "Target dependency-closure ratio",
         "post_fault_capacity_ratio": "Post-fault capacity / demand",
     }
     metric_labels = {
@@ -85,6 +87,8 @@ def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
         "modification_scope_ratio": "Modification scope", "unaffected_flow_interruption": "Unaffected-flow interruption",
     }
     ax.set_xlabel(axis_labels.get(selected[0]["x_name"], selected[0]["x_name"].replace("_", " ").title()))
+    if selected[0]["x_name"] == "post_fault_capacity_ratio":
+        ax.invert_xaxis()
     ax.set_ylabel(metric_labels.get(metric, metric.replace("_", " ").title()))
     ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.6); ax.legend(frameon=False, fontsize=7)
     output.parent.mkdir(parents=True, exist_ok=True)

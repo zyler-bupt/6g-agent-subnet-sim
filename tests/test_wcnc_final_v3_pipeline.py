@@ -25,7 +25,7 @@ from experiments.exp1_transactional_formation import (
     run_transactional_experiment,
 )
 from src.simulation.paper_failure_scenarios import generate_paper_failure_snapshot
-from scripts.aggregate_wcnc_final_v3 import aggregate_experiment
+from scripts.aggregate_wcnc_final_v3 import _x, aggregate_experiment
 from scripts.normalize_wcnc_final_v3_exp1 import _configuration_sha256, normalize
 from scripts.normalize_wcnc_final_v3_exp1_transactional import (
     _validate_attempt_events,
@@ -41,6 +41,30 @@ from scripts.audit_wcnc_final_v3 import (
 
 
 class WcncFinalV3PipelineTests(unittest.TestCase):
+    def test_exp4_groups_target_severity_without_discarding_realized_ratios(self) -> None:
+        link = {
+            "failure_type": "link_failure",
+            "failure_severity": "0.15",
+            "affected_flow_ratio": "0.1388888888888889",
+        }
+        agent = {
+            "failure_type": "agent_failure",
+            "failure_severity": "0.4",
+            "dependency_closure_ratio": "0.4166666666666667",
+        }
+        capacity = {
+            "failure_type": "capacity_degradation",
+            "failure_severity": "0.25",
+            "post_fault_capacity_ratio": "0.75",
+        }
+
+        self.assertEqual(_x("exp4", link), ("target_affected_flow_ratio", 0.15))
+        self.assertEqual(
+            _x("exp4", agent), ("target_dependency_closure_ratio", 0.4)
+        )
+        self.assertEqual(
+            _x("exp4", capacity), ("post_fault_capacity_ratio", 0.75)
+        )
     @staticmethod
     def _causal_transactional_stream() -> tuple[dict[str, str], list[dict[str, object]]]:
         row = {
