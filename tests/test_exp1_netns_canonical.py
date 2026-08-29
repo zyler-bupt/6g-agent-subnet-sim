@@ -110,6 +110,21 @@ class Exp1NamespaceIsolationTests(unittest.TestCase):
             ("unshare", "--user", "--map-root-user", "--net", "--fork", "python", "-m", "experiments.exp1_netns_verified_formation", "--seeds", "0:49"),
         )
 
+    def test_reexec_command_defaults_to_the_nominal_module(self) -> None:
+        command = exp1.namespace_reexec_command((), euid=0, python="python")
+
+        self.assertEqual(
+            command,
+            (
+                "unshare",
+                "--net",
+                "--fork",
+                "python",
+                "-m",
+                "experiments.exp1_netns_verified_formation",
+            ),
+        )
+
     def test_internal_reexec_restores_sentinel_and_parent_provenance(self) -> None:
         completed = SimpleNamespace(returncode=0)
         with (

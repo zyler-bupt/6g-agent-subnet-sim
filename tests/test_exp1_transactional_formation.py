@@ -60,6 +60,54 @@ from src.controller.formation_transactions import (
 )
 
 
+class TransactionalCliTests(unittest.TestCase):
+    def test_unprivileged_reexec_runs_the_transactional_module(self) -> None:
+        completed = SimpleNamespace(returncode=0)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                transactional.sys,
+                "argv",
+                [
+                    "exp1_transactional",
+                    "--config",
+                    "configs/exp1_transactional_formation_pilot_v1.yaml",
+                    "--output-dir",
+                    directory,
+                ],
+            ),
+            patch.object(transactional.nominal, "_inside_user_namespace", return_value=False),
+            patch.object(transactional.nominal, "_network_namespace_inode", return_value=321),
+            patch.object(transactional.nominal.os, "geteuid", return_value=1000),
+            patch.object(transactional.nominal.sys, "executable", "python"),
+            patch.object(
+                transactional.nominal.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            with self.assertRaisesRegex(SystemExit, "0"):
+                transactional.main()
+
+        self.assertEqual(
+            run.call_args.args[0],
+            (
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--net",
+                "--fork",
+                "python",
+                "-m",
+                "experiments.exp1_transactional_formation",
+                "--config",
+                "configs/exp1_transactional_formation_pilot_v1.yaml",
+                "--output-dir",
+                directory,
+            ),
+        )
+
+
 class MethodTransactionAdapterTests(unittest.TestCase):
     @staticmethod
     def _plan(method_id: str, labels: tuple[str, ...]) -> SimpleNamespace:

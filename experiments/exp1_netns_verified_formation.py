@@ -2988,7 +2988,11 @@ def validate_isolated_outer_namespace(
 
 
 def namespace_reexec_command(
-    argv: Sequence[str], *, euid: int, python: str
+    argv: Sequence[str],
+    *,
+    euid: int,
+    python: str,
+    module: str = "experiments.exp1_netns_verified_formation",
 ) -> tuple[str, ...]:
     namespace_options = (
         ("--net", "--fork")
@@ -3000,12 +3004,16 @@ def namespace_reexec_command(
         *namespace_options,
         python,
         "-m",
-        "experiments.exp1_netns_verified_formation",
+        module,
         *argv,
     )
 
 
-def _reexec_in_user_namespace(argv: Sequence[str]) -> int:
+def _reexec_in_user_namespace(
+    argv: Sequence[str],
+    *,
+    module: str = "experiments.exp1_netns_verified_formation",
+) -> int:
     environment = dict(os.environ)
     environment["WCNC_EXP1_INSIDE_USERNS"] = "1"
     environment["WCNC_EXP1_PARENT_NETNS_INODE"] = str(_network_namespace_inode())
@@ -3013,6 +3021,7 @@ def _reexec_in_user_namespace(argv: Sequence[str]) -> int:
         argv,
         euid=os.geteuid(),
         python=sys.executable,
+        module=module,
     )
     return subprocess.run(command, env=environment, check=False).returncode
 

@@ -1939,7 +1939,12 @@ def main() -> None:
         resume=args.resume,
     )
     if not nominal._inside_user_namespace():
-        raise SystemExit(nominal._reexec_in_user_namespace(sys.argv[1:]))
+        raise SystemExit(
+            nominal._reexec_in_user_namespace(
+                sys.argv[1:],
+                module="experiments.exp1_transactional_formation",
+            )
+        )
     nominal.validate_isolated_outer_namespace()
     current_commit = subprocess.run(
         ("git", "rev-parse", "HEAD"), check=True, text=True, capture_output=True,
