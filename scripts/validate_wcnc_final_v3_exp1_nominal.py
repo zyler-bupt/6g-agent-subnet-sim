@@ -314,17 +314,16 @@ def _validate_run_causality(run_id: str, stream: list[dict[str, Any]], row: dict
             raise ValueError(f"nominal run {run_id} {description} contradicts row")
     batches = route_details.get("deployment_batches")
     commands = route_details.get("commands")
-    if not isinstance(batches, list) or len(batches) != int(row["control_messages"]):
-        raise ValueError(f"nominal run {run_id} deployment batch evidence contradicts row")
-    if not isinstance(commands, list) or len(commands) != int(row["rules_installed"]):
-        raise ValueError(f"nominal run {run_id} deployment command evidence contradicts row")
-    if sum(
-        int(batch.get("command_count", -1))
-        for batch in batches if isinstance(batch, dict)
-    ) != int(row["rules_installed"]) or len(batches) != sum(
-        isinstance(batch, dict) for batch in batches
+    if not isinstance(batches, list) or not isinstance(commands, list):
+        raise ValueError(f"nominal run {run_id} deployment evidence shape is invalid")
+    if any(
+        not isinstance(batch, dict)
+        or not isinstance(batch.get("label"), str)
+        or not isinstance(batch.get("command_count"), int)
+        or int(batch["command_count"]) < 0
+        for batch in batches
     ):
-        raise ValueError(f"nominal run {run_id} deployment batch command counts contradict row")
+        raise ValueError(f"nominal run {run_id} planned deployment batch shape is invalid")
     if any(
         not isinstance(command, dict)
         or not isinstance(command.get("command"), list)
@@ -332,6 +331,30 @@ def _validate_run_causality(run_id: str, stream: list[dict[str, Any]], row: dict
         for command in commands
     ):
         raise ValueError(f"nominal run {run_id} deployment command shape is invalid")
+    planned_rules = sum(int(batch["command_count"]) for batch in batches)
+    returned_messages = int(row["control_messages"])
+    returned_rules = int(row["rules_installed"])
+    if (
+        returned_messages < 0 or returned_rules < 0
+        or returned_messages > len(batches) or returned_rules > planned_rules
+        or len(commands) > planned_rules
+    ):
+        raise ValueError(f"nominal run {run_id} deployment evidence exceeds planned work")
+    failure_stage = row["failure_stage"]
+    if failure_stage == "PREPARATION":
+        if returned_messages or returned_rules or commands:
+            raise ValueError(f"nominal run {run_id} preparation failure issued deployment work")
+    elif failure_stage == "ROUTE_INSTALLATION":
+        # The installer assigns returned counters only after the whole plan
+        # returns.  Completed earlier batches may therefore be evidenced even
+        # while row counters remain zero or partial.
+        pass
+    elif (
+        len(batches) != returned_messages
+        or planned_rules != returned_rules
+        or len(commands) != returned_rules
+    ):
+        raise ValueError(f"nominal run {run_id} completed deployment evidence contradicts row")
     if str(terminal_details.get("failure_reason", "")) != row["failure_reason"]:
         raise ValueError(f"nominal run {run_id} terminal failure reason contradicts row")
 

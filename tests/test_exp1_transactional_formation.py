@@ -2467,6 +2467,7 @@ class RemoteLauncherContractTests(unittest.TestCase):
                         row["affected_scope_ratio"] = str(float(point) / 100.0)
                         row["reconfiguration_latency_ms"] = "1.0"
                         row["modification_scope_ratio"] = "0.1"
+                        row["unaffected_disturbance_ratio"] = "0.0"
                     if experiment == "exp4":
                         row[{
                             "link_failure": "affected_flow_ratio",
@@ -2475,6 +2476,7 @@ class RemoteLauncherContractTests(unittest.TestCase):
                         }[failure_type]] = str(point)
                         row["recovery_latency_ms"] = "1.0"
                         row["modification_scope_ratio"] = "0.1"
+                        row["unaffected_disturbance_ratio"] = "0.0"
                     rows.append({key: value for key, value in row.items() if key in expected_fields})
         return rows
 
@@ -2573,6 +2575,34 @@ class RemoteLauncherContractTests(unittest.TestCase):
             validate_staged_experiment(
                 source, "exp2", seeds=(0,), expected_commit=head,
             )
+
+    def test_staging_requires_all_plotted_metric_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            cases = (
+                ("exp2", "coordination_latency_ms", False),
+                ("exp3", "modification_scope_ratio", False),
+                ("exp3", "unaffected_disturbance_ratio", False),
+                ("exp3", "reconfiguration_latency_ms", True),
+                ("exp4", "modification_scope_ratio", False),
+                ("exp4", "unaffected_disturbance_ratio", False),
+                ("exp4", "recovery_latency_ms", True),
+            )
+            for index, (experiment, metric, successful_only) in enumerate(cases):
+                rows = self._staged_rows(experiment, (0,))
+                if successful_only:
+                    rows[0]["success"] = "true"
+                rows[0][metric] = ""
+                source = self._write_staged_rows(base / f"case-{index}", experiment, rows)
+                with self.subTest(experiment=experiment, metric=metric), self.assertRaisesRegex(
+                    ValueError, metric,
+                ):
+                    validate_staged_experiment(
+                        source, experiment, seeds=(0,), expected_commit=head,
+                    )
 
     def test_immutable_tree_preflights_all_files_before_copying(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3018,7 +3048,6 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 if event["stage"] == "ROUTE_INSTALL_STARTED":
                     event["details"]["control_messages"] = 0
                     event["details"]["rules_installed"] = 0
-                    event["details"]["deployment_batches"] = []
                     event["details"]["commands"] = []
                 if event["stage"] == "PING_VERIFY_FINISHED":
                     event["details"]["passed"] = 0
@@ -3030,6 +3059,50 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 "".join(json.dumps(item, sort_keys=True) + "\n" for item in changed),
                 encoding="utf-8",
             )
+
+            result = validate_completed_nominal_artifacts(runs, events, scope, config)
+
+        self.assertTrue(result.complete)
+
+    def test_nominal_validator_accepts_partial_route_install_evidence(self) -> None:
+        """A thrown install can retain completed command evidence without returned totals."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            row = rows[0]; run_id = row["run_id"]
+            row.update({
+                "control_messages": "0", "rules_installed": "0",
+                "ping_edges_passed": "0", "ping_attempts": "0",
+                "ping_retried_edges": "0", "ping_mean_rtt_ms": "0.0",
+                "ping_max_packet_loss_percent": "100.0", "ping_timeouts": "0",
+                "iperf_flows_passed": "0", "iperf_attempts": "0",
+                "iperf_retried_flows": "0", "iperf_retransmissions": "0",
+                "iperf_reported_duration_s": "0.0",
+                "aggregate_receiver_throughput_mbps": "0.0", "retry_count": "0",
+                "failure_stage": "ROUTE_INSTALLATION", "formation_failed": "true",
+                "success": "false", "failure_reason": "RuntimeError:install failed",
+            })
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader(); writer.writerows(rows)
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            changed = []
+            for event in payloads:
+                if event["run_id"] != run_id:
+                    changed.append(event); continue
+                if event["stage"] in {"PING_COMMAND_RESULT", "IPERF3_COMMAND_RESULT"}:
+                    continue
+                if event["stage"] == "ROUTE_INSTALL_STARTED":
+                    event["details"]["control_messages"] = 0
+                    event["details"]["rules_installed"] = 0
+                    event["details"]["commands"] = event["details"]["commands"][:1]
+                if event["stage"] == "PING_VERIFY_FINISHED": event["details"]["passed"] = 0
+                if event["stage"] == "DATA_PLANE_VERIFIED":
+                    event["stage"] = "FORMATION_FAILED"
+                    event["details"].update(passed=0, failure_reason=row["failure_reason"])
+                changed.append(event)
+            events.write_text("".join(json.dumps(item, sort_keys=True) + "\n" for item in changed), encoding="utf-8")
 
             result = validate_completed_nominal_artifacts(runs, events, scope, config)
 

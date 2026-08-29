@@ -89,6 +89,12 @@ def _strict_bool(value: object, field: str, *, nullable: bool = False) -> bool |
 
 
 def _validate_metric_domains(row: dict[str, str], experiment: str) -> None:
+    def require_finite(field: str) -> float:
+        value = row.get(field, "")
+        if value == "":
+            raise ValueError(f"staged {experiment} requires nonempty {field}")
+        return _number(value)
+
     for field in _BOOL_FIELDS & set(row):
         _strict_bool(row[field], field, nullable=field not in {"success", "timeout", "adapted"})
     for field in _INT_FIELDS & set(row):
@@ -117,12 +123,28 @@ def _validate_metric_domains(row: dict[str, str], experiment: str) -> None:
         )
         if producer_method != row.get("method_id") and not failed_before_metric:
             raise ValueError("staged Exp2 producer method identity drift")
+        if not failed_before_metric:
+            latency = require_finite("coordination_latency_ms")
+            if latency < 0:
+                raise ValueError("staged coordination_latency_ms is negative")
     if experiment in {"exp3", "exp4"}:
         if row.get("experiment") != experiment or row.get("mode") != "paper":
             raise ValueError(f"staged {experiment} producer identity drift")
         applicable = _strict_bool(row.get("applicable", ""), "applicable", nullable=True)
         if applicable is False:
             raise ValueError("inapplicable baseline must be N/A, not a staged zero row")
+        for field in ("modification_scope_ratio", "unaffected_disturbance_ratio"):
+            value = require_finite(field)
+            if not 0 <= value <= 1:
+                raise ValueError(f"staged {field} ratio is outside [0,1]")
+        if _strict_bool(row.get("success", ""), "success"):
+            latency_field = (
+                "reconfiguration_latency_ms" if experiment == "exp3"
+                else "recovery_latency_ms"
+            )
+            latency = require_finite(latency_field)
+            if latency < 0:
+                raise ValueError(f"staged {latency_field} is negative")
 
 
 def _point(row: dict[str, str], experiment: str) -> float:
