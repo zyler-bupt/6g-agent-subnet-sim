@@ -86,8 +86,15 @@ def plot_metric(rows, metric: str, output: Path, *, series: str = "") -> None:
         "pre_verification_correct_decision_rate": "Pre-verification correct decision rate",
         "modification_scope_ratio": "Modification scope", "unaffected_flow_interruption": "Unaffected-flow interruption",
     }
-    ax.set_xlabel(axis_labels.get(selected[0]["x_name"], selected[0]["x_name"].replace("_", " ").title()))
-    if selected[0]["x_name"] == "post_fault_capacity_ratio":
+    x_name = selected[0]["x_name"]
+    ax.set_xlabel(axis_labels.get(x_name, x_name.replace("_", " ").title()))
+    if x_name in {
+        "target_affected_flow_ratio",
+        "target_dependency_closure_ratio",
+        "post_fault_capacity_ratio",
+    }:
+        ax.set_xticks(sorted({float(row["x_value"]) for row in selected}))
+    if x_name == "post_fault_capacity_ratio":
         ax.invert_xaxis()
     ax.set_ylabel(metric_labels.get(metric, metric.replace("_", " ").title()))
     ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.6); ax.legend(frameon=False, fontsize=7)
