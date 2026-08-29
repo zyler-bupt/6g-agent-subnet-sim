@@ -157,23 +157,25 @@ run_nominal_smoke() {
 run_nominal_formal_with_readonly_audit() {
   local base_dir="$protocol_root/exp1_netns_staging_v3"
   local attempts_dir="$protocol_root/exp1_netns_staging_v3_attempts"
-  local selection="$protocol_root/environment/exp1_nominal_staging_path.txt"
+  local selection="$protocol_root/environment/exp1_nominal_selection.json"
   local output_dir=""
   local runner_status=0
   if [[ -s "$selection" ]]; then
-    output_dir="$(<"$selection")"
+    output_dir="$(.venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
+      --protocol-root "$protocol_root" --receipt "$selection" --verify-selection \
+      --config configs/exp1_netns_verified_formation_v3.yaml)"
   else
-    local candidate
+    local candidate candidates=()
     for candidate in "$base_dir" "$attempts_dir"/attempt-*; do
       [[ -d "$candidate/raw" ]] || continue
-      if .venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
-          --runs "$candidate/raw/runs.csv" --events "$candidate/raw/events.jsonl" \
-          --scope "$candidate/raw/measurement_scope.json" \
-          --config configs/exp1_netns_verified_formation_v3.yaml >/dev/null 2>&1; then
-        output_dir="$candidate"
-        break
-      fi
+      candidates+=(--candidate "$candidate")
     done
+    if [[ "${#candidates[@]}" -gt 0 ]]; then
+      output_dir="$(.venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
+        --protocol-root "$protocol_root" --receipt "$selection" \
+        --config configs/exp1_netns_verified_formation_v3.yaml \
+        "${candidates[@]}" 2>/dev/null || true)"
+    fi
   fi
   if [[ -z "$output_dir" ]]; then
     if [[ ! -e "$base_dir" ]]; then
@@ -201,7 +203,10 @@ run_nominal_formal_with_readonly_audit() {
     --runs "$output_dir/raw/runs.csv" --events "$output_dir/raw/events.jsonl" \
     --scope "$output_dir/raw/measurement_scope.json" \
     --config configs/exp1_netns_verified_formation_v3.yaml
-  printf '%s\n' "$output_dir" > "$selection"
+  .venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
+    --protocol-root "$protocol_root" --receipt "$selection" \
+    --candidate "$output_dir" --config configs/exp1_netns_verified_formation_v3.yaml \
+    >/dev/null
   if [[ "$runner_status" -ne 0 ]]; then
     echo "nominal runner returned $runner_status; exact 750-row artifact/event audit passed" >&2
   fi
@@ -255,10 +260,12 @@ require_immutable_compatible() {
 }
 
 normalize_nominal_arm() {
-  local selection="$protocol_root/environment/exp1_nominal_staging_path.txt"
+  local selection="$protocol_root/environment/exp1_nominal_selection.json"
   test -s "$selection" || { echo "nominal staging selection is missing" >&2; return 3; }
   local selected_dir source_dir
-  selected_dir="$(<"$selection")"
+  selected_dir="$(.venv/bin/python scripts/validate_wcnc_final_v3_exp1_nominal.py \
+    --protocol-root "$protocol_root" --receipt "$selection" --verify-selection \
+    --config configs/exp1_netns_verified_formation_v3.yaml)"
   source_dir="$selected_dir/raw"
   local staging="$protocol_root/normalization_staging/exp1"
   mkdir -p "$staging"
@@ -322,7 +329,7 @@ run_and_publish_simulated_formal() {
   .venv/bin/python scripts/publish_wcnc_final_v3_staging.py \
     --source "$staged_raw" --target "$canonical_raw" \
     --experiment "$experiment" --seeds 0:99 \
-    --config configs/wcnc_final_v3.yaml
+    --config configs/wcnc_final_v3.yaml --expected-commit "$current_commit"
 }
 
 verify_required_figures() {
@@ -366,7 +373,7 @@ verify_required_figures() {
 }
 
 run_step exp1_smoke "$protocol_root/pilot/exp1_netns_smoke_v3" run_nominal_smoke
-run_step exp1_nominal_formal "$protocol_root/environment/exp1_nominal_staging_path.txt" \
+run_step exp1_nominal_formal "$protocol_root/environment/exp1_nominal_selection.json" \
   run_nominal_formal_with_readonly_audit
 run_step exp1_nominal_normalize "$protocol_root/raw/exp1" normalize_nominal_arm
 

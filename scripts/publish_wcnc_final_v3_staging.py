@@ -5,20 +5,124 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
+import math
+import os
 import re
 import shutil
+import subprocess
 from collections import defaultdict
+from dataclasses import fields
 from pathlib import Path
 from typing import Iterable
 
 from experiments.paper_protocol import PROTOCOL_ID, load_and_validate_wcnc_v3_config
+from src.metrics.exp2_robustness import RobustnessRunMetrics
+from src.metrics.paper import PaperTrial
+
+
+_EXP2_FIELDS = {field.name for field in fields(RobustnessRunMetrics)} | {
+    "protocol_id", "execution_mode_detail", "method_id", "gamma",
+    "environment_fingerprint", "observation_fingerprint", "oracle_fingerprint",
+    "pre_verification_correct_decision", "pre_verification_feasible",
+    "unsafe_proposal_before_verification", "verification_rescued", "search_timeout",
+}
+_PAPER_FIELDS = {field.name for field in fields(PaperTrial)} | {"execution_mode_detail"}
+_BOOL_FIELDS = {
+    "adapted", "ground_truth_conflict", "ground_truth_resolvable",
+    "ground_truth_uses_true_state", "pre_execution_feasibility_checked",
+    "conflict_detected", "conflict_resolved", "qos_satisfied",
+    "infeasible_configuration", "decision_rejected", "safe_rejection",
+    "unsafe_execution", "transaction_attempted", "rollback_triggered",
+    "rollback_success", "no_partial_commit", "stale_state_detected",
+    "stale_proposal_rejected", "proposal_regenerated", "success", "timeout",
+    "pre_verification_correct_decision", "pre_verification_decision_correct",
+    "pre_verification_feasible", "unsafe_proposal_before_verification",
+    "verification_rescued", "search_timeout", "applicable",
+}
+_INT_FIELDS = {
+    "seed", "event_id", "task_size", "num_dag_edges", "num_gateways",
+    "total_rules", "total_rule_objects", "changed_rules", "total_paths",
+    "changed_paths", "total_agents", "changed_agents", "affected_agent_count",
+    "total_gateways", "changed_gateways", "total_flows", "unaffected_flows",
+    "disturbed_unaffected_flows", "control_messages", "control_bytes",
+    "rollback_count", "evaluated_combinations", "ground_truth_feasible_combinations",
+    "stale_ms", "proposals_per_layer", "num_proposals", "num_layers_observed",
+    "num_raw_combinations", "num_pruned_combinations", "num_evaluated_combinations",
+    "num_feasible_combinations", "stable_version_before", "stable_version_after",
+    "proposal_generated_version", "execution_version", "read_set_version",
+}
+_NONNEGATIVE_NUMERIC_FIELDS = {
+    "gamma", "affected_scope_bucket_percent", "failure_severity",
+    "affected_scope_ratio", "affected_flow_ratio", "dependency_closure_ratio",
+    "post_fault_capacity_ratio", "conflict_pressure", "noise_ratio",
+    "coordination_latency_ms", "feasibility_latency_ms", "transaction_latency_ms",
+    "total_latency_ms", "peak_memory_mb", "reconfiguration_latency_ms",
+    "recovery_latency_ms", "modification_scope_ratio", "rule_change_ratio",
+    "gateway_change_ratio", "unaffected_disturbance_ratio",
+}
+_UNIT_INTERVAL_FIELDS = {
+    "affected_scope_ratio", "affected_flow_ratio", "dependency_closure_ratio",
+    "modification_scope_ratio", "rule_change_ratio", "gateway_change_ratio",
+    "unaffected_disturbance_ratio",
+}
 
 
 def _number(value: object) -> float:
     try:
-        return float(str(value))
+        parsed = float(str(value))
     except (TypeError, ValueError) as error:
         raise ValueError(f"invalid numeric grid value: {value!r}") from error
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite numeric grid value: {value!r}")
+    return parsed
+
+
+def _strict_bool(value: object, field: str, *, nullable: bool = False) -> bool | None:
+    normalized = str(value).strip().lower()
+    if nullable and normalized == "":
+        return None
+    if normalized not in {"true", "false"}:
+        raise ValueError(f"staged {field} boolean domain is invalid")
+    return normalized == "true"
+
+
+def _validate_metric_domains(row: dict[str, str], experiment: str) -> None:
+    for field in _BOOL_FIELDS & set(row):
+        _strict_bool(row[field], field, nullable=field not in {"success", "timeout", "adapted"})
+    for field in _INT_FIELDS & set(row):
+        value = row[field]
+        if value == "":
+            continue
+        if re.fullmatch(r"-?[0-9]+", value) is None or int(value) < 0:
+            raise ValueError(f"staged {field} integer domain is invalid")
+    for field in _NONNEGATIVE_NUMERIC_FIELDS & set(row):
+        value = row[field]
+        if value == "":
+            continue
+        parsed = _number(value)
+        if parsed < 0:
+            raise ValueError(f"staged {field} numeric domain is negative")
+        if field in _UNIT_INTERVAL_FIELDS and parsed > 1:
+            raise ValueError(f"staged {field} ratio is outside [0,1]")
+    if len(row.get("scenario_fingerprint", "")) < 32:
+        raise ValueError("staged scenario fingerprint is invalid")
+    if experiment == "exp2":
+        producer_method = row.get("method", "")
+        failed_before_metric = (
+            producer_method == ""
+            and _strict_bool(row.get("success", ""), "success") is False
+            and bool(row.get("failure_reason", ""))
+        )
+        if producer_method != row.get("method_id") and not failed_before_metric:
+            raise ValueError("staged Exp2 producer method identity drift")
+    if experiment in {"exp3", "exp4"}:
+        if row.get("experiment") != experiment or row.get("mode") != "paper":
+            raise ValueError(f"staged {experiment} producer identity drift")
+        applicable = _strict_bool(row.get("applicable", ""), "applicable", nullable=True)
+        if applicable is False:
+            raise ValueError("inapplicable baseline must be N/A, not a staged zero row")
 
 
 def _point(row: dict[str, str], experiment: str) -> float:
@@ -69,6 +173,8 @@ def validate_staged_experiment(
     *,
     seeds: Iterable[int],
     config_path: Path = Path("configs/wcnc_final_v3.yaml"),
+    expected_commit: str,
+    repo: Path = Path("."),
 ) -> None:
     """Fail unless ``raw_dir`` is the exact frozen, paired invocation grid."""
     trials = raw_dir / "trials.csv"
@@ -76,10 +182,19 @@ def validate_staged_experiment(
     if not trials.is_file() or not commit_path.is_file():
         raise ValueError("staged raw lacks trials.csv or execution_commit.txt")
     commit = commit_path.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise ValueError("staged execution commit is not a 40-hex commit")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit) or commit != expected_commit:
+        raise ValueError("staged execution commit differs from expected current commit")
+    if subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=repo,
+        capture_output=True,
+    ).returncode != 0:
+        raise ValueError("staged execution commit is not git-resolvable")
     with trials.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        expected_fields = _EXP2_FIELDS if experiment == "exp2" else _PAPER_FIELDS
+        if reader.fieldnames != sorted(expected_fields):
+            raise ValueError(f"staged {experiment} trials.csv schema differs from exact producer schema")
+        rows = list(reader)
     expected = _expected_grid(
         load_and_validate_wcnc_v3_config(config_path), experiment,
         tuple(int(seed) for seed in seeds),
@@ -90,6 +205,7 @@ def validate_staged_experiment(
         required = ("protocol_id", "seed", "method_id", "scenario_fingerprint", "result_mode", "success", "timeout", "failure_reason")
         if any(name not in row for name in required):
             raise ValueError("staged row schema is incomplete")
+        _validate_metric_domains(row, experiment)
         if row["protocol_id"] != PROTOCOL_ID or row["result_mode"] != "transactional_simulation":
             raise ValueError("staged row protocol/result mode drift")
         key = (
@@ -109,11 +225,33 @@ def validate_staged_experiment(
             raise ValueError(f"methods do not share one scenario fingerprint: {key}")
 
 
-def publish_immutable_tree(source: Path, target: Path) -> None:
-    """Preflight an entire tree, then copy only missing files."""
-    files = sorted(path for path in source.rglob("*") if path.is_file())
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def publish_immutable_tree(source: Path, target: Path, *, experiment: str) -> None:
+    """Recoverably publish a complete immutable tree; write completion last."""
+    marker = target / "publication_complete.json"
+    if (source / "publication_complete.json").exists():
+        raise ValueError("publication source must not contain a completion marker")
+    paths = sorted(source.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("publication source may not contain symbolic links")
+    files = [path for path in paths if path.is_file()]
     if not files:
         raise ValueError(f"empty publication source: {source}")
+    artifact_hashes = {
+        str(path.relative_to(source)): _sha256(path) for path in files
+    }
+    completion = {
+        "publication_version": "wcnc-final-v3-immutable-tree-v1",
+        "protocol_id": PROTOCOL_ID,
+        "experiment": experiment,
+        "artifact_hashes": artifact_hashes,
+    }
+    encoded_completion = json.dumps(completion, indent=2, sort_keys=True) + "\n"
+    if marker.exists() and marker.read_text(encoding="utf-8") != encoded_completion:
+        raise ValueError("existing publication completion marker differs from source tree")
     for path in files:
         destination = target / path.relative_to(source)
         if destination.exists() and destination.read_bytes() != path.read_bytes():
@@ -124,6 +262,13 @@ def publish_immutable_tree(source: Path, target: Path) -> None:
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
+    target.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(marker.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(encoded_completion)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, marker)
 
 
 def main() -> None:
@@ -133,12 +278,14 @@ def main() -> None:
     parser.add_argument("--experiment", choices=("exp2", "exp3", "exp4"), required=True)
     parser.add_argument("--seeds", default="0:99")
     parser.add_argument("--config", type=Path, default=Path("configs/wcnc_final_v3.yaml"))
+    parser.add_argument("--expected-commit", required=True)
     args = parser.parse_args()
     start, end = (int(value) for value in args.seeds.split(":", 1))
     validate_staged_experiment(
         args.source, args.experiment, seeds=range(start, end + 1), config_path=args.config,
+        expected_commit=args.expected_commit,
     )
-    publish_immutable_tree(args.source, args.target)
+    publish_immutable_tree(args.source, args.target, experiment=args.experiment)
 
 
 if __name__ == "__main__":

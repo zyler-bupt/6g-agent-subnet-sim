@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError, asdict, replace
+from dataclasses import FrozenInstanceError, asdict, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,7 +19,9 @@ import yaml
 import experiments.exp1_netns_verified_formation as exp1
 import experiments.exp1_transactional_formation as transactional
 from scripts.validate_wcnc_final_v3_exp1_nominal import (
+    select_nominal_candidate,
     validate_completed_nominal_artifacts,
+    verify_nominal_selection_receipt,
 )
 from experiments.exp1_netns_verified_formation import FormationEdge
 from experiments.exp1_transactional_formation import (
@@ -39,6 +41,8 @@ from scripts.publish_wcnc_final_v3_staging import (
     publish_immutable_tree,
     validate_staged_experiment,
 )
+from src.metrics.exp2_robustness import RobustnessRunMetrics
+from src.metrics.paper import PaperTrial
 from src.controller.formation_transactions import (
     CommandResult,
     FaultClass,
@@ -1732,7 +1736,7 @@ class TransactionalRunnerContractTests(unittest.TestCase):
                 writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
                 writer.writeheader()
                 writer.writerows(rows)
-            with self.assertRaisesRegex(RuntimeError, "prefix|schedule"):
+            with self.assertRaisesRegex(RuntimeError, "prefix|schedule|checkpoint|shorter"):
                 run_transactional_experiment(
                     self.pilot, output, topology_factory=_RecordingTransactionalTopology,
                     execution_commit=commit, resume=True, **overrides,
@@ -1756,6 +1760,18 @@ class TransactionalRunnerContractTests(unittest.TestCase):
             before = {
                 path.name: path.read_bytes() for path in (output / "raw").iterdir()
             }
+            checkpoint = json.loads(before["measurement_scope.json"])
+            self.assertEqual(checkpoint["runs_csv_bytes"], len(before["runs.csv"]))
+            self.assertEqual(
+                checkpoint["attempts_jsonl_bytes"], len(before["attempts.jsonl"]),
+            )
+            self.assertEqual(
+                checkpoint["runs_csv_sha256"], hashlib.sha256(before["runs.csv"]).hexdigest(),
+            )
+            self.assertEqual(
+                checkpoint["attempts_jsonl_sha256"],
+                hashlib.sha256(before["attempts.jsonl"]).hexdigest(),
+            )
 
             def forbidden_factory(*_args):
                 raise AssertionError("complete resume executed a new topology")
@@ -1771,6 +1787,93 @@ class TransactionalRunnerContractTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(before, after)
+
+    def test_resume_quarantines_events_appended_after_last_checkpoint(self) -> None:
+        """An events-only crash tail is evidence, not an authenticated trial."""
+        overrides = {
+            "seeds": (9000,), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory); commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, require_complete_grid=True, **overrides,
+            )
+            events = output / "raw" / "attempts.jsonl"
+            authenticated = events.read_bytes()
+            with events.open("ab") as handle:
+                handle.write(b'{"crash":"events-only"}\n')
+
+            rows = run_transactional_experiment(
+                self.pilot, output, topology_factory=lambda *_: (_ for _ in ()).throw(
+                    AssertionError("complete prefix should not rerun")
+                ),
+                execution_commit=commit, resume=True, require_complete_grid=True,
+                **overrides,
+            )
+            quarantines = list((output / "recovery").glob("quarantine-*"))
+            metadata = json.loads((quarantines[0] / "metadata.json").read_text())
+            restored = events.read_bytes()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(restored, authenticated)
+        self.assertEqual(len(quarantines), 1)
+        self.assertIn("attempts.jsonl", metadata["artifacts"])
+
+    def test_resume_quarantines_row_and_event_tail_before_scope_replace(self) -> None:
+        """A row-before-scope crash restores both files to the authenticated prefix."""
+        overrides = {
+            "seeds": (9000,), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory); commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, require_complete_grid=True, **overrides,
+            )
+            runs = output / "raw" / "runs.csv"; attempts = output / "raw" / "attempts.jsonl"
+            run_prefix = runs.read_bytes(); event_prefix = attempts.read_bytes()
+            with runs.open("ab") as handle: handle.write(run_prefix.splitlines(keepends=True)[-1])
+            with attempts.open("ab") as handle: handle.write(b'{"crash":"row-before-scope"}\n')
+
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, resume=True, require_complete_grid=True,
+                **overrides,
+            )
+            run_after = runs.read_bytes(); event_after = attempts.read_bytes()
+            quarantine_count = len(list((output / "recovery").glob("quarantine-*")))
+
+        self.assertEqual(run_after, run_prefix)
+        self.assertEqual(event_after, event_prefix)
+        self.assertEqual(quarantine_count, 1)
+
+    def test_resume_rejects_shorter_authenticated_artifact(self) -> None:
+        overrides = {
+            "seeds": (9000,), "task_sizes": (4,),
+            "methods": ("proposed",),
+            "scenario_classes": ("command_rejection",),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory); commit = "a" * 40
+            (output / "execution_commit.txt").write_text(commit + "\n", encoding="utf-8")
+            run_transactional_experiment(
+                self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                execution_commit=commit, require_complete_grid=True, **overrides,
+            )
+            attempts = output / "raw" / "attempts.jsonl"
+            attempts.write_bytes(attempts.read_bytes()[:-1])
+            with self.assertRaisesRegex(RuntimeError, "shorter|checkpoint"):
+                run_transactional_experiment(
+                    self.pilot, output, topology_factory=_RecordingTransactionalTopology,
+                    execution_commit=commit, resume=True, **overrides,
+                )
 
     def test_logical_scenario_fingerprint_includes_frozen_transaction_policy(self) -> None:
         original = transactional._logical_scenario_fingerprint(
@@ -2300,16 +2403,79 @@ class RemoteLauncherContractTests(unittest.TestCase):
             for seed in seeds:
                 scenario = f"{experiment}:{failure_type}:{point}:{seed}:{event}"
                 for method in methods_by_failure[failure_type]:
-                    rows.append({
+                    if experiment == "exp2":
+                        expected_fields = {
+                            field.name for field in fields(RobustnessRunMetrics)
+                        } | {
+                            "protocol_id", "execution_mode_detail", "method_id", "gamma",
+                            "environment_fingerprint", "observation_fingerprint",
+                            "oracle_fingerprint", "pre_verification_correct_decision",
+                            "pre_verification_feasible", "unsafe_proposal_before_verification",
+                            "verification_rescued", "search_timeout",
+                        }
+                    else:
+                        expected_fields = {field.name for field in fields(PaperTrial)} | {
+                            "execution_mode_detail"
+                        }
+                    row = {field: "" for field in expected_fields}
+                    row.update({
                         "protocol_id": "wcnc_final_v3", "experiment": experiment,
                         "seed": str(seed), "event_id": str(event), "method_id": method,
-                        "scenario_fingerprint": scenario, "failure_type": failure_type,
+                        "method": method, "scenario_fingerprint": hashlib.sha256(scenario.encode()).hexdigest(),
+                        "topology_fingerprint": "a" * 64, "qos_fingerprint": "b" * 64,
+                        "event_fingerprint": "c" * 64, "failure_type": failure_type,
                         "gamma": str(point) if experiment == "exp2" else "",
                         "affected_scope_bucket_percent": str(point) if experiment == "exp3" else "",
                         "failure_severity": str(point) if experiment == "exp4" else "",
                         "result_mode": "transactional_simulation", "success": "true",
-                        "timeout": "false", "failure_reason": "",
+                        "timeout": "false", "failure_reason": "", "mode": "paper",
+                        "trial_id": scenario, "method_label": method,
+                        "method_source": "fixture", "adapted": "false",
+                        "execution_mode_detail": "producer-simulation",
                     })
+                    for boolean in (
+                        "ground_truth_conflict", "ground_truth_resolvable",
+                        "ground_truth_uses_true_state", "pre_execution_feasibility_checked",
+                        "conflict_detected", "conflict_resolved", "qos_satisfied",
+                        "infeasible_configuration", "decision_rejected", "safe_rejection",
+                        "unsafe_execution", "transaction_attempted", "rollback_triggered",
+                        "rollback_success", "no_partial_commit", "stale_state_detected",
+                        "stale_proposal_rejected", "proposal_regenerated",
+                        "pre_verification_correct_decision", "pre_verification_feasible",
+                        "unsafe_proposal_before_verification", "verification_rescued",
+                        "search_timeout",
+                    ):
+                        if boolean in row: row[boolean] = "false"
+                    for integer in (
+                        "ground_truth_feasible_combinations", "stale_ms", "proposals_per_layer",
+                        "num_proposals", "num_layers_observed", "num_raw_combinations",
+                        "num_pruned_combinations", "num_evaluated_combinations",
+                        "num_feasible_combinations", "stable_version_before",
+                        "stable_version_after", "proposal_generated_version", "execution_version",
+                        "read_set_version", "control_messages", "control_bytes",
+                    ):
+                        if integer in row: row[integer] = "0"
+                    for number in (
+                        "conflict_pressure", "noise_ratio", "coordination_latency_ms",
+                        "feasibility_latency_ms", "transaction_latency_ms", "total_latency_ms",
+                        "peak_memory_mb",
+                    ):
+                        if number in row: row[number] = "0.0"
+                    row["conflict_class"] = row.get("conflict_class") and "NO_CONFLICT"
+                    row["post_execution_verification_result"] = row.get("post_execution_verification_result") and "PASS"
+                    if experiment == "exp3":
+                        row["affected_scope_ratio"] = str(float(point) / 100.0)
+                        row["reconfiguration_latency_ms"] = "1.0"
+                        row["modification_scope_ratio"] = "0.1"
+                    if experiment == "exp4":
+                        row[{
+                            "link_failure": "affected_flow_ratio",
+                            "agent_failure": "dependency_closure_ratio",
+                            "capacity_degradation": "post_fault_capacity_ratio",
+                        }[failure_type]] = str(point)
+                        row["recovery_latency_ms"] = "1.0"
+                        row["modification_scope_ratio"] = "0.1"
+                    rows.append({key: value for key, value in row.items() if key in expected_fields})
         return rows
 
     @staticmethod
@@ -2317,9 +2483,12 @@ class RemoteLauncherContractTests(unittest.TestCase):
         raw = root / "raw" / experiment
         raw.mkdir(parents=True)
         with (raw / "trials.csv").open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+            writer = csv.DictWriter(handle, fieldnames=sorted(rows[0]), lineterminator="\n")
             writer.writeheader(); writer.writerows(rows)
-        (raw / "execution_commit.txt").write_text("a" * 40 + "\n", encoding="utf-8")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        (raw / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
         return raw
 
     def test_exp2_exp4_staging_validation_and_immutable_publication_are_behavioral(self) -> None:
@@ -2328,29 +2497,82 @@ class RemoteLauncherContractTests(unittest.TestCase):
             for experiment in ("exp2", "exp3", "exp4"):
                 rows = self._staged_rows(experiment, (0, 1))
                 source = self._write_staged_rows(base / experiment, experiment, rows)
-                validate_staged_experiment(source, experiment, seeds=(0, 1))
+                head = (source / "execution_commit.txt").read_text().strip()
+                validate_staged_experiment(
+                    source, experiment, seeds=(0, 1), expected_commit=head,
+                )
                 (source / "producer-extra.json").write_text("{}\n", encoding="utf-8")
                 target = base / "canonical" / experiment
                 target.mkdir(parents=True)
                 (target / "preserved.txt").write_text("old\n", encoding="utf-8")
-                publish_immutable_tree(source, target)
+                publish_immutable_tree(source, target, experiment=experiment)
                 self.assertEqual((target / "preserved.txt").read_text(), "old\n")
                 self.assertEqual((target / "producer-extra.json").read_text(), "{}\n")
                 self.assertTrue((target / "execution_commit.txt").is_file())
+                self.assertTrue((target / "publication_complete.json").is_file())
 
     def test_staging_validation_rejects_missing_duplicate_and_inapplicable_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); rows = self._staged_rows("exp4", (0,))
             source = self._write_staged_rows(base / "missing", "exp4", rows[:-1])
             with self.assertRaisesRegex(ValueError, "grid|row"):
-                validate_staged_experiment(source, "exp4", seeds=(0,))
+                validate_staged_experiment(source, "exp4", seeds=(0,), expected_commit=(source / "execution_commit.txt").read_text().strip())
             source = self._write_staged_rows(base / "duplicate", "exp4", rows + [rows[0]])
             with self.assertRaisesRegex(ValueError, "duplicate|grid"):
-                validate_staged_experiment(source, "exp4", seeds=(0,))
+                validate_staged_experiment(source, "exp4", seeds=(0,), expected_commit=(source / "execution_commit.txt").read_text().strip())
             altered = [dict(row) for row in rows]; altered[0]["method_id"] = "sfc_restoration"
             source = self._write_staged_rows(base / "inapplicable", "exp4", altered)
             with self.assertRaisesRegex(ValueError, "method|grid"):
-                validate_staged_experiment(source, "exp4", seeds=(0,))
+                validate_staged_experiment(source, "exp4", seeds=(0,), expected_commit=(source / "execution_commit.txt").read_text().strip())
+
+    def test_staging_validation_rejects_schema_domains_nonfinite_and_fake_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); rows = self._staged_rows("exp3", (0,))
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            unknown = [dict(row) for row in rows]
+            unknown[0]["invented_metric"] = "1"
+            source = self._write_staged_rows(base / "schema", "exp3", unknown)
+            with self.assertRaisesRegex(ValueError, "schema"):
+                validate_staged_experiment(source, "exp3", seeds=(0,), expected_commit=head)
+
+            nonfinite = [dict(row) for row in rows]
+            nonfinite[0]["reconfiguration_latency_ms"] = "nan"
+            source = self._write_staged_rows(base / "nonfinite", "exp3", nonfinite)
+            with self.assertRaisesRegex(ValueError, "finite|numeric|latency"):
+                validate_staged_experiment(source, "exp3", seeds=(0,), expected_commit=head)
+
+            invalid_bool = [dict(row) for row in rows]
+            invalid_bool[0]["success"] = "yes"
+            source = self._write_staged_rows(base / "boolean", "exp3", invalid_bool)
+            with self.assertRaisesRegex(ValueError, "boolean|success"):
+                validate_staged_experiment(source, "exp3", seeds=(0,), expected_commit=head)
+
+            source = self._write_staged_rows(base / "commit", "exp3", rows)
+            (source / "execution_commit.txt").write_text("a" * 40 + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "commit"):
+                validate_staged_experiment(source, "exp3", seeds=(0,), expected_commit=head)
+
+    def test_exp2_staging_retains_pre_metric_failure_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = self._staged_rows("exp2", (0,))
+            failed = rows[0]
+            for field in tuple(failed):
+                if field not in {
+                    "protocol_id", "seed", "gamma", "method_id",
+                    "scenario_fingerprint", "environment_fingerprint",
+                    "observation_fingerprint", "oracle_fingerprint", "result_mode",
+                    "success", "timeout", "failure_reason",
+                }:
+                    failed[field] = ""
+            failed.update(success="false", timeout="false", failure_reason="RuntimeError:fixture")
+            source = self._write_staged_rows(Path(directory), "exp2", rows)
+            head = (source / "execution_commit.txt").read_text().strip()
+
+            validate_staged_experiment(
+                source, "exp2", seeds=(0,), expected_commit=head,
+            )
 
     def test_immutable_tree_preflights_all_files_before_copying(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2360,9 +2582,33 @@ class RemoteLauncherContractTests(unittest.TestCase):
             (source / "z.txt").write_text("new-z\n", encoding="utf-8")
             (target / "z.txt").write_text("old-z\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "overwrite"):
-                publish_immutable_tree(source, target)
+                publish_immutable_tree(source, target, experiment="exp2")
             self.assertFalse((target / "a.txt").exists())
             self.assertEqual((target / "z.txt").read_text(), "old-z\n")
+
+    def test_partial_publication_has_no_completion_marker_and_is_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); source = base / "source"; target = base / "target"
+            source.mkdir(); (source / "a.txt").write_text("a\n"); (source / "b.txt").write_text("b\n")
+            real_copy = __import__("shutil").copy2
+            calls = 0
+
+            def interrupted_copy(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 2: raise OSError("simulated publication crash")
+                return real_copy(src, dst)
+
+            with patch("scripts.publish_wcnc_final_v3_staging.shutil.copy2", side_effect=interrupted_copy):
+                with self.assertRaisesRegex(OSError, "publication crash"):
+                    publish_immutable_tree(source, target, experiment="exp2")
+            self.assertFalse((target / "publication_complete.json").exists())
+
+            publish_immutable_tree(source, target, experiment="exp2")
+
+            self.assertEqual((target / "a.txt").read_text(), "a\n")
+            self.assertEqual((target / "b.txt").read_text(), "b\n")
+            self.assertTrue((target / "publication_complete.json").is_file())
 
     @staticmethod
     def _configuration_hash(config_path: Path) -> str:
@@ -2377,21 +2623,7 @@ class RemoteLauncherContractTests(unittest.TestCase):
         raw = root / "raw"
         raw.mkdir(parents=True)
         runs = raw / "runs.csv"
-        fields = (
-            "run_id", "num_agents", "seed", "method_id",
-            "scenario_fingerprint", "configuration_sha256", "result_mode",
-            "run_sequence", "block_index", "order_position",
-            "method_order_position", "task_received_at", "mapping_finished_at",
-            "traffic_control_started_at", "traffic_control_finished_at",
-            "route_install_started_at", "route_install_finished_at",
-            "activation_finished_at", "verification_started_at",
-            "ping_verify_started_at", "ping_verify_finished_at",
-            "iperf_verify_started_at", "data_plane_verified_at",
-            "num_business_edges", "control_messages", "rules_installed",
-            "ping_edges_total", "ping_edges_passed", "iperf_flows_total",
-            "iperf_flows_passed", "formation_failed", "success",
-            "failure_stage", "failure_reason",
-        )
+        field_names = tuple(field.name for field in fields(exp1.NetnsFormationRun))
         rows = []
         events = []
         config_payload = yaml.safe_load(config.read_text(encoding="utf-8"))
@@ -2422,11 +2654,12 @@ class RemoteLauncherContractTests(unittest.TestCase):
                     "data_plane_verified_at": base + 0.4,
                 }
                 edges = max(1, scheduled.num_agents - 1)
-                rows.append({
+                row = {
                     "run_id": run_id,
                     "num_agents": scheduled.num_agents,
                     "seed": scheduled.seed,
                     "method_id": method,
+                    "method_label": {"proposed": "Ours", "cspf": "CSPF-based Formation", "global_sfc_embedding": "Global SFC Embedding"}[method],
                     "scenario_fingerprint": fingerprint,
                     "configuration_sha256": configuration_hash,
                     "result_mode": "real_linux_netns_veth_tc_data_plane",
@@ -2436,17 +2669,44 @@ class RemoteLauncherContractTests(unittest.TestCase):
                     "method_order_position": method_position,
                     **times,
                     "num_business_edges": edges,
+                    "num_gateways": 4,
                     "control_messages": 1,
                     "rules_installed": edges,
+                    "mapping_latency_s": 0.1,
+                    "traffic_control_latency_s": 0.1,
+                    "route_install_latency_s": 0.1,
+                    "ping_verification_latency_s": 0.09,
+                    "iperf3_verification_latency_s": 0.1,
+                    "verification_latency_s": 0.19,
+                    "verified_formation_latency_s": 0.4,
                     "ping_edges_total": edges,
                     "ping_edges_passed": edges,
+                    "ping_attempts": 1,
+                    "ping_retried_edges": 0,
+                    "ping_mean_rtt_ms": 1.0,
+                    "ping_max_packet_loss_percent": 0.0,
+                    "ping_timeouts": 0,
                     "iperf_flows_total": edges,
                     "iperf_flows_passed": edges,
+                    "iperf_attempts": 1,
+                    "iperf_retried_flows": 0,
+                    "iperf_retransmissions": 0,
+                    "iperf_reported_duration_s": 2.0,
+                    "aggregate_receiver_throughput_mbps": float(edges),
+                    "retry_backoff_ms": 200,
+                    "retry_count": 0,
+                    "background_traffic_enabled": False,
+                    "background_utilization": 0.0,
+                    "background_target_mbps": 0.0,
+                    "tc_profile_count": 0,
+                    "formation_timing_valid": True,
                     "formation_failed": "false",
                     "success": "true",
                     "failure_stage": "",
                     "failure_reason": "",
-                })
+                }
+                self.assertEqual(set(row), set(field_names))
+                rows.append(row)
                 identity = {
                     "run_id": run_id, "run_sequence": sequence,
                     "block_index": scheduled.block_index,
@@ -2469,7 +2729,12 @@ class RemoteLauncherContractTests(unittest.TestCase):
                     {**identity, "timestamp": times["route_install_started_at"],
                      "stage": "ROUTE_INSTALL_STARTED", "details": {
                          "control_messages": 1, "rules_installed": edges,
-                         "deployment_batches": [], "commands": [],
+                         "deployment_batches": [{"label": "fixture", "command_count": edges}],
+                         "commands": [
+                             {"batch_index": 0, "batch_label": "fixture",
+                              "namespace": "agent-0", "command": ["ip", "route", "replace"]}
+                             for _ in range(edges)
+                         ],
                      }},
                     {**identity, "timestamp": times["route_install_finished_at"],
                      "stage": "ROUTE_INSTALL_FINISHED", "details": {}},
@@ -2486,9 +2751,40 @@ class RemoteLauncherContractTests(unittest.TestCase):
                     {**identity, "timestamp": times["data_plane_verified_at"],
                      "stage": "BACKGROUND_TRAFFIC_RESULT", "details": {"enabled": False}},
                 ]
+                for edge_index in range(edges):
+                    edge_id = f"edge-{edge_index:03d}"
+                    command_identity = {
+                        "run_id": run_id, "run_sequence": sequence,
+                        "block_index": scheduled.block_index,
+                        "order_position": scheduled.order_position,
+                        "seed": scheduled.seed, "num_agents": scheduled.num_agents,
+                    }
+                    run_events.append({
+                        **command_identity, "timestamp": times["ping_verify_finished_at"],
+                        "stage": "PING_COMMAND_RESULT", "details": {
+                            "edge_id": edge_id, "source_index": edge_index,
+                            "target_index": edge_index + 1, "attempt": 1,
+                            "command": ["ping"], "returncode": 0,
+                            "duration_s": 0.01, "packet_loss_percent": 0.0,
+                            "average_rtt_ms": 1.0, "timeout": False,
+                            "passed": True, "stdout": "", "stderr": "",
+                        },
+                    })
+                    run_events.append({
+                        **command_identity, "timestamp": times["data_plane_verified_at"],
+                        "stage": "IPERF3_COMMAND_RESULT", "details": {
+                            "edge_id": edge_id, "source_index": edge_index,
+                            "target_index": edge_index + 1, "attempt": 1,
+                            "command": ["iperf3"], "returncode": 0,
+                            "duration_s": 2.0, "reported_duration_s": 2.0,
+                            "throughput_mbps": 1.0, "retransmissions": 0,
+                            "required_throughput_mbps": 0.5, "passed": True,
+                            "timeout": False, "error": "", "stdout": "", "stderr": "",
+                        },
+                    })
                 events.extend(sorted(run_events, key=lambda item: (item["timestamp"], item["stage"])))
         with runs.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer = csv.DictWriter(handle, fieldnames=field_names, lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)
         attempts = raw / "events.jsonl"
@@ -2519,6 +2815,7 @@ class RemoteLauncherContractTests(unittest.TestCase):
             rows[0]["formation_failed"] = "true"
             rows[0]["failure_reason"] = "data_plane_verification_failed:ping=3/3:iperf3=2/3"
             rows[0]["iperf_flows_passed"] = "2"
+            rows[0]["aggregate_receiver_throughput_mbps"] = "2.0"
             with runs.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
                 writer.writeheader()
@@ -2531,6 +2828,13 @@ class RemoteLauncherContractTests(unittest.TestCase):
                         "passed": 2, "total": 3,
                         "failure_reason": rows[0]["failure_reason"],
                     }
+                if (
+                    event["run_id"] == rows[0]["run_id"]
+                    and event["stage"] == "IPERF3_COMMAND_RESULT"
+                    and event["details"]["edge_id"] == "edge-002"
+                ):
+                    event["details"]["passed"] = False
+                    event["details"]["throughput_mbps"] = 0.0
             events.write_text(
                 "".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads),
                 encoding="utf-8",
@@ -2625,6 +2929,154 @@ class RemoteLauncherContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "timestamp|monotonic"):
                 validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_nominal_validator_requires_exact_producer_schema_and_command_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runs, events, scope, config = self._nominal_fixture(base / "schema")
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            reduced_fields = [name for name in rows[0] if name != "ping_mean_rtt_ms"]
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=reduced_fields, extrasaction="ignore")
+                writer.writeheader(); writer.writerows(rows)
+            with self.assertRaisesRegex(ValueError, "schema"):
+                validate_completed_nominal_artifacts(runs, events, scope, config)
+
+            for mutation, pattern in (("missing", "PING_COMMAND_RESULT|command"), ("duplicate", "IPERF3_COMMAND_RESULT|duplicate"), ("identity", "identity"), ("primary_method", "identity|method"), ("summary", "summary|RTT"), ("latency", "latency|timing")):
+                runs, events, scope, config = self._nominal_fixture(base / mutation)
+                payloads = [json.loads(line) for line in events.read_text().splitlines()]
+                first_run = payloads[0]["run_id"]
+                if mutation == "missing":
+                    removed = False
+                    kept = []
+                    for event in payloads:
+                        if not removed and event["run_id"] == first_run and event["stage"] == "PING_COMMAND_RESULT":
+                            removed = True; continue
+                        kept.append(event)
+                    payloads = kept
+                elif mutation == "duplicate":
+                    duplicate = next(event for event in payloads if event["run_id"] == first_run and event["stage"] == "IPERF3_COMMAND_RESULT")
+                    payloads.insert(payloads.index(duplicate) + 1, dict(duplicate))
+                elif mutation == "identity":
+                    target = next(event for event in payloads if event["run_id"] == first_run and event["stage"] == "PING_COMMAND_RESULT")
+                    del target["seed"]
+                elif mutation == "primary_method":
+                    target = next(event for event in payloads if event["run_id"] == first_run and event["stage"] == "TASK_RECEIVED")
+                    del target["method_id"]
+                elif mutation == "summary":
+                    with runs.open(encoding="utf-8", newline="") as handle:
+                        rows = list(csv.DictReader(handle))
+                    rows[0]["ping_mean_rtt_ms"] = "9.0"
+                    with runs.open("w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                        writer.writeheader(); writer.writerows(rows)
+                else:
+                    with runs.open(encoding="utf-8", newline="") as handle:
+                        rows = list(csv.DictReader(handle))
+                    rows[0]["route_install_latency_s"] = "9.0"
+                    with runs.open("w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                        writer.writeheader(); writer.writerows(rows)
+                events.write_text("".join(json.dumps(item, sort_keys=True) + "\n" for item in payloads), encoding="utf-8")
+                with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, pattern):
+                    validate_completed_nominal_artifacts(runs, events, scope, config)
+
+    def test_nominal_validator_accepts_authentic_preparation_failure_shape(self) -> None:
+        """Producer keeps edge totals but has no ping/iperf command rows on preparation failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            runs, events, scope, config = self._nominal_fixture(Path(directory))
+            with runs.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            row = rows[0]; run_id = row["run_id"]
+            row.update({
+                "control_messages": "0", "rules_installed": "0",
+                "ping_edges_passed": "0", "ping_attempts": "0",
+                "ping_retried_edges": "0", "ping_mean_rtt_ms": "0.0",
+                "ping_max_packet_loss_percent": "100.0", "ping_timeouts": "0",
+                "iperf_flows_passed": "0", "iperf_attempts": "0",
+                "iperf_retried_flows": "0", "iperf_retransmissions": "0",
+                "iperf_reported_duration_s": "0.0",
+                "aggregate_receiver_throughput_mbps": "0.0", "retry_count": "0",
+                "failure_stage": "PREPARATION", "formation_timing_valid": "false",
+                "verified_formation_latency_s": "",
+                "formation_failed": "true", "success": "false",
+                "failure_reason": "RuntimeError:background preparation failed",
+            })
+            with runs.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+                writer.writeheader(); writer.writerows(rows)
+            payloads = [json.loads(line) for line in events.read_text().splitlines()]
+            changed = []
+            for event in payloads:
+                if event["run_id"] != run_id:
+                    changed.append(event); continue
+                if event["stage"] in {"PING_COMMAND_RESULT", "IPERF3_COMMAND_RESULT"}:
+                    continue
+                if event["stage"] == "BACKGROUND_PREPARED":
+                    event["stage"] = "BACKGROUND_PREPARATION_FAILED"
+                if event["stage"] == "ROUTE_INSTALL_STARTED":
+                    event["details"]["control_messages"] = 0
+                    event["details"]["rules_installed"] = 0
+                    event["details"]["deployment_batches"] = []
+                    event["details"]["commands"] = []
+                if event["stage"] == "PING_VERIFY_FINISHED":
+                    event["details"]["passed"] = 0
+                if event["stage"] == "DATA_PLANE_VERIFIED":
+                    event["stage"] = "FORMATION_FAILED"
+                    event["details"].update(passed=0, failure_reason=row["failure_reason"])
+                changed.append(event)
+            events.write_text(
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in changed),
+                encoding="utf-8",
+            )
+
+            result = validate_completed_nominal_artifacts(runs, events, scope, config)
+
+        self.assertTrue(result.complete)
+
+    def test_nominal_selection_skips_invalid_candidate_and_binds_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); invalid = root / "exp1_netns_staging_v3"
+            invalid.mkdir()
+            valid = root / "exp1_netns_staging_v3_attempts" / "attempt-001"
+            runs, events, scope, config = self._nominal_fixture(valid)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            (valid / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
+            receipt = root / "environment" / "exp1_nominal_selection.json"
+
+            selected = select_nominal_candidate(
+                root, (invalid, valid), config, receipt, repo=Path("."),
+            )
+            verified = verify_nominal_selection_receipt(
+                root, receipt, config, repo=Path("."),
+            )
+
+        self.assertEqual(selected, valid.resolve())
+        self.assertEqual(verified, valid.resolve())
+
+    def test_nominal_selection_rejects_outside_path_and_receipt_hash_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_dir:
+            root = Path(directory)
+            outside = Path(outside_dir) / "attempt-001"
+            runs, events, scope, config = self._nominal_fixture(outside)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            (outside / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
+            receipt = root / "environment" / "selection.json"
+            with self.assertRaisesRegex(ValueError, "outside|confined"):
+                select_nominal_candidate(root, (outside,), config, receipt, repo=Path("."))
+
+            valid = root / "exp1_netns_staging_v3_attempts" / "attempt-001"
+            runs, events, scope, config = self._nominal_fixture(valid)
+            (valid / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
+            select_nominal_candidate(root, (valid,), config, receipt, repo=Path("."))
+            scope.write_text(scope.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "receipt|hash"):
+                verify_nominal_selection_receipt(root, receipt, config, repo=Path("."))
 
     def test_launcher_orders_transactional_smoke_pilot_formal_before_exp2(self) -> None:
         """Reordering Exp2 ahead of the measured transactional arm breaks provenance."""

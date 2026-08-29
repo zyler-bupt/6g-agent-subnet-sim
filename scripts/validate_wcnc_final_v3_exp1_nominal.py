@@ -7,6 +7,9 @@ import csv
 import hashlib
 import json
 import math
+import os
+import re
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ from typing import Any
 import yaml
 
 from experiments.exp1_netns_verified_formation import (
+    NetnsFormationRun,
     build_experiment_schedule,
     counterbalanced_method_order,
 )
@@ -41,6 +45,11 @@ ALLOWED_STAGES = frozenset(MANDATORY_STAGE_TIMESTAMPS) | TERMINAL_STAGES | froze
     "BACKGROUND_TRAFFIC_RESULT", "PING_COMMAND_RESULT",
     "IPERF3_COMMAND_RESULT", "VERIFICATION_RETRY_BACKOFF",
 })
+FULL_IDENTITY_STAGES = (
+    frozenset(MANDATORY_STAGE_TIMESTAMPS)
+    | TERMINAL_STAGES
+    | {"BACKGROUND_PREPARED", "BACKGROUND_PREPARATION_FAILED"}
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,9 @@ class NominalArtifactValidation:
     runs_sha256: str
     events_sha256: str
     scope_sha256: str
+
+
+_SELECTION_RECEIPT_VERSION = "wcnc-v3-nominal-selection-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -108,6 +120,13 @@ def _truth(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
+def _strict_truth(value: object, description: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized not in {"true", "false"}:
+        raise ValueError(f"nominal {description} boolean domain is invalid")
+    return normalized == "true"
+
+
 def _as_finite_float(value: object, description: str) -> float:
     try:
         parsed = float(value)
@@ -120,15 +139,122 @@ def _as_finite_float(value: object, description: str) -> float:
 
 def _validate_event_identity(event: dict[str, Any], row: dict[str, str]) -> None:
     for field in (
-        "run_sequence", "block_index", "order_position", "method_order_position",
-        "seed", "method_id", "num_agents",
+        "run_id", "run_sequence", "block_index", "order_position", "seed", "num_agents",
     ):
         if field not in event:
-            continue
+            raise ValueError(f"nominal event identity field {field} is missing")
         if str(event[field]) != str(row[field]):
             raise ValueError(
                 f"nominal event identity field {field} disagrees with terminal row"
             )
+    for field in ("method_id", "method_order_position"):
+        if event.get("stage") in FULL_IDENTITY_STAGES and field not in event:
+            raise ValueError(f"nominal primary event identity field {field} is missing")
+        if field in event and str(event[field]) != str(row[field]):
+            raise ValueError(
+                f"nominal event identity field {field} disagrees with terminal row"
+            )
+
+
+def _numeric_equal(observed: object, expected: object) -> bool:
+    return math.isclose(
+        _as_finite_float(observed, "derived event summary"),
+        _as_finite_float(expected, "row summary"),
+        rel_tol=1e-9, abs_tol=1e-9,
+    )
+
+
+def _validate_command_results(run_id: str, stream: list[dict[str, Any]], row: dict[str, str]) -> None:
+    preparation_failed = row["failure_stage"] == "PREPARATION"
+    domains = (
+        ("PING_COMMAND_RESULT", "ping", int(row["ping_edges_total"]), int(row["ping_attempts"]), int(row["ping_retried_edges"])),
+        ("IPERF3_COMMAND_RESULT", "iperf", int(row["iperf_flows_total"]), int(row["iperf_attempts"]), int(row["iperf_retried_flows"])),
+    )
+    final_by_domain: dict[str, list[dict[str, Any]]] = {}
+    expected_backoffs: list[str] = []
+    for stage, domain, total, attempts, retried in domains:
+        results = [event for event in stream if event.get("stage") == stage]
+        if preparation_failed:
+            if results or attempts != 0 or retried != 0:
+                raise ValueError(f"nominal run {run_id} preparation failure has command evidence")
+            final_by_domain[domain] = []
+            continue
+        if attempts not in {0, 1, 2} or (attempts == 0 and results):
+            raise ValueError(f"nominal run {run_id} invalid {stage} attempt domain")
+        expected_count = 0 if attempts == 0 else total + (retried if attempts == 2 else 0)
+        if len(results) != expected_count:
+            raise ValueError(f"nominal run {run_id} {stage} command row count contradicts row")
+        keyed: dict[tuple[str, int], dict[str, Any]] = {}
+        first: dict[str, dict[str, Any]] = {}
+        second: dict[str, dict[str, Any]] = {}
+        for event in results:
+            details = event["details"]
+            edge_id = details.get("edge_id")
+            attempt = details.get("attempt")
+            if not isinstance(edge_id, str) or not edge_id or attempt not in {1, 2}:
+                raise ValueError(f"nominal run {run_id} {stage} edge/attempt identity is invalid")
+            key = (edge_id, int(attempt))
+            if key in keyed:
+                raise ValueError(f"nominal run {run_id} duplicate {stage} edge attempt")
+            if not isinstance(details.get("passed"), bool) or not isinstance(details.get("timeout"), bool):
+                raise ValueError(f"nominal run {run_id} {stage} boolean domain is invalid")
+            if not isinstance(details.get("source_index"), int) or not isinstance(details.get("target_index"), int):
+                raise ValueError(f"nominal run {run_id} {stage} endpoint domain is invalid")
+            if not isinstance(details.get("command"), list) or not all(
+                isinstance(item, str) for item in details["command"]
+            ):
+                raise ValueError(f"nominal run {run_id} {stage} command evidence is invalid")
+            for field in ("duration_s", "packet_loss_percent") if domain == "ping" else (
+                "duration_s", "reported_duration_s", "throughput_mbps",
+                "required_throughput_mbps",
+            ):
+                value = _as_finite_float(details.get(field), f"{stage} {field}")
+                if value < 0:
+                    raise ValueError(f"nominal run {run_id} {stage} {field} is negative")
+            if domain == "ping" and details.get("average_rtt_ms") is not None:
+                if _as_finite_float(details["average_rtt_ms"], f"{stage} average RTT") < 0:
+                    raise ValueError(f"nominal run {run_id} {stage} average RTT is negative")
+            if domain == "iperf" and (
+                not isinstance(details.get("retransmissions"), int)
+                or int(details["retransmissions"]) < 0
+            ):
+                raise ValueError(f"nominal run {run_id} {stage} retransmissions is invalid")
+            keyed[key] = details
+            (first if attempt == 1 else second)[edge_id] = details
+        if attempts:
+            if len(first) != total or len(second) != retried:
+                raise ValueError(f"nominal run {run_id} {stage} attempt cardinality contradicts row")
+            failed_first = {edge for edge, details in first.items() if not details["passed"]}
+            if attempts == 2 and set(second) != failed_first:
+                raise ValueError(f"nominal run {run_id} {stage} retry edges contradict first attempt")
+        final = dict(first); final.update(second)
+        final_by_domain[domain] = list(final.values())
+        if retried:
+            expected_backoffs.append("PING" if domain == "ping" else "IPERF3")
+
+    ping_final = final_by_domain["ping"]
+    iperf_final = final_by_domain["iperf"]
+    ping_rtts = [float(item["average_rtt_ms"]) for item in ping_final if item.get("average_rtt_ms") is not None]
+    summaries = (
+        (sum(bool(item["passed"]) for item in ping_final), row["ping_edges_passed"], "ping passed summary"),
+        ((sum(ping_rtts) / len(ping_rtts)) if ping_rtts else 0.0, row["ping_mean_rtt_ms"], "ping RTT summary"),
+        (max((float(item["packet_loss_percent"]) for item in ping_final), default=100.0), row["ping_max_packet_loss_percent"], "ping loss summary"),
+        (sum(bool(event["details"]["timeout"]) for event in stream if event.get("stage") == "PING_COMMAND_RESULT"), row["ping_timeouts"], "ping timeout summary"),
+        (sum(bool(item["passed"]) for item in iperf_final), row["iperf_flows_passed"], "iperf passed summary"),
+        (sum(int(item["retransmissions"]) for item in iperf_final), row["iperf_retransmissions"], "iperf retransmission summary"),
+        (max((float(item["reported_duration_s"]) for item in iperf_final), default=0.0), row["iperf_reported_duration_s"], "iperf duration summary"),
+        (sum(float(item["throughput_mbps"]) for item in iperf_final), row["aggregate_receiver_throughput_mbps"], "iperf throughput summary"),
+    )
+    for observed, expected, description in summaries:
+        if not _numeric_equal(observed, expected):
+            raise ValueError(f"nominal run {run_id} {description} contradicts command evidence")
+    backoffs = [event for event in stream if event.get("stage") == "VERIFICATION_RETRY_BACKOFF"]
+    if len(backoffs) != int(row["retry_count"]) or sorted(
+        str(event["details"].get("verification_type")) for event in backoffs
+    ) != sorted(expected_backoffs):
+        raise ValueError(f"nominal run {run_id} retry backoff count/type contradicts row")
+    if any(int(event["details"].get("configured_backoff_ms", -1)) != int(row["retry_backoff_ms"]) for event in backoffs):
+        raise ValueError(f"nominal run {run_id} retry backoff duration contradicts row")
 
 
 def _validate_run_causality(run_id: str, stream: list[dict[str, Any]], row: dict[str, str]) -> None:
@@ -186,6 +312,26 @@ def _validate_run_causality(run_id: str, stream: list[dict[str, Any]], row: dict
             raise ValueError(f"nominal run {run_id} has invalid {description}") from error
         if not matches:
             raise ValueError(f"nominal run {run_id} {description} contradicts row")
+    batches = route_details.get("deployment_batches")
+    commands = route_details.get("commands")
+    if not isinstance(batches, list) or len(batches) != int(row["control_messages"]):
+        raise ValueError(f"nominal run {run_id} deployment batch evidence contradicts row")
+    if not isinstance(commands, list) or len(commands) != int(row["rules_installed"]):
+        raise ValueError(f"nominal run {run_id} deployment command evidence contradicts row")
+    if sum(
+        int(batch.get("command_count", -1))
+        for batch in batches if isinstance(batch, dict)
+    ) != int(row["rules_installed"]) or len(batches) != sum(
+        isinstance(batch, dict) for batch in batches
+    ):
+        raise ValueError(f"nominal run {run_id} deployment batch command counts contradict row")
+    if any(
+        not isinstance(command, dict)
+        or not isinstance(command.get("command"), list)
+        or not isinstance(command.get("namespace"), str)
+        for command in commands
+    ):
+        raise ValueError(f"nominal run {run_id} deployment command shape is invalid")
     if str(terminal_details.get("failure_reason", "")) != row["failure_reason"]:
         raise ValueError(f"nominal run {run_id} terminal failure reason contradicts row")
 
@@ -206,6 +352,29 @@ def _validate_run_causality(run_id: str, stream: list[dict[str, Any]], row: dict
         raise ValueError(f"nominal run {run_id} has impossible traffic-control ordering")
     if float(row["verification_started_at"]) != float(row["ping_verify_started_at"]):
         raise ValueError(f"nominal run {run_id} verification start contradicts ping start")
+    timings = (
+        (float(row["mapping_finished_at"]) - float(row["task_received_at"]), row["mapping_latency_s"], "mapping latency"),
+        (float(row["traffic_control_finished_at"]) - float(row["traffic_control_started_at"]), row["traffic_control_latency_s"], "traffic-control latency"),
+        (float(row["route_install_finished_at"]) - float(row["route_install_started_at"]), row["route_install_latency_s"], "route-install latency"),
+        (float(row["ping_verify_finished_at"]) - float(row["ping_verify_started_at"]), row["ping_verification_latency_s"], "ping latency"),
+        (float(row["data_plane_verified_at"]) - float(row["iperf_verify_started_at"]), row["iperf3_verification_latency_s"], "iperf latency"),
+        (float(row["data_plane_verified_at"]) - float(row["verification_started_at"]), row["verification_latency_s"], "verification latency"),
+    )
+    for observed, expected, description in timings:
+        if observed < 0 or not _numeric_equal(observed, expected):
+            raise ValueError(f"nominal run {run_id} {description} contradicts event timing")
+    formation_timing_valid = _strict_truth(row["formation_timing_valid"], "formation_timing_valid")
+    expected_formation_valid = row["failure_stage"] != "PREPARATION"
+    if formation_timing_valid != expected_formation_valid:
+        raise ValueError(f"nominal run {run_id} formation timing validity contradicts failure stage")
+    formation_latency = row["verified_formation_latency_s"]
+    if expected_formation_valid:
+        observed = float(row["data_plane_verified_at"]) - float(row["task_received_at"])
+        if not _numeric_equal(observed, formation_latency):
+            raise ValueError(f"nominal run {run_id} verified formation latency contradicts timing")
+    elif formation_latency != "":
+        raise ValueError(f"nominal run {run_id} preparation failure has formation latency")
+    _validate_command_results(run_id, stream, row)
 
 
 def _validate_events(events: list[dict[str, Any]], rows: dict[str, dict[str, str]]) -> int:
@@ -255,7 +424,11 @@ def validate_completed_nominal_artifacts(
     if any(not path.is_file() or path.stat().st_size == 0 for path in paths):
         raise ValueError("nominal validation requires nonempty runs, events, scope, and config files")
     with runs_path.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        expected_fields = [field.name for field in __import__("dataclasses").fields(NetnsFormationRun)]
+        if reader.fieldnames != expected_fields:
+            raise ValueError("nominal runs.csv schema is not the exact NetnsFormationRun producer schema")
+        rows = list(reader)
     grid_errors = exp1_canonical_grid_errors(rows)
     if grid_errors:
         raise ValueError("; ".join(grid_errors))
@@ -322,15 +495,147 @@ def validate_completed_nominal_artifacts(
     )
 
 
+def _confined_nominal_candidate(protocol_root: Path, candidate: Path) -> Path:
+    root = protocol_root.resolve()
+    resolved = candidate.resolve()
+    base = (root / "exp1_netns_staging_v3").resolve()
+    attempts = (root / "exp1_netns_staging_v3_attempts").resolve()
+    allowed = resolved == base or (
+        resolved.parent == attempts
+        and re.fullmatch(r"attempt-[0-9]{3,}", resolved.name) is not None
+    )
+    if not allowed:
+        raise ValueError(f"nominal candidate is outside confined staging roots: {resolved}")
+    return resolved
+
+
+def _validated_execution_commit(candidate: Path, repo: Path) -> tuple[str, str]:
+    path = candidate / "execution_commit.txt"
+    if not path.is_file():
+        raise ValueError("nominal candidate lacks execution commit provenance")
+    commit = path.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError("nominal candidate execution commit is not 40-hex")
+    resolved = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=repo,
+        text=True, capture_output=True,
+    )
+    if resolved.returncode != 0:
+        raise ValueError("nominal candidate execution commit is not git-resolvable")
+    return commit, _sha256(path)
+
+
+def _selection_receipt_payload(
+    protocol_root: Path, candidate: Path, config_path: Path, repo: Path,
+) -> dict[str, object]:
+    selected = _confined_nominal_candidate(protocol_root, candidate)
+    validation = validate_completed_nominal_artifacts(
+        selected / "raw" / "runs.csv",
+        selected / "raw" / "events.jsonl",
+        selected / "raw" / "measurement_scope.json",
+        config_path,
+    )
+    commit, commit_file_hash = _validated_execution_commit(selected, repo)
+    return {
+        "receipt_version": _SELECTION_RECEIPT_VERSION,
+        "selected_path": str(selected.relative_to(protocol_root.resolve())),
+        "execution_commit": commit,
+        "execution_commit_sha256": commit_file_hash,
+        "runs_sha256": validation.runs_sha256,
+        "events_sha256": validation.events_sha256,
+        "scope_sha256": validation.scope_sha256,
+        "configuration_sha256": validation.configuration_sha256,
+        "config_file_sha256": _sha256(config_path),
+        "raw_rows": validation.raw_rows,
+        "event_rows": validation.event_rows,
+        "event_runs": validation.event_runs,
+    }
+
+
+def select_nominal_candidate(
+    protocol_root: Path,
+    candidates: tuple[Path, ...] | list[Path],
+    config_path: Path,
+    receipt_path: Path,
+    *,
+    repo: Path = Path("."),
+) -> Path:
+    """Select the first valid confined candidate and atomically bind its bytes."""
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            payload = _selection_receipt_payload(
+                protocol_root, candidate, config_path, repo,
+            )
+        except (OSError, ValueError, KeyError, yaml.YAMLError) as error:
+            errors.append(f"{candidate}: {error}")
+            continue
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = receipt_path.with_name(receipt_path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, receipt_path)
+        return (protocol_root.resolve() / str(payload["selected_path"])).resolve()
+    detail = "; ".join(errors) if errors else "no candidates supplied"
+    raise ValueError(f"no valid confined nominal candidate: {detail}")
+
+
+def verify_nominal_selection_receipt(
+    protocol_root: Path,
+    receipt_path: Path,
+    config_path: Path,
+    *,
+    repo: Path = Path("."),
+) -> Path:
+    """Re-audit a selection receipt before normalization or publication."""
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("nominal selection receipt is unreadable") from error
+    if not isinstance(payload, dict) or payload.get("receipt_version") != _SELECTION_RECEIPT_VERSION:
+        raise ValueError("nominal selection receipt version is invalid")
+    selected_path = payload.get("selected_path")
+    if not isinstance(selected_path, str) or Path(selected_path).is_absolute():
+        raise ValueError("nominal selection receipt path is invalid")
+    candidate = _confined_nominal_candidate(protocol_root, protocol_root / selected_path)
+    actual = _selection_receipt_payload(protocol_root, candidate, config_path, repo)
+    if payload != actual:
+        raise ValueError("nominal selection receipt hash/provenance drift")
+    return candidate
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runs", required=True)
-    parser.add_argument("--events", required=True)
-    parser.add_argument("--scope", required=True)
+    parser.add_argument("--runs")
+    parser.add_argument("--events")
+    parser.add_argument("--scope")
     parser.add_argument(
         "--config", default="configs/exp1_netns_verified_formation_v3.yaml"
     )
+    parser.add_argument("--protocol-root")
+    parser.add_argument("--candidate", action="append", default=[])
+    parser.add_argument("--receipt")
+    parser.add_argument("--verify-selection", action="store_true")
+    parser.add_argument("--repo", default=".")
     args = parser.parse_args()
+    if args.protocol_root or args.candidate or args.receipt or args.verify_selection:
+        if not args.protocol_root or not args.receipt:
+            parser.error("selection mode requires --protocol-root and --receipt")
+        if args.verify_selection:
+            selected = verify_nominal_selection_receipt(
+                Path(args.protocol_root), Path(args.receipt), Path(args.config),
+                repo=Path(args.repo),
+            )
+        else:
+            selected = select_nominal_candidate(
+                Path(args.protocol_root), tuple(Path(item) for item in args.candidate),
+                Path(args.config), Path(args.receipt), repo=Path(args.repo),
+            )
+        print(str(selected))
+        return
+    if not args.runs or not args.events or not args.scope:
+        parser.error("artifact mode requires --runs, --events, and --scope")
     result = validate_completed_nominal_artifacts(
         Path(args.runs), Path(args.events), Path(args.scope), Path(args.config)
     )

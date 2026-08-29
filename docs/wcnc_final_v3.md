@@ -207,7 +207,11 @@ provenance (identity, stage timestamps, counts, and terminal outcome), and its
 original execution commit is present. An incomplete nominal attempt is never
 overwritten: it is retained and the launcher starts the next numbered tree in
 `exp1_netns_staging_v3_attempts/`, recording the validated selection in
-`environment/exp1_nominal_staging_path.txt`. A nonzero nominal
+`environment/exp1_nominal_selection.json`. This confined receipt stores the
+relative staging path plus the runs, events, scope, configuration, and
+execution-commit hashes. The selected path must be the canonical staging tree
+or an `attempt-NNN` child, and the 40-hex execution commit must resolve as a
+Git commit. The receipt is re-audited before normalization. A nonzero nominal
 runner exit caused by retained trial failures is not itself masked: the
 launcher continues only after this artifact audit and successful
 normalization. Missing, duplicated, fabricated, or hash-drifted artifacts fail
@@ -230,6 +234,15 @@ causally valid, unmodified prefix of the same frozen grid. A complete artifact
 is validation-only; a missing/skipped row, changed commit, or event tampering
 fails closed. A manual resume repeats the original command with `--resume`:
 
+After initialization and after every complete trial, the runner atomically
+checkpoints both byte lengths and SHA-256 hashes in `measurement_scope.json`.
+On resume, a shorter or changed authenticated prefix fails closed. Bytes after
+the last checkpoint (for example, events written before their terminal CSV
+row, or both files written before the scope replacement) are copied with hash
+metadata into `recovery/quarantine-NNNN/` and only then atomically truncated
+back to the authenticated prefix. The in-flight trial is rerun; committed
+trials are not discarded.
+
 ```bash
 sudo -E env -u WCNC_EXP1_INSIDE_USERNS -u WCNC_EXP1_PARENT_NETNS_INODE \
   .venv/bin/python -m experiments.exp1_transactional_formation \
@@ -241,9 +254,13 @@ sudo -E env -u WCNC_EXP1_INSIDE_USERNS -u WCNC_EXP1_PARENT_NETNS_INODE \
 Exp2--Exp4 run under
 `simulation_staging/<experiment>-<commit>-<protocol-signature>/`, never in
 canonical raw. Before immutable whole-tree publication, the launcher verifies
-the exact 0--99 seed grid, applicable method set, paired fingerprint, schema,
-and execution commit. Extra provenance files already in canonical raw remain;
-any same-name byte difference aborts before any staged file is copied.
+the exact producer CSV schema, metric type/range domains, finite values, exact
+0--99 seed grid, applicable method set, paired fingerprint, and an execution
+commit equal to the current resolvable Git commit. Extra provenance files
+already in canonical raw remain; any same-name byte difference aborts before
+any staged file is copied. Publication is restartable: compatible files may
+remain after interruption, but `publication_complete.json` is written
+atomically only after every source artifact has been copied and hashed.
 
 Aggregation, figures, and final integrity audit (in this order):
 

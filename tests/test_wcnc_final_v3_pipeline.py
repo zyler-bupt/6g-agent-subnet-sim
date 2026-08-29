@@ -1210,7 +1210,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                 (arm_root / "execution_commit.txt").write_text(head + "\n", encoding="utf-8")
             manifest = build_manifest(root, repo=Path("."))
         nominal = manifest["exp1_arms"]["nominal"]
-        self.assertIn("scripts/validate_wcnc_final_v3_exp1_nominal.py", nominal["source_hashes"])
+        self.assertEqual(set(nominal["source_hashes"]), {"experiments/exp1_netns_verified_formation.py"})
         transactional_arm = manifest["exp1_arms"]["exp1_transactional_v1"]
         self.assertIn("src/controller/formation_transactions.py", transactional_arm["source_hashes"])
         for path, digest in transactional_arm["source_hashes"].items():
@@ -1218,6 +1218,30 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                 ["git", "show", f"{head}:{path}"], capture_output=True, check=True
             ).stdout
             self.assertEqual(digest, hashlib.sha256(blob).hexdigest())
+
+    def test_old_compatible_nominal_commit_does_not_need_future_validator(self) -> None:
+        old = "99cceacaeee854ceba803eab5dbfe7eb51346d75"
+        missing = subprocess.run(
+            ["git", "cat-file", "-e", f"{old}:scripts/validate_wcnc_final_v3_exp1_nominal.py"],
+            capture_output=True,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); arm = root / "raw" / "exp1"; arm.mkdir(parents=True)
+            (arm / "execution_commit.txt").write_text(old + "\n", encoding="utf-8")
+            transactional_arm = root / "raw" / "exp1_transactional"
+            transactional_arm.mkdir(parents=True)
+            head = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout
+            (transactional_arm / "execution_commit.txt").write_text(head, encoding="utf-8")
+            manifest = build_manifest(root, repo=Path("."))
+            report = audit(root, manifest)
+        self.assertTrue(report["checks"]["exp1_arm_manifest_complete"])
+        digest = manifest["exp1_arms"]["nominal"]["source_hashes"]["experiments/exp1_netns_verified_formation.py"]
+        blob = subprocess.run(
+            ["git", "show", f"{old}:experiments/exp1_netns_verified_formation.py"],
+            capture_output=True, check=True,
+        ).stdout
+        self.assertEqual(digest, hashlib.sha256(blob).hexdigest())
 
     def test_exp1_baselines_have_executable_deterministic_planners(self) -> None:
         edges = (FormationEdge("e1", 0, 1, 1.0), FormationEdge("e2", 1, 2, 1.0))

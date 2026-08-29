@@ -164,16 +164,13 @@ def build_manifest(root: Path, repo: Path = Path(".")) -> dict[str, object]:
         "nominal": _arm_evidence(
             root, repo, arm_root="raw/exp1", raw_path="raw/exp1/trials.csv",
             config_path="configs/exp1_netns_verified_formation_v3.yaml",
-            sources=("experiments/exp1_netns_verified_formation.py",
-                     "scripts/normalize_wcnc_final_v3_exp1.py",
-                     "scripts/validate_wcnc_final_v3_exp1_nominal.py"),
+            sources=("experiments/exp1_netns_verified_formation.py",),
         ),
         "exp1_transactional_v1": _arm_evidence(
             root, repo, arm_root="raw/exp1_transactional",
             raw_path="raw/exp1_transactional/trials.csv",
             config_path="configs/exp1_transactional_formation_v1.yaml",
             sources=("experiments/exp1_transactional_formation.py",
-                     "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
                      "src/controller/formation_transactions.py"),
         ),
     }
@@ -455,8 +452,6 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                 "config_path": "configs/exp1_netns_verified_formation_v3.yaml",
                 "sources": {
                     "experiments/exp1_netns_verified_formation.py",
-                    "scripts/normalize_wcnc_final_v3_exp1.py",
-                    "scripts/validate_wcnc_final_v3_exp1_nominal.py",
                 },
             },
             "exp1_transactional_v1": {
@@ -465,7 +460,6 @@ def audit(root: Path, manifest: dict[str, object]) -> dict[str, object]:
                 "config_path": "configs/exp1_transactional_formation_v1.yaml",
                 "sources": {
                     "experiments/exp1_transactional_formation.py",
-                    "scripts/normalize_wcnc_final_v3_exp1_transactional.py",
                     "src/controller/formation_transactions.py",
                 },
             },

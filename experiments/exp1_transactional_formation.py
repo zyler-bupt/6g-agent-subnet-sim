@@ -1037,10 +1037,106 @@ def _validate_resume_events(
 
 def _write_scope(path: Path, scope: Mapping[str, object]) -> None:
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(scope, indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+_CHECKPOINT_VERSION = "exp1-transactional-byte-prefix-v1"
+
+
+def _checkpoint_scope(
+    scope: dict[str, object], runs_path: Path, attempts_path: Path,
+) -> None:
+    """Bind the last complete trial prefix before atomically replacing scope."""
+    runs = runs_path.read_bytes()
+    attempts = attempts_path.read_bytes()
+    scope.update({
+        "checkpoint_version": _CHECKPOINT_VERSION,
+        "runs_csv_bytes": len(runs),
+        "attempts_jsonl_bytes": len(attempts),
+        "runs_csv_sha256": hashlib.sha256(runs).hexdigest(),
+        "attempts_jsonl_sha256": hashlib.sha256(attempts).hexdigest(),
+    })
+
+
+def _atomic_restore_prefix(path: Path, prefix: bytes) -> None:
+    temporary = path.with_name(path.name + ".recovery.tmp")
+    with temporary.open("wb") as handle:
+        handle.write(prefix)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _recover_checkpointed_prefix(
+    output_dir: Path, scope: Mapping[str, object],
+) -> None:
+    """Authenticate a completed prefix and quarantine uncommitted crash tails."""
+    if scope.get("checkpoint_version") != _CHECKPOINT_VERSION:
+        raise RuntimeError("transactional resume scope lacks a supported byte checkpoint")
+    raw_dir = output_dir / "raw"
+    specifications = (
+        ("runs.csv", "runs_csv_bytes", "runs_csv_sha256"),
+        ("attempts.jsonl", "attempts_jsonl_bytes", "attempts_jsonl_sha256"),
+    )
+    recovered: list[tuple[Path, bytes, bytes, dict[str, object]]] = []
+    for filename, length_field, hash_field in specifications:
+        path = raw_dir / filename
+        try:
+            expected_length = int(scope[length_field])
+            expected_hash = str(scope[hash_field])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("transactional resume checkpoint metadata is invalid") from error
+        if expected_length < 0 or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+            raise RuntimeError("transactional resume checkpoint metadata is invalid")
+        try:
+            payload = path.read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"transactional resume checkpoint artifact is unreadable: {filename}") from error
+        if len(payload) < expected_length:
+            raise RuntimeError(
+                f"transactional resume artifact {filename} is shorter than its checkpoint"
+            )
+        prefix = payload[:expected_length]
+        if hashlib.sha256(prefix).hexdigest() != expected_hash:
+            raise RuntimeError(
+                f"transactional resume artifact {filename} checkpoint prefix is tampered"
+            )
+        trailing = payload[expected_length:]
+        if trailing:
+            recovered.append((path, prefix, trailing, {
+                "checkpoint_bytes": expected_length,
+                "checkpoint_sha256": expected_hash,
+                "observed_bytes": len(payload),
+                "observed_sha256": hashlib.sha256(payload).hexdigest(),
+                "trailing_bytes": len(trailing),
+                "trailing_sha256": hashlib.sha256(trailing).hexdigest(),
+            }))
+    if not recovered:
+        return
+    recovery_root = output_dir / "recovery"
+    recovery_root.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while (recovery_root / f"quarantine-{index:04d}").exists():
+        index += 1
+    quarantine = recovery_root / f"quarantine-{index:04d}"
+    quarantine.mkdir()
+    artifacts: dict[str, object] = {}
+    for path, _prefix, trailing, evidence in recovered:
+        (quarantine / f"{path.name}.trailing").write_bytes(trailing)
+        artifacts[path.name] = evidence
+    (quarantine / "metadata.json").write_text(
+        json.dumps({
+            "checkpoint_version": _CHECKPOINT_VERSION,
+            "artifacts": artifacts,
+        }, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    for path, prefix, _trailing, _evidence in recovered:
+        _atomic_restore_prefix(path, prefix)
 
 
 def _validate_execution_commit(output_dir: Path, expected: str | None, *, resume: bool) -> None:
@@ -1068,6 +1164,7 @@ def _resume_prefix(
     invocation_grid: Mapping[str, object], frozen_grid: Mapping[str, object],
 ) -> tuple[list[TransactionalFormationRun], list[dict[str, object]]]:
     raw = output_dir / "raw"
+    _recover_checkpointed_prefix(output_dir, scope)
     rows = _read_persisted_runs(raw / "runs.csv")
     events = _read_persisted_events(raw / "attempts.jsonl")
     expected_scope = {
@@ -1105,9 +1202,9 @@ def _resume_prefix(
         raise RuntimeError("transactional resume event count does not match its prefix")
     runs_hash = str(scope.get("runs_csv_sha256", ""))
     events_hash = str(scope.get("attempts_jsonl_sha256", ""))
-    if runs_hash and runs_hash != hashlib.sha256((raw / "runs.csv").read_bytes()).hexdigest():
+    if runs_hash != hashlib.sha256((raw / "runs.csv").read_bytes()).hexdigest():
         raise RuntimeError("transactional resume runs.csv hash drift")
-    if events_hash and events_hash != hashlib.sha256((raw / "attempts.jsonl").read_bytes()).hexdigest():
+    if events_hash != hashlib.sha256((raw / "attempts.jsonl").read_bytes()).hexdigest():
         raise RuntimeError("transactional resume attempts.jsonl hash drift")
     return rows, events
 
@@ -1163,6 +1260,9 @@ def run_transactional_experiment(
         "completed_rows": 0,
         "row_count": 0,
         "event_count": 0,
+        "checkpoint_version": _CHECKPOINT_VERSION,
+        "runs_csv_bytes": 0,
+        "attempts_jsonl_bytes": 0,
         "runs_csv_sha256": "",
         "attempts_jsonl_sha256": "",
     }
@@ -1183,12 +1283,17 @@ def run_transactional_experiment(
             return rows
     else:
         scope = initial_scope
-        _write_scope(scope_path, scope)
         with runs_path.open("w", encoding="utf-8", newline="") as handle:
             csv.DictWriter(
                 handle, fieldnames=[field.name for field in fields(TransactionalFormationRun)]
             ).writeheader()
-        attempts_path.write_text("", encoding="utf-8")
+            handle.flush()
+            os.fsync(handle.fileno())
+        with attempts_path.open("w", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        _checkpoint_scope(scope, runs_path, attempts_path)
+        _write_scope(scope_path, scope)
         rows = []
 
     num_gateways = int(config["task"]["num_gateways"])  # type: ignore[index]
@@ -1236,8 +1341,7 @@ def run_transactional_experiment(
         scope["completed_rows"] = len(rows)
         scope["row_count"] = len(rows)
         scope["complete_grid_validated"] = False
-        scope["runs_csv_sha256"] = ""
-        scope["attempts_jsonl_sha256"] = ""
+        _checkpoint_scope(scope, runs_path, attempts_path)
         _write_scope(scope_path, scope)
 
     if require_complete_grid:
@@ -1245,8 +1349,7 @@ def run_transactional_experiment(
     scope["completed_rows"] = len(rows)
     scope["row_count"] = len(rows)
     scope["complete_grid_validated"] = bool(require_complete_grid)
-    scope["runs_csv_sha256"] = hashlib.sha256(runs_path.read_bytes()).hexdigest()
-    scope["attempts_jsonl_sha256"] = hashlib.sha256(attempts_path.read_bytes()).hexdigest()
+    _checkpoint_scope(scope, runs_path, attempts_path)
     _write_scope(scope_path, scope)
     return rows
 
