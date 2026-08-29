@@ -2646,6 +2646,25 @@ class RemoteLauncherContractTests(unittest.TestCase):
                 self.assertTrue((target / "execution_commit.txt").is_file())
                 self.assertTrue((target / "publication_complete.json").is_file())
 
+    def test_exp4_staging_accepts_targeted_and_realized_severity_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = self._staged_rows("exp4", (0,))
+            for row in rows:
+                if row["failure_type"] == "link_failure":
+                    row["affected_flow_ratio"] = "0.1111111111111111"
+                if row["failure_type"] == "agent_failure":
+                    row["dependency_closure_ratio"] = "0.20833333333333334"
+                if (
+                    row["failure_type"] == "capacity_degradation"
+                    and row["post_fault_capacity_ratio"] == "1.1"
+                ):
+                    row["failure_severity"] = "-0.1"
+            source = self._write_staged_rows(Path(directory), "exp4", rows)
+            head = (source / "execution_commit.txt").read_text().strip()
+            validate_staged_experiment(
+                source, "exp4", seeds=(0,), expected_commit=head,
+            )
+
     def test_staging_validation_rejects_missing_duplicate_and_inapplicable_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); rows = self._staged_rows("exp4", (0,))

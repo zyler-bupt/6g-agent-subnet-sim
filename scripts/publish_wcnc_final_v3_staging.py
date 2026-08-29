@@ -54,7 +54,7 @@ _INT_FIELDS = {
     "proposal_generated_version", "execution_version", "read_set_version",
 }
 _NONNEGATIVE_NUMERIC_FIELDS = {
-    "gamma", "affected_scope_bucket_percent", "failure_severity",
+    "gamma", "affected_scope_bucket_percent",
     "affected_scope_ratio", "affected_flow_ratio", "dependency_closure_ratio",
     "post_fault_capacity_ratio", "conflict_pressure", "noise_ratio",
     "coordination_latency_ms", "feasibility_latency_ms", "transaction_latency_ms",
@@ -112,6 +112,16 @@ def _validate_metric_domains(row: dict[str, str], experiment: str) -> None:
             raise ValueError(f"staged {field} numeric domain is negative")
         if field in _UNIT_INTERVAL_FIELDS and parsed > 1:
             raise ValueError(f"staged {field} ratio is outside [0,1]")
+    failure_severity = row.get("failure_severity", "")
+    if failure_severity != "":
+        parsed_severity = _number(failure_severity)
+        signed_capacity_headroom = (
+            experiment == "exp4"
+            and row.get("failure_type") == "capacity_degradation"
+            and _number(row.get("post_fault_capacity_ratio")) > 1.0
+        )
+        if parsed_severity < 0 and not signed_capacity_headroom:
+            raise ValueError("staged failure_severity numeric domain is negative")
     if len(row.get("scenario_fingerprint", "")) < 32:
         raise ValueError("staged scenario fingerprint is invalid")
     if experiment == "exp2":
@@ -153,12 +163,11 @@ def _point(row: dict[str, str], experiment: str) -> float:
     if experiment == "exp3":
         return _number(row.get("affected_scope_bucket_percent"))
     failure_type = row.get("failure_type", "")
-    field = {
-        "link_failure": "affected_flow_ratio",
-        "agent_failure": "dependency_closure_ratio",
-        "capacity_degradation": "post_fault_capacity_ratio",
-    }.get(failure_type)
-    return _number(row.get(field, row.get("failure_severity")))
+    if failure_type == "capacity_degradation":
+        return _number(row.get("post_fault_capacity_ratio"))
+    # Link/agent sweeps target a ratio, while the topology-discrete realized
+    # ratio is recorded separately and can legitimately differ by seed.
+    return _number(row.get("failure_severity"))
 
 
 def _expected_grid(config: dict[str, object], experiment: str, seeds: tuple[int, ...]) -> dict[tuple[str, float, int, int], set[str]]:
