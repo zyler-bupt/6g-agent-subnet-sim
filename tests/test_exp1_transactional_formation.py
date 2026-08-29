@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import csv
+import os
 import subprocess
 import tempfile
 import threading
@@ -58,6 +59,54 @@ from src.controller.formation_transactions import (
     retry_scope_for_method,
     task_descendant_closure,
 )
+
+
+class NetlinkJsonCompatibilityTests(unittest.TestCase):
+    def test_empty_policy_table_output_is_an_empty_route_list(self) -> None:
+        self.assertEqual(exp1._ip_json("", "policy table routes"), [])
+        self.assertEqual(exp1._ip_json("\n", "policy table routes"), [])
+
+    def test_legacy_ip_rule_text_preserves_activation_fields(self) -> None:
+        rules = exp1._ip_rules(
+            "0:\tfrom all lookup local\n"
+            "10042:\tfrom all to 10.101.1.2 lookup 23456\n"
+            "32766:\tfrom all lookup main\n",
+            "policy table rules",
+        )
+        self.assertIn(
+            {"priority": "10042", "to": "10.101.1.2", "table": "23456"},
+            rules,
+        )
+
+    def test_legacy_ip_route_text_is_stable_readback_evidence(self) -> None:
+        routes = exp1._ip_routes(
+            "10.101.1.2 via 10.100.0.1 dev eth0  proto static\n",
+            "policy table routes",
+        )
+        self.assertEqual(
+            routes,
+            [{"raw": "10.101.1.2 via 10.100.0.1 dev eth0 proto static"}],
+        )
+
+
+class NominalValidatorCliTests(unittest.TestCase):
+    def test_validator_script_imports_repository_modules_without_pythonpath(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        completed = subprocess.run(
+            (
+                str(repository / ".venv" / "bin" / "python"),
+                str(repository / "scripts" / "validate_wcnc_final_v3_exp1_nominal.py"),
+                "--help",
+            ),
+            cwd=repository,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 class TransactionalCliTests(unittest.TestCase):
@@ -723,6 +772,42 @@ class FormationTransactionEngineTests(unittest.TestCase):
 
 
 class NetnsPolicyTableBackendTests(unittest.TestCase):
+    def test_stage_accepts_legacy_rule_readback_from_old_iproute2(self) -> None:
+        topology = exp1.ProcessNetnsTopology(2, 1)
+        topology.agents = [SimpleNamespace(pid=100), SimpleNamespace(pid=101)]
+        topology.gateways = [SimpleNamespace(pid=200)]
+        topology.agent_ips = ["10.100.0.2", "10.100.1.2"]
+        topology.agent_gateways = [0, 0]
+        topology._parallel_commands = lambda *_args, **_kwargs: None
+
+        def readback(_pid, *command, **_kwargs):
+            if command[:5] == ("ip", "-j", "route", "show", "table"):
+                return SimpleNamespace(stdout="")
+            if command == ("ip", "-j", "rule", "show"):
+                return SimpleNamespace(
+                    stdout=(
+                        "0:\tfrom all lookup local\n"
+                        "32766:\tfrom all lookup main\n"
+                        "32767:\tfrom all lookup default\n"
+                    )
+                )
+            raise AssertionError(command)
+
+        topology._run_ns = readback
+        backend = exp1.NetnsPolicyTableBackend(topology)
+        command = exp1.DeploymentCommand(
+            "agent-0",
+            100,
+            (
+                "ip", "route", "replace", "10.100.1.2/32", "via",
+                "10.100.0.1", "dev", "eth0",
+            ),
+        )
+
+        staged = backend.stage("txn-legacy-rules", (command,))
+
+        self.assertTrue(staged.accepted, staged.reason)
+
     def test_stages_routes_before_activation_and_flushes_table(self) -> None:
         topology = exp1.ProcessNetnsTopology(3, 2)
         topology.agents = [SimpleNamespace(pid=100 + index) for index in range(3)]

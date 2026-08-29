@@ -457,14 +457,14 @@ class NetnsPolicyTableBackend:
     ) -> tuple[dict[str, object], ...]:
         records: list[dict[str, object]] = []
         for pid, table in sorted(staged.table_by_pid.items()):
-            routes = _ip_json(
+            routes = _ip_routes(
                 self._topology._run_ns(
                     pid, "ip", "-j", "route", "show", "table", str(table),
                     timeout=_remaining_timeout(deadline, staged.timeout_s),
                 ).stdout,
                 f"policy table {table} routes",
             )
-            rules = _ip_json(
+            rules = _ip_rules(
                 self._topology._run_ns(
                     pid, "ip", "-j", "rule", "show",
                     timeout=_remaining_timeout(deadline, staged.timeout_s),
@@ -602,6 +602,8 @@ def _delete_rule(command: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _ip_json(payload: str, context: str) -> list[object]:
+    if not payload.strip():
+        return []
     try:
         decoded = json.loads(payload)
     except json.JSONDecodeError as error:
@@ -609,6 +611,40 @@ def _ip_json(payload: str, context: str) -> list[object]:
     if not isinstance(decoded, list):
         raise RuntimeError(f"{context}: expected a JSON list")
     return decoded
+
+
+def _ip_rules(payload: str, context: str) -> list[object]:
+    stripped = payload.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        return _ip_json(payload, context)
+    rules: list[object] = []
+    for line in stripped.splitlines():
+        match = re.match(r"^\s*(\d+):\s+(.*)$", line)
+        if match is None:
+            raise RuntimeError(f"{context}: invalid ip rule output")
+        tokens = match.group(2).split()
+        record: dict[str, object] = {"priority": match.group(1)}
+        for key in ("to", "lookup", "table"):
+            if key in tokens and tokens.index(key) + 1 < len(tokens):
+                value = tokens[tokens.index(key) + 1]
+                record["table" if key in {"lookup", "table"} else key] = value
+        rules.append(record)
+    return rules
+
+
+def _ip_routes(payload: str, context: str) -> list[object]:
+    stripped = payload.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        return _ip_json(payload, context)
+    return [
+        {"raw": " ".join(line.split())}
+        for line in stripped.splitlines()
+        if line.strip()
+    ]
 
 
 def _rules_reference_table(rules: Sequence[object], table_id: object) -> bool:

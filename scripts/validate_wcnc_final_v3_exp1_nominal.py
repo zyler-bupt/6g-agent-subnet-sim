@@ -10,11 +10,16 @@ import math
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from experiments.exp1_netns_verified_formation import (
     NetnsFormationRun,
