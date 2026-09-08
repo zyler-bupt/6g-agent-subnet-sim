@@ -11,7 +11,7 @@ from experiments.paper_protocol import (
     EXPERIMENT_METHODS,
     METHODS,
     mode_spec,
-    load_and_validate_paper_config,
+    load_and_validate_wcnc_v3_config,
     stable_fingerprint,
 )
 from src.metrics.paper import PaperTrial, write_paper_trials
@@ -32,20 +32,20 @@ class PaperProtocolTests(unittest.TestCase):
         self.assertEqual(paper.rate_events_per_seed, 5)
         self.assertEqual(paper.trials_per_point(rate_metric=True), 150)
 
-    def test_reference_config_is_loaded_and_protocol_drift_is_rejected(self) -> None:
+    def test_canonical_config_is_loaded_and_protocol_drift_is_rejected(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        config_path = root / "configs" / "paper_experiments.yaml"
-        loaded = load_and_validate_paper_config(config_path)
+        config_path = root / "configs" / "wcnc_final_v3.yaml"
+        loaded = load_and_validate_wcnc_v3_config(config_path)
         drifted = copy.deepcopy(loaded)
-        drifted["exp2"]["conflict_density_percent"] = [0, 20, 40]
+        drifted["exp2"]["gamma"] = [0.8, 1.0, 1.2]
 
         with tempfile.TemporaryDirectory() as directory:
-            candidate = Path(directory) / "paper_experiments.yaml"
+            candidate = Path(directory) / "wcnc_final_v3.yaml"
             import yaml
 
             candidate.write_text(yaml.safe_dump(drifted), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "protocol drift"):
-                load_and_validate_paper_config(candidate)
+                load_and_validate_wcnc_v3_config(candidate)
 
     def test_final_method_sets_and_adaptation_metadata_are_unambiguous(self) -> None:
         # Canonical wcnc_final_v3: initial formation uses a global embedding

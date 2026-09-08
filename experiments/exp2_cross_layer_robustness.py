@@ -735,7 +735,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default="configs/exp2_cross_layer_robustness.yaml",
+        required=True,
+        help="Path to an explicit robustness configuration. No legacy default is shipped.",
     )
     parser.add_argument("--seeds", default="0:29")
     parser.add_argument("--output-dir", default="results/exp2_robustness")

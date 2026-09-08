@@ -7,6 +7,10 @@ import json
 import math
 from pathlib import Path
 
+import matplotlib
+
+# Canonical plots are generated in CI and on headless Linux hosts.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 plt.rcParams["svg.hashsalt"] = "wcnc_final_v3"

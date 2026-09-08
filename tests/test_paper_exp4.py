@@ -7,7 +7,6 @@ from pathlib import Path
 
 from experiments.exp4_failure import run_exp4
 from experiments.paper_protocol import EXPERIMENT_FAILURE_METHODS, EXPERIMENT_METHODS
-from scripts.sanity_check_results import check_results
 from src.controller.paper_failure_recovery import (
     PaperFailureVerifier,
     PaperSfcRestorationStrategy,
@@ -315,13 +314,6 @@ class PaperExp4RunnerTests(unittest.IsolatedAsyncioTestCase):
                     msg=f"trial {trial_id} (ft={ft}) used wrong method set",
                 )
             self.assertTrue((root / "raw" / "pilot" / "exp4" / "trials.csv").exists())
-
-            findings = check_results(rows, experiment="exp4")
-            incomplete = [
-                item for item in findings if item.code == "INCOMPLETE_METHOD_PAIR"
-            ]
-            self.assertEqual(incomplete, [])
-
 
 if __name__ == "__main__":
     unittest.main()

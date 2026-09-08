@@ -1014,6 +1014,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
                         })
             environment = dict(os.environ)
             environment["MPLCONFIGDIR"] = str(root / "mpl")
+            environment["XDG_CACHE_HOME"] = str(root / "cache")
             subprocess.run(
                 (
                     sys.executable, "scripts/plot_wcnc_final_v3.py", "--root", str(root),
@@ -1081,6 +1082,7 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             raw.write_text("this is not CSV\n", encoding="utf-8")
             environment = dict(os.environ)
             environment["MPLCONFIGDIR"] = str(root / "mpl")
+            environment["XDG_CACHE_HOME"] = str(root / "cache")
             command = (
                 sys.executable, "scripts/plot_wcnc_final_v3.py", "--root", str(root),
                 "--experiment", "exp1_transactional",
@@ -1250,6 +1252,12 @@ class WcncFinalV3PipelineTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertNotEqual(missing.returncode, 0)
+        source = subprocess.run(
+            ["git", "cat-file", "-e", f"{old}:experiments/exp1_netns_verified_formation.py"],
+            capture_output=True,
+        )
+        if source.returncode != 0:
+            self.skipTest("historical blob is unavailable in this shallow or filtered clone")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); arm = root / "raw" / "exp1"; arm.mkdir(parents=True)
             (arm / "execution_commit.txt").write_text(old + "\n", encoding="utf-8")

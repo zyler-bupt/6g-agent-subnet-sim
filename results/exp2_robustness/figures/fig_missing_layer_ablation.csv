@@ -1,9 +1,0 @@
-x,missing_layer,method,mean,ci95,sample_count,qos_satisfaction_rate,infeasible_configuration_rate,safe_rejection_rate
-application,application,adjacent,1.0,0.0,30,0.0,1.0,0.0
-application,application,proposed,1.0,0.0,30,0.0,0.0,1.0
-transport,transport,adjacent,1.0,0.0,30,0.0,1.0,0.0
-transport,transport,proposed,1.0,0.0,30,0.0,0.0,1.0
-network,network,adjacent,1.0,0.0,30,0.0,1.0,0.0
-network,network,proposed,1.0,0.0,30,0.0,0.0,1.0
-physical,physical,adjacent,1.0,0.0,30,0.0,1.0,0.0
-physical,physical,proposed,1.0,0.0,30,0.0,0.0,1.0

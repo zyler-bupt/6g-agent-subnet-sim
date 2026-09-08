@@ -1,7 +1,0 @@
-x,method,mean,ci95,sample_count
-Agent,safe_rejection,0.8,0.0,150
-Agent,success,0.2,0.0,150
-Link,safe_rejection,0.0,0.0,150
-Link,success,1.0,0.0,150
-Physical,safe_rejection,0.6,0.0,150
-Physical,success,0.4,0.0,150

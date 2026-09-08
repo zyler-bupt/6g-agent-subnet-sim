@@ -1,9 +1,0 @@
-removed_agents_percent,outcome,percent,runs
-5.0,Success,0.0,30
-5.0,Verification Failure / Rollback,100.0,30
-10.0,Success,40.0,30
-10.0,Verification Failure / Rollback,60.0,30
-20.0,Success,86.66666666666667,30
-20.0,Verification Failure / Rollback,13.333333333333334,30
-40.0,Success,100.0,30
-40.0,Verification Failure / Rollback,0.0,30

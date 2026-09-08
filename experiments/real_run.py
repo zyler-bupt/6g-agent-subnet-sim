@@ -852,7 +852,11 @@ def main() -> None:
     parser.add_argument("--initial-target-mbps", type=float, default=16.0)
     parser.add_argument("--tcp-congestion", default="cubic")
     parser.add_argument("--flowgen-control-file", default="/tmp/6g-agent-testbed/flowgen-control.json")
-    parser.add_argument("--trace-path", default="third_party/SANet/data/example_band_n1/traffic.npy")
+    parser.add_argument(
+        "--trace-path",
+        default=None,
+        help="Optional NumPy trace path. Fetch SANet separately or provide your own trace.",
+    )
     parser.add_argument("--no-trace", action="store_true")
     parser.add_argument("--event-namespace", default="h-router")
     parser.add_argument("--event-dev", default="rt-cloud0")

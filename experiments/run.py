@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ModuleNotFoundError:  # plotting is optional for minimal simulation runs
     plt = None

@@ -594,7 +594,11 @@ def parse_seed_range(value: str) -> tuple[int, ...]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run experiment 3 Agent-removal elasticity")
-    parser.add_argument("--config", default="configs/exp3_business_elasticity.yaml")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to an explicit elasticity configuration. No legacy default is shipped.",
+    )
     parser.add_argument(
         "--methods",
         default="proposed,full_rebuild,local_only",

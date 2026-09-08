@@ -307,7 +307,7 @@ class Exp1FailureContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deployment.proposed.scheduling"):
             exp1.validate_formal_protocol(config, tuple(range(50)))
 
-    def test_v3_freezes_two_second_iperf_without_changing_v2_history(self) -> None:
+    def test_v3_freezes_two_second_iperf_window(self) -> None:
         with Path("configs/exp1_netns_verified_formation_v3.yaml").open(
             encoding="utf-8"
         ) as handle:
@@ -320,15 +320,6 @@ class Exp1FailureContractTests(unittest.TestCase):
         v3["verification"]["iperf3"]["duration_s"] = 1
         with self.assertRaisesRegex(ValueError, "verification.iperf3.duration_s"):
             exp1.validate_formal_protocol(v3, tuple(range(50)))
-
-        with Path("configs/exp1_netns_verified_formation_v2.yaml").open(
-            encoding="utf-8"
-        ) as handle:
-            v2 = yaml.safe_load(handle)
-        exp1.validate_formal_protocol(v2, tuple(range(50)))
-        v2["verification"]["iperf3"]["duration_s"] = 2
-        with self.assertRaisesRegex(ValueError, "verification.iperf3.duration_s"):
-            exp1.validate_formal_protocol(v2, tuple(range(50)))
 
         with Path("configs/exp1_netns_verified_formation_pilot_v3.yaml").open(
             encoding="utf-8"

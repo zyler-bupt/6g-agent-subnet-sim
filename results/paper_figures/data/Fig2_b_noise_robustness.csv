@@ -1,9 +1,0 @@
-method,sample_count,x,mean_percent,ci95_percent,ground_truth_state
-adjacent,90,0.0,100.0,0.0,true_unnoised_state
-proposed,90,0.0,100.0,0.0,true_unnoised_state
-adjacent,90,5.0,90.0,6.232787534437397,true_unnoised_state
-proposed,90,5.0,100.0,0.0,true_unnoised_state
-adjacent,90,10.0,85.55555555555556,7.303576748378961,true_unnoised_state
-proposed,90,10.0,100.0,0.0,true_unnoised_state
-adjacent,90,20.0,87.77777777777777,6.805004971486085,true_unnoised_state
-proposed,90,20.0,98.88888888888889,2.1777777777777776,true_unnoised_state

@@ -3064,7 +3064,7 @@ def _reexec_in_user_namespace(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Real Linux netns verified initial formation experiment")
-    parser.add_argument("--config", default="configs/exp1_netns_verified_formation_v2.yaml")
+    parser.add_argument("--config", default="configs/exp1_netns_verified_formation_v3.yaml")
     parser.add_argument("--output-dir", default="results/exp1_wcnc_final_v2")
     parser.add_argument("--seeds", default="")
     parser.add_argument("--task-sizes", default="")
