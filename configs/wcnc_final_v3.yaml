@@ -1,0 +1,57 @@
+protocol:
+  id: wcnc_final_v3
+  frozen: true
+  canonical_root: results/paper/wcnc_final_v3
+
+pilot:
+  seeds: "9000:9019"
+
+formal:
+  exp1_seeds: "0:49"
+  exp2_exp4_seeds: "0:99"
+
+exp1:
+  formal_config: configs/exp1_netns_verified_formation_v3.yaml
+  pilot_config: configs/exp1_netns_verified_formation_pilot_v3.yaml
+  num_agents: [4, 8, 12, 16, 20]
+  methods: [proposed, cspf, global_sfc_embedding]
+  deployment_policies:
+    proposed: parallel_single_batch
+    cspf: sequential_flow_batches
+    global_sfc_embedding: sequential_hop_route_then_activation_batches
+  require_isolated_outer_network_namespace: true
+  require_all_formal_trials_successful: true
+  timeout_s: 45
+  result_mode: measured_netns
+
+exp2:
+  gamma: [0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.3]
+  methods: [proposed, sanet_dw, weighted_sum, independent]
+  epsilon_min: 0.85
+  epsilon_max: 1.15
+  epsilon_distribution: bounded_centered_seed_fixed
+  max_combinations: 4096
+  coordination_timeout_ms: 10000
+  result_mode: transactional_simulation
+
+exp3:
+  affected_dependency_scope_percent: [10, 20, 30, 40, 50]
+  methods: [proposed, netren, local_only, full_rebuild]
+  result_mode: transactional_simulation
+
+exp4:
+  link_affected_flow_ratio: [0.03, 0.06, 0.10, 0.15, 0.25]
+  agent_dependency_closure_ratio: [0.1, 0.2, 0.3, 0.4, 0.5]
+  capacity_ratio: [1.1, 1.0, 0.9, 0.75, 0.6]
+  methods_by_failure:
+    link_failure: [proposed, cspf, full_rebuild]
+    agent_failure: [proposed, sfc_restoration, full_rebuild]
+    capacity_degradation: [proposed, te_reopt, full_rebuild]
+  result_mode: transactional_simulation
+
+statistics:
+  bootstrap_iterations: 5000
+  cluster: seed
+  rate_interval: wilson_95
+  continuous_interval: topology_cluster_bootstrap_95
+  comparison_interval: paired_topology_cluster_bootstrap_95

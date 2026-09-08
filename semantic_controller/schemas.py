@@ -92,6 +92,23 @@ class SemanticTriggerResult(BaseModel):
     reason: str
 
 
+class SemanticEmbedding(BaseModel):
+    model: str
+    dimension: int = Field(ge=1)
+    values: list[float]
+
+    @model_validator(mode="after")
+    def validate_dimension(self) -> "SemanticEmbedding":
+        if len(self.values) != self.dimension:
+            raise ValueError("embedding values length must equal dimension")
+        return self
+
+
+class GoalCandidate(BaseModel):
+    goal_id: GoalID
+    similarity: float = Field(ge=-1, le=1)
+
+
 class GoalSpec(BaseModel):
     goal_id: GoalID
     goal_description: str
@@ -100,6 +117,15 @@ class GoalSpec(BaseModel):
     required_information: list[str] = Field(default_factory=list)
     need_clarification: bool = False
     clarification_question: str | None = None
+
+    @field_validator("required_information")
+    @classmethod
+    def required_information_is_supported(cls, values: list[str]) -> list[str]:
+        allowed = {"future_app_rate", "future_network_bandwidth"}
+        unsupported = set(values) - allowed
+        if unsupported:
+            raise ValueError(f"unsupported required_information: {sorted(unsupported)}")
+        return values
 
     @model_validator(mode="after")
     def validate_clarification(self) -> "GoalSpec":
@@ -157,6 +183,7 @@ class PlanSpec(BaseModel):
                 )
 
         self._validate_acyclic()
+        self._validate_workflow()
         return self
 
     def _validate_acyclic(self) -> None:
@@ -177,6 +204,44 @@ class PlanSpec(BaseModel):
 
         for step_id in deps:
             visit(step_id)
+
+    def _validate_workflow(self) -> None:
+        by_type: dict[TaskType, PlanStep] = {}
+        for step in self.steps:
+            if step.task_type in by_type:
+                raise ValueError(f"duplicate task_type in plan: {step.task_type.value}")
+            by_type[step.task_type] = step
+
+        if self.goal_id == GoalID.UNKNOWN:
+            if set(by_type) != {TaskType.REQUEST_CLARIFICATION}:
+                raise ValueError("UNKNOWN goal plans may only request clarification")
+            return
+
+        required = {
+            TaskType.APP_DEMAND_FORECAST,
+            TaskType.NETWORK_BANDWIDTH_FORECAST,
+            TaskType.CROSS_LAYER_FEASIBILITY_CHECK,
+            TaskType.VIDEO_POLICY_SELECTION,
+            TaskType.GOAL_EVALUATION,
+        }
+        if set(by_type) != required:
+            missing = sorted(item.value for item in required - set(by_type))
+            extra = sorted(item.value for item in set(by_type) - required)
+            raise ValueError(f"invalid workflow tasks; missing={missing}, extra={extra}")
+
+        app_id = by_type[TaskType.APP_DEMAND_FORECAST].step_id
+        network_id = by_type[TaskType.NETWORK_BANDWIDTH_FORECAST].step_id
+        feasibility = by_type[TaskType.CROSS_LAYER_FEASIBILITY_CHECK]
+        if not {app_id, network_id}.issubset(set(feasibility.dependencies)):
+            raise ValueError("cross-layer feasibility must depend on both forecasts")
+
+        policy = by_type[TaskType.VIDEO_POLICY_SELECTION]
+        if feasibility.step_id not in policy.dependencies:
+            raise ValueError("video policy must depend on cross-layer feasibility")
+
+        evaluation = by_type[TaskType.GOAL_EVALUATION]
+        if policy.step_id not in evaluation.dependencies:
+            raise ValueError("goal evaluation must depend on video policy")
 
 
 class PredictionResult(BaseModel):
@@ -223,10 +288,11 @@ class GoalEvaluation(BaseModel):
 class SemanticPipelineResult(BaseModel):
     trigger: SemanticTriggerResult
     context: SemanticContext
+    semantic_embedding: SemanticEmbedding | None = None
+    goal_candidates: list[GoalCandidate] = Field(default_factory=list)
     goal: GoalSpec
     plan: PlanSpec | None
     predictions: list[PredictionResult] = Field(default_factory=list)
     feasibility: FeasibilityResult | None = None
     recommendation: ActionRecommendation | None = None
     evaluation: GoalEvaluation
-

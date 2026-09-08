@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>6G 四层异构 Agent 组网过程可视化</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>6G 四层异构 Agent 组网过程</h1>
+    <div class="scenarios" id="scenarios"></div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <svg id="canvas" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3"
+                  orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L7,3 L0,6 Z" class="arrowhead" />
+          </marker>
+          <marker id="arrow-active" markerWidth="9" markerHeight="9" refX="7" refY="3"
+                  orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L7,3 L0,6 Z" class="arrowhead-active" />
+          </marker>
+          <marker id="arrow-changed" markerWidth="9" markerHeight="9" refX="7" refY="3"
+                  orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L7,3 L0,6 Z" class="arrowhead-changed" />
+          </marker>
+        </defs>
+        <g id="edge-layer"></g>
+        <g id="node-layer"></g>
+      </svg>
+      <div class="legend">
+        <span><i class="dot active"></i>已建/活跃</span>
+        <span><i class="dot focus"></i>当前焦点</span>
+        <span><i class="dot failed"></i>失效</span>
+        <span><i class="dot changed"></i>本步变更</span>
+        <span><i class="dot standby"></i>备用/占位</span>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="step-head">
+        <span class="step-counter" id="step-counter">0 / 0</span>
+        <span class="step-kind" id="step-kind"></span>
+      </div>
+      <h2 id="step-title">—</h2>
+      <p id="step-detail" class="detail">—</p>
+
+      <div class="risk" id="risk-wrap" hidden>
+        <div class="risk-label">跨层风险 R <span id="risk-val"></span> / 阈值 τ <span id="risk-thr"></span></div>
+        <div class="risk-bar"><div class="risk-fill" id="risk-fill"></div><div class="risk-tau" id="risk-tau"></div></div>
+      </div>
+
+      <div class="badges" id="badges"></div>
+      <div class="compare" id="compare" hidden></div>
+
+      <div class="controls">
+        <button id="btn-reset" title="重置">↺</button>
+        <button id="btn-prev" title="上一步">◀</button>
+        <button id="btn-play" title="自动播放">⏵ 播放</button>
+        <button id="btn-next" title="下一步">▶</button>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

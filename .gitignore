@@ -1,4 +1,45 @@
+# Local-only research workspace
+local/
+
+# Experiment outputs and generated artifacts
+results/
+artifacts/
+output/
+figures/out/
+*.pptx
+*.pptx.inspect.ndjson
+*.inspect.ndjson
+*.tar.gz
+*.log
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Editors, operating systems, and temporary work
 .DS_Store
-results/
+~$*
+*.swp
+*.tmp
+.tmp/
+.tmp_*/
+.workbuddy/
+
+# Tiny committed fixtures belong only here.
+!tests/fixtures/
+!tests/fixtures/**

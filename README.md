@@ -1,90 +1,78 @@
-# 6G 异构多智能体任务通信子网仿真实验
+# 6G 跨层异构 Agent 任务通信子网
 
-本仓库用于验证“跨层组网意图 -> 任务通信子网 -> 网关规则 -> 状态反馈 -> 增量调整”的软件仿真闭环。
+本仓库实现“业务协作关系 → 跨层任务子网 → 网络感知 → 预测/决策 → 运行期弹性调整”闭环。远端主线只保留可运行系统、Linux netns 测试床和冻结的 `wcnc_final_v3` 实验流水线；历史实验、baseline 和大型结果不进入 Git。
 
-## 运行方式
+## 安装
 
-轻量机制回归测试：
-
-```bash
-python3 main.py
-```
-
-SANet 语义控制器第一阶段 demo：
+需要 Python 3.10+。建议在独立虚拟环境中安装：
 
 ```bash
-python3 semantic_demo.py
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[all,dev]'
 ```
 
-语义控制器单元测试：
+如果只使用核心组网和 CLI，可执行 `python -m pip install -e .`。
+
+## 系统入口
 
 ```bash
-python3 -m unittest discover -v
+# 离线任务子网和弹性调整演示
+python -m src.sim.run_rescue_task
+python -m experiments.run --scenario rescue
+
+# 模拟端到端构建/恢复
+python -m experiments.e2e_build --scenario rescue --install-mode simulated --verify-mode synthetic
+python -m experiments.e2e_recovery --scenario rescue --install-mode simulated --verify-mode synthetic
+
+# 语义控制 HTTP 服务（默认 127.0.0.1:8010）
+python -m services.semantic_controller_service
+
+# 组网过程可视化（默认 127.0.0.1:5000）
+python -m viz.server
 ```
 
-Docker 多节点 HTTP 实验：
+真实网络模式需要 Linux 与 root/CAP_NET_ADMIN：
 
 ```bash
-docker compose up --build -d
-python3 scripts/run_experiment.py --scenario all
-python3 scripts/export_results.py
+sudo bash testbed/preflight.sh
+sudo bash testbed/setup_topology.sh
+python -m experiments.real_probe --sudo --ping-count 5 --iperf-seconds 1
+python -m experiments.real_run --sudo --target-profile rescue --summary-only
 ```
 
-建议在 Linux 服务器上运行 Docker 实验，详见 `SERVER_DEPLOY.md`。
+`real_run` 默认不加载外部 trace。如需回放 SANet 数据，先按下文获取上游仓库，再显式传入 `--trace-path`。
 
-## 当前已实现
+## 正式实验
 
-- SANet 语义控制器第一阶段：用户输入触发、上下文构建、GoalSpec、PlanSpec、aAgent/nAgent mock 预测、跨层安全余量评价、视频策略建议和目标评价。
-- 正常建网：输入灾害现场协同任务意图，确认业务 Agent，绑定 pAgent/nAgent，生成任务通信图并下发网关规则。
-- 白名单隔离：合法业务流可转发，未授权业务流会被节点网关拦截。
-- 承载冲突调整：nAgent 上报路径拥塞后，子网控制器生成 `rule_delta` 并局部更新相关网关。
-- Docker 多节点实验：Controller、UE/MEC/Cloud 网关、业务 Agent、pAgent、nAgent 以独立容器服务运行，通过 HTTP 完成接入确认、规则下发、业务转发、状态反馈和增量更新。
-- 应用层链路模型：网关按规则模拟 `latency_ms`、`bandwidth_mbps`、`drop_rate`、`congestion_level`，用于容器化机制实验。
-
-## 主要指标
-
-运行脚本后会输出：
-
-- 建网耗时
-- 下发规则数量
-- 涉及网关数量
-- 非法流量拦截次数
-- 增量更新规则数量
-- 增量更新时间
-- 业务转发时延
-- 成功转发次数
-- 丢包次数
-- 受影响网关数量
-- 控制消息数量
-
-## Docker 实验场景
+唯一 canonical 协议为 [`configs/wcnc_final_v3.yaml`](configs/wcnc_final_v3.yaml)，详细口径见 [`docs/wcnc_final_v3.md`](docs/wcnc_final_v3.md)。
 
 ```bash
-python3 scripts/run_experiment.py --scenario normal-build
-python3 scripts/run_experiment.py --scenario whitelist
-python3 scripts/run_experiment.py --scenario network-congestion
-python3 scripts/run_experiment.py --scenario physical-degradation
-python3 scripts/run_experiment.py --scenario agent-failure
-python3 scripts/run_experiment.py --scenario full-rebuild
-python3 scripts/run_experiment.py --scenario all
+# 非特权 pilot
+python scripts/pilot_wcnc_final_v3.py
+python -m experiments.run_wcnc_final_v3 --experiment exp2 --seeds 9000:9001
+
+# Linux netns 完整流水线
+scripts/run_wcnc_final_v3_remote.sh
 ```
 
-每次运行会在 `results/` 下生成 JSON 文件。执行 `python3 scripts/export_results.py` 可生成 `results/summary.csv`。
+所有输出写入 `results/`，该目录被 Git 忽略。仓库不保存正式 raw 数据、中间图表或打包结果。
 
-当前 Docker 版属于 `docker-http-simulation`：它包含真实容器进程、HTTP 通信、序列化、端口和网关转发，但仍不是真实 5G/6G 硬件实验。链路质量、拥塞、带宽下降和丢包由网关应用层模型模拟。
+## SANet baseline
 
-## 模块结构
+SANet 上游源码不再 vendoring。需要时执行：
 
-- `models.py`：核心数据模型。
-- `agents.py`：业务 Agent、pAgent、nAgent 仿真对象。
-- `gateway.py`：节点网关、白名单校验和规则加载。
-- `controller.py`：子网控制器和运行期调整逻辑。
-- `scenarios.py`：灾害现场协同任务场景。
-- `main.py`：一键运行入口。
-- `services/`：Docker HTTP 版 Controller、Gateway 和 Agent 服务。
-- `semantic_controller/`：SANet Semantic Task Plan 第一阶段实现，独立于原任务通信子网仿真。
-- `semantic_demo.py`：语义控制器端到端 demo。
-- `tests/`：标准库 `unittest` 测试。
-- `scripts/`：Docker 实验运行和结果导出脚本。
-- `docker-compose.yml`：多节点实验拓扑。
-- `.env`：固定 Docker Compose 项目名，避免中文目录名导致 Compose 项目名异常。
+```bash
+scripts/fetch_sanet.sh
+```
+
+脚本会检出 [WirelessAIatHUST/SANet](https://github.com/WirelessAIatHUST/SANet) 的固定提交 `60d9b3c1db02aa2018e67b0020a0feb57d9e3d73` 到被 Git 忽略的 `local/baselines/SANet-upstream/`。正式实验所需的 SANet-DW 适配逻辑已包含在本仓库中，不依赖上游训练代码。
+
+## 测试与仓库结构
+
+```bash
+python -m unittest discover -v
+```
+
+普通 Linux CI 运行核心、语义、可视化和 canonical 非特权测试。需要 root/netns 的用例在专用 Linux 环境执行。仓库取舍和本地归档方式见 [`docs/repository-layout.md`](docs/repository-layout.md)。

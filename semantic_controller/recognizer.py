@@ -1,37 +1,67 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
+from semantic_controller.embedding import GoalPrototypeRetriever
 from semantic_controller.ontology import GOAL_KEYWORDS
-from semantic_controller.schemas import GoalID, GoalSpec, SemanticContext
+from semantic_controller.schemas import (
+    GoalCandidate,
+    GoalID,
+    GoalSpec,
+    SemanticContext,
+    SemanticEmbedding,
+)
+
+
+class RuleBasedGoalRecognizer:
+    def recognize(self, context: SemanticContext) -> GoalSpec:
+        text = context.raw_user_input
+        scores: dict[GoalID, int] = {}
+        for goal_id, terms in GOAL_KEYWORDS.items():
+            scores[goal_id] = sum(1 for term in terms if term in text)
+
+        best_goal = max(scores, key=scores.get)
+        best_score = scores[best_goal]
+        if best_score == 0:
+            return GoalSpec(
+                goal_id=GoalID.UNKNOWN,
+                goal_description="无法将用户输入映射到当前支持的语义目标",
+                confidence=0.2,
+                required_information=[],
+                need_clarification=True,
+                clarification_question="请说明你希望改善画质、减少卡顿、保证流畅，还是节省带宽？",
+            )
+
+        confidence = min(0.95, 0.62 + best_score * 0.12)
+        constraints = _infer_constraints(context, best_goal)
+        return GoalSpec(
+            goal_id=best_goal,
+            goal_description=_goal_description(best_goal),
+            confidence=confidence,
+            constraints=constraints,
+            required_information=["future_app_rate", "future_network_bandwidth"],
+            need_clarification=False,
+        )
+
+
+@dataclass
+class RetrievalAugmentedRuleRecognizer:
+    retriever: GoalPrototypeRetriever = field(default_factory=GoalPrototypeRetriever)
+    rules: RuleBasedGoalRecognizer = field(default_factory=RuleBasedGoalRecognizer)
+
+    def recognize(self, context: SemanticContext) -> GoalSpec:
+        return self.rules.recognize(context)
+
+    def recognize_with_evidence(
+        self,
+        context: SemanticContext,
+    ) -> tuple[GoalSpec, SemanticEmbedding, list[GoalCandidate]]:
+        embedding, candidates = self.retriever.retrieve(context)
+        return self.rules.recognize(context), embedding, candidates
 
 
 def recognize_goal(context: SemanticContext) -> GoalSpec:
-    text = context.raw_user_input
-    scores: dict[GoalID, int] = {}
-    for goal_id, terms in GOAL_KEYWORDS.items():
-        scores[goal_id] = sum(1 for term in terms if term in text)
-
-    best_goal = max(scores, key=scores.get)
-    best_score = scores[best_goal]
-    if best_score == 0:
-        return GoalSpec(
-            goal_id=GoalID.UNKNOWN,
-            goal_description="无法将用户输入映射到当前支持的语义目标",
-            confidence=0.2,
-            required_information=[],
-            need_clarification=True,
-            clarification_question="请说明你希望改善画质、减少卡顿、保证流畅，还是节省带宽？",
-        )
-
-    confidence = min(0.95, 0.62 + best_score * 0.12)
-    constraints = _infer_constraints(context, best_goal)
-    return GoalSpec(
-        goal_id=best_goal,
-        goal_description=_goal_description(best_goal),
-        confidence=confidence,
-        constraints=constraints,
-        required_information=["future_app_rate", "future_network_bandwidth"],
-        need_clarification=False,
-    )
+    return RuleBasedGoalRecognizer().recognize(context)
 
 
 def _goal_description(goal_id: GoalID) -> str:
@@ -61,4 +91,3 @@ def _infer_constraints(context: SemanticContext, goal_id: GoalID) -> dict[str, o
     if context.user_preferences.prefer_quality:
         constraints["prefer_quality"] = True
     return constraints
-

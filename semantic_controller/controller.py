@@ -4,16 +4,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 from semantic_controller.context import build_semantic_context
 from semantic_controller.evaluator import evaluate_feasibility, evaluate_goal, select_video_policy
+from semantic_controller.interfaces import GoalRecognizer, TaskPlanner
 from semantic_controller.predictors import ApplicationPredictor, NetworkPredictor
-from semantic_controller.recognizer import recognize_goal
-from semantic_controller.planner import build_plan
+from semantic_controller.recognizer import RetrievalAugmentedRuleRecognizer
+from semantic_controller.planner import ConstrainedRulePlanner
 from semantic_controller.schemas import (
     ApplicationState,
     GoalEvaluation,
+    GoalCandidate,
     GoalID,
+    GoalSpec,
     GoalStatus,
     NetworkState,
     SemanticPipelineResult,
+    SemanticContext,
+    SemanticEmbedding,
     UserPreferences,
 )
 from semantic_controller.trigger import detect_semantic_trigger
@@ -24,9 +29,13 @@ class SemanticController:
         self,
         application_predictor: ApplicationPredictor | None = None,
         network_predictor: NetworkPredictor | None = None,
+        goal_recognizer: GoalRecognizer | None = None,
+        task_planner: TaskPlanner | None = None,
     ) -> None:
         self.application_predictor = application_predictor or ApplicationPredictor()
         self.network_predictor = network_predictor or NetworkPredictor()
+        self.goal_recognizer = goal_recognizer or RetrievalAugmentedRuleRecognizer()
+        self.task_planner = task_planner or ConstrainedRulePlanner()
 
     def handle_user_input(
         self,
@@ -50,7 +59,13 @@ class SemanticController:
         )
         trigger = detect_semantic_trigger(raw_user_input, context.application)
         if not trigger.triggered:
-            goal = recognize_goal(context)
+            goal = GoalSpec(
+                goal_id=GoalID.UNKNOWN,
+                goal_description="输入未触发当前业务控制流程",
+                confidence=trigger.confidence,
+                need_clarification=True,
+                clarification_question="请明确说明是否需要调整当前视频业务。",
+            )
             evaluation = GoalEvaluation(
                 goal_id=GoalID.UNKNOWN,
                 status=GoalStatus.NEED_CLARIFICATION,
@@ -66,8 +81,8 @@ class SemanticController:
                 evaluation=evaluation,
             )
 
-        goal = recognize_goal(context)
-        plan = build_plan(goal, plan_id=f"plan-{context.event_id}")
+        goal, semantic_embedding, candidates = self.recognize_context(context)
+        plan = self.task_planner.build_plan(goal, plan_id=f"plan-{context.event_id}")
         if goal.need_clarification:
             evaluation = GoalEvaluation(
                 goal_id=goal.goal_id,
@@ -79,6 +94,8 @@ class SemanticController:
             return SemanticPipelineResult(
                 trigger=trigger,
                 context=context,
+                semantic_embedding=semantic_embedding,
+                goal_candidates=candidates,
                 goal=goal,
                 plan=plan,
                 evaluation=evaluation,
@@ -105,6 +122,8 @@ class SemanticController:
         return SemanticPipelineResult(
             trigger=trigger,
             context=context,
+            semantic_embedding=semantic_embedding,
+            goal_candidates=candidates,
             goal=goal,
             plan=plan,
             predictions=[app_prediction, network_prediction],
@@ -112,6 +131,15 @@ class SemanticController:
             recommendation=recommendation,
             evaluation=evaluation,
         )
+
+    def recognize_context(
+        self,
+        context: SemanticContext,
+    ) -> tuple[GoalSpec, SemanticEmbedding | None, list[GoalCandidate]]:
+        recognize_with_evidence = getattr(self.goal_recognizer, "recognize_with_evidence", None)
+        if recognize_with_evidence is not None:
+            return recognize_with_evidence(context)
+        return self.goal_recognizer.recognize(context), None, []
 
 
 def _default_app_history(context: ApplicationState | object) -> list[float]:
@@ -137,4 +165,3 @@ def _default_network_history(context: NetworkState | object) -> list[float]:
         max(0.1, latest * 0.97),
         latest,
     ]
-

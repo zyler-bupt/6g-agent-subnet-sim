@@ -1,2 +1,1 @@
-"""HTTP services for the Docker-based multi-node experiment."""
-
+"""HTTP service helpers for the semantic controller API."""

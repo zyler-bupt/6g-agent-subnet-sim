@@ -123,6 +123,12 @@ class SemanticControllerTests(unittest.TestCase):
         self.assertEqual(app.horizon, 2)
         self.assertEqual(len(net.values), 2)
 
+    def test_predictors_accept_small_data_methods(self) -> None:
+        app = ApplicationPredictor(forecast_method="kalman").predict([1.0, 1.4, 1.2], 3)
+        net = NetworkPredictor(forecast_method="holt").predict([5.0, 4.8, 4.6], 3)
+        self.assertEqual(len(app.values), 3)
+        self.assertEqual(len(net.values), 3)
+
     def test_feasibility_and_policy(self) -> None:
         app = PredictionResult(
             agent_id=AgentID.APPLICATION_AGENT,
@@ -181,9 +187,38 @@ class SemanticControllerTests(unittest.TestCase):
         result = controller.handle_user_input("我昨天看了一篇关于视频清晰度的论文")
         self.assertFalse(result.trigger.triggered)
         self.assertIsNone(result.plan)
+        self.assertIsNone(result.semantic_embedding)
+        self.assertEqual(result.goal_candidates, [])
         self.assertEqual(result.evaluation.status, GoalStatus.NEED_CLARIFICATION)
+
+    def test_controller_accepts_injected_goal_recognizer_and_planner(self) -> None:
+        class FixedRecognizer:
+            def recognize(self, context: SemanticContext) -> GoalSpec:
+                return GoalSpec(
+                    goal_id=GoalID.SAVE_NETWORK_BANDWIDTH,
+                    goal_description="降低当前会议带宽占用",
+                    confidence=0.99,
+                    required_information=["future_app_rate", "future_network_bandwidth"],
+                )
+
+        class RecordingPlanner:
+            def __init__(self) -> None:
+                self.seen_goal_id: GoalID | None = None
+
+            def build_plan(self, goal: GoalSpec, *, plan_id: str | None = None) -> PlanSpec:
+                self.seen_goal_id = goal.goal_id
+                return build_plan(goal, plan_id=plan_id)
+
+        planner = RecordingPlanner()
+        controller = SemanticController(
+            goal_recognizer=FixedRecognizer(),
+            task_planner=planner,
+        )
+        result = controller.handle_user_input("网络比较紧张，希望节省带宽")
+        self.assertEqual(result.goal.goal_id, GoalID.SAVE_NETWORK_BANDWIDTH)
+        self.assertEqual(planner.seen_goal_id, GoalID.SAVE_NETWORK_BANDWIDTH)
+        self.assertIsNotNone(result.plan)
 
 
 if __name__ == "__main__":
     unittest.main()
-
