@@ -499,10 +499,21 @@ def _adjust_detail(adjustment, failed_id: str | None) -> str:
 
 
 def build_scenario_trace(scenario: str) -> dict:
+    if scenario.startswith("tcanet_"):
+        # TCANet (arXiv v2) mechanism demos share the same trace schema.
+        from src.tcanet.demo.trace import build_tcanet_trace
+
+        return build_tcanet_trace(scenario)
     if scenario not in SCENARIOS:
         scenario = "tier1"
     return asyncio.run(_build(scenario))
 
 
 def list_scenarios() -> list[dict]:
-    return [{"key": k, "name": v["name"], "trigger": v["trigger"], "expect": v["expect"]} for k, v in SCENARIOS.items()]
+    from src.tcanet.demo.trace import list_tcanet_scenarios
+
+    entries = [
+        {"key": k, "name": v["name"], "trigger": v["trigger"], "expect": v["expect"]}
+        for k, v in SCENARIOS.items()
+    ]
+    return entries + list_tcanet_scenarios()

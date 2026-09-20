@@ -6,9 +6,13 @@ from viz.trace import build_scenario_trace, list_scenarios
 
 
 class VizTraceTests(unittest.TestCase):
-    def test_lists_three_scenarios(self) -> None:
+    def test_lists_tier_scenarios_plus_tcanet(self) -> None:
         keys = {s["key"] for s in list_scenarios()}
-        self.assertEqual(keys, {"tier1", "tier2", "tier3"})
+        self.assertTrue({"tier1", "tier2", "tier3"} <= keys)
+        self.assertTrue(
+            {"tcanet_formation", "tcanet_coordination",
+             "tcanet_recovery", "tcanet_rebind"} <= keys
+        )
 
     def test_trace_has_full_step_sequence(self) -> None:
         for key in ("tier1", "tier2", "tier3"):
