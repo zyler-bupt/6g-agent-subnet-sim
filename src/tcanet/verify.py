@@ -17,9 +17,10 @@ escalates to re-formation.
 """
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from src.tcanet.candidates import (
     CandidateAction,
@@ -36,6 +37,7 @@ from src.tcanet.closure import (
     initial_affected_set,
 )
 from src.tcanet.executor import ExecutionRecord, StagedDecision, execute_staged, stage_decision
+from src.tcanet.dataplane import Dataplane, NullDataplane
 from src.tcanet.feasibility import evaluate_joint_decision, project_state
 from src.tcanet.selection import (
     CandidateEvaluation,
@@ -67,7 +69,7 @@ class MeasurementProvider(Protocol):
 
     def __call__(
         self, staged: StagedDecision, world: World, dep_ids: tuple[str, ...]
-    ) -> tuple[DepObservation, ...]: ...
+    ) -> tuple[DepObservation, ...] | Awaitable[tuple[DepObservation, ...]]: ...
 
 
 def projected_measurements(
@@ -259,6 +261,23 @@ class RecoveryAttempt:
 
 
 @dataclass(frozen=True)
+class RecoveryHooks:
+    """Optional live-observation hooks into the recovery loop (demo layer).
+
+    Each hook is awaited at the moment its mechanism stage completes; the
+    recovery logic itself is untouched — with all hooks ``None`` the loop is
+    bit-identical to the un-instrumented one.
+    """
+
+    on_closure: Callable[[ClosureResult], Awaitable[None]] | None = None
+    on_decision: Callable[[SelectionTrace, CandidateEvaluation], Awaitable[None]] | None = None
+    on_execution: Callable[[ExecutionRecord, StagedDecision], Awaitable[None]] | None = None
+    on_window: Callable[[WindowResult, tuple[DepObservation, ...]], Awaitable[None]] | None = None
+    on_rejected: Callable[[RecoveryAttempt, tuple[str, ...]], Awaitable[None]] | None = None
+    on_rollback: Callable[[RecoveryAttempt], Awaitable[None]] | None = None
+
+
+@dataclass(frozen=True)
 class RecoveryResult:
     """Full outcome of one elastic-reconfiguration episode."""
 
@@ -314,10 +333,12 @@ class RecoveryController:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         window_ms: float = DEFAULT_WINDOW_MS,
         measure: MeasurementProvider | None = None,
+        dataplane: Dataplane | None = None,
     ) -> None:
         self.max_attempts = max_attempts
         self.window_ms = window_ms
         self._measure = measure
+        self._dataplane = dataplane or NullDataplane()
 
     async def recover(
         self,
@@ -325,12 +346,15 @@ class RecoveryController:
         subnet: SubnetState,
         world: World,
         event: RuntimeEvent,
+        hooks: RecoveryHooks | None = None,
     ) -> RecoveryResult:
         started = time.perf_counter()
         initial = initial_affected_set(task, subnet, world, event)
-        relations = dependency_relations(task, subnet)
+        relations = dependency_relations(task, subnet, world)
         closure = expand_affected_set(initial, relations)
         affected = tuple(sorted(closure.final))
+        if hooks is not None and hooks.on_closure is not None:
+            await hooks.on_closure(closure)
 
         excluded: set[str] = set()
         attempts: list[RecoveryAttempt] = []
@@ -377,6 +401,8 @@ class RecoveryController:
                     )
                 )
             trace = two_stage_select(tuple(evaluations))
+            if hooks is not None and hooks.on_decision is not None and trace.selected is not None:
+                await hooks.on_decision(trace, trace.selected)
             if trace.selected is None:
                 attempts.append(
                     RecoveryAttempt(
@@ -390,8 +416,10 @@ class RecoveryController:
                 break
 
             selected = trace.selected
-            staged = stage_decision(task, subnet, selected.actions)
-            execution = await execute_staged(staged, world)
+            staged = stage_decision(task, subnet, selected.actions, world)
+            execution = await self._dataplane.apply(staged, world)
+            if hooks is not None and hooks.on_execution is not None:
+                await hooks.on_execution(execution, staged)
             if not execution.ok:
                 excluded.update(
                     action.action_id
@@ -408,10 +436,15 @@ class RecoveryController:
                         excluded_after=tuple(sorted(excluded)),
                     )
                 )
+                await self._dataplane.rollback(staged, world)
+                if hooks is not None and hooks.on_rollback is not None:
+                    await hooks.on_rollback(attempts[-1])
                 continue
 
             if self._measure is not None:
                 observations = self._measure(staged, world, affected)
+                if inspect.isawaitable(observations):
+                    observations = await observations
             else:
                 observations = projected_measurements(
                     staged, world, affected, task=task
@@ -435,6 +468,8 @@ class RecoveryController:
                 )
             )
             if window.accepted:
+                if hooks is not None and hooks.on_window is not None:
+                    await hooks.on_window(window, observations)
                 accepted_subnet = replace(staged.subnet, accepted=True)
                 return RecoveryResult(
                     event=event,
@@ -452,6 +487,15 @@ class RecoveryController:
             attempts[-1] = replace(
                 attempts[-1], excluded_after=tuple(sorted(excluded))
             )
+            if hooks is not None and hooks.on_window is not None:
+                await hooks.on_window(window, observations)
+            if hooks is not None and hooks.on_rejected is not None:
+                await hooks.on_rejected(
+                    attempts[-1], tuple(sorted(excluded))
+                )
+            await self._dataplane.rollback(staged, world)
+            if hooks is not None and hooks.on_rollback is not None:
+                await hooks.on_rollback(attempts[-1])
 
         return RecoveryResult(
             event=event,

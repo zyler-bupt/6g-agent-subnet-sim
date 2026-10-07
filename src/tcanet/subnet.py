@@ -102,6 +102,17 @@ class SubnetState:
         return self.version + 1
 
 
+def path_link_ids(world: World, gateway_path: tuple[str, ...]) -> tuple[str, ...]:
+    """Link ids traversed by ``gateway_path`` (first live link per hop)."""
+    link_ids: list[str] = []
+    for source, target in zip(gateway_path, gateway_path[1:]):
+        links = world.graph.links_between(source, target)
+        live = [link for link in links if link.up] or list(links)
+        if live:
+            link_ids.append(live[0].link_id)
+    return tuple(link_ids)
+
+
 def compile_forwarding(
     dag: TaskDAG,
     paths: dict[str, PathRecord],

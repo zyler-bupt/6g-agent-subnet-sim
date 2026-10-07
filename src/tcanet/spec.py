@@ -211,6 +211,21 @@ class World:
     support_agents: dict[str, SupportAgent] = field(default_factory=dict)
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     failed_gateways: set[str] = field(default_factory=set)
+    # "shared": one access resource per gateway (both directions).
+    # "duplex": separate uplink/downlink access resources per gateway.
+    access_model: str = "shared"
+    # Minimum number of alternate paths offered per dependency (0 = only
+    # the single-link-exclusion alternates).
+    min_path_alternates: int = 0
+
+    def access_resource_ids(
+        self, source_gateway: str, target_gateway: str
+    ) -> tuple[str, str]:
+        """Access resources charged by a flow entering at ``source_gateway``
+        and leaving at ``target_gateway``."""
+        if self.access_model == "duplex":
+            return (f"access-ul:{source_gateway}", f"access-dl:{target_gateway}")
+        return (f"access:{source_gateway}", f"access:{target_gateway}")
 
     def link_resource_id(self, link_id: str) -> str:
         """Shared-resource identity of a link (its residual capacity)."""

@@ -39,6 +39,7 @@ Two runtime episodes (paper Fig. 1(b)-1(c)):
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, replace
 from time import perf_counter
 
@@ -50,6 +51,7 @@ from src.tcanet.closure import (
     gateway_failure,
     support_failure,
 )
+from src.tcanet.dataplane import Dataplane, NullDataplane
 from src.tcanet.executor import ExecutionRecord, StagedDecision, execute_staged
 from src.tcanet.spec import (
     Dependency,
@@ -68,6 +70,7 @@ from src.tcanet.spec import (
 from src.tcanet.subnet import ConstructionPlan, SubnetState, TaskSubnetBuilder
 from src.tcanet.verify import (
     DEFAULT_MAX_ATTEMPTS,
+    MeasurementProvider,
     RecoveryController,
     RecoveryResult,
     WindowResult,
@@ -224,8 +227,15 @@ class FormationOutcome:
 async def run_formation(
     task: TaskSpecification,
     world: World,
+    *,
+    dataplane: Dataplane | None = None,
+    measure: MeasurementProvider | None = None,
 ) -> FormationOutcome:
-    """Endpoint confirmation -> paths -> FT -> install -> verify -> v1."""
+    """Endpoint confirmation -> paths -> FT -> Apply -> Assess -> commit v1.
+
+    A failed assessment rolls the staged state back (paper Alg. 1, line 19).
+    """
+    dataplane = dataplane or NullDataplane()
     started = perf_counter()
     bindings = default_bindings(task.dag, world)
     plan = await TaskSubnetBuilder().build(task, world, bindings)
@@ -243,14 +253,21 @@ async def run_formation(
     staged = StagedDecision(
         previous=v0, subnet=v1, actions=(), executable=plan.actions
     )
-    execution = await execute_staged(staged, world)
+    execution = await dataplane.apply(staged, world)
     affected = tuple(sorted(dep.dep_id for dep in task.dag.dependencies))
-    observations = projected_measurements(
-        staged, world, affected, task=task, arrival_ms=40.0
-    )
+    if measure is not None:
+        observations = measure(staged, world, affected)
+        if inspect.isawaitable(observations):
+            observations = await observations
+    else:
+        observations = projected_measurements(
+            staged, world, affected, task=task, arrival_ms=40.0
+        )
     window = evaluate_window(
         task, world, staged, execution, affected, observations
     )
+    if not window.accepted:
+        await dataplane.rollback(staged, world)
     accepted = replace(v1, accepted=True) if window.accepted else None
     return FormationOutcome(
         plan=plan,

@@ -18,7 +18,7 @@ from itertools import product
 from typing import Iterable
 
 from src.tcanet.spec import Layer, TaskSpecification, World
-from src.tcanet.subnet import SubnetState, solve_dependency_paths
+from src.tcanet.subnet import SubnetState, path_link_ids, solve_dependency_paths
 
 # Recovery candidate classes (paper Sec. IV-B).
 CLASS_PARAMETER = "parameter"                  # keep paths and bindings
@@ -195,7 +195,7 @@ def _rate_ladder(current: float) -> tuple[float, ...]:
     return (round(current * 0.7, 1), round(current * 1.2, 1), round(current * 1.6, 1))
 
 
-_ALT_CACHE: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {}
+_ALT_CACHE: dict[tuple[object, ...], tuple[tuple[str, ...], ...]] = {}
 
 
 def _alternate_paths(
@@ -212,7 +212,12 @@ def _alternate_paths(
     current = subnet.paths.get(dep_id)
     if current is None:
         return ()
-    cache_key = (dep_id, f"v{subnet.version}:{current.path_id}")
+    cache_key = (
+        dep_id,
+        f"v{subnet.version}:{current.path_id}",
+        tuple(sorted(link.link_id for link in world.graph.links if link.up)),
+        world.min_path_alternates,
+    )
     if cache_key in _ALT_CACHE:
         return tuple(
             type(current)(dep_id=dep_id, gateway_path=path)
@@ -224,7 +229,8 @@ def _alternate_paths(
     if not single:
         return ()
     dep = single[0]
-    for link_id in current.link_ids:
+    current_links = current.link_ids or path_link_ids(world, current.gateway_path)
+    for link_id in current_links:
         paths, failures = solve_dependency_paths(
             task, world, exclude_link_ids=frozenset({link_id})
         )
@@ -232,6 +238,22 @@ def _alternate_paths(
         if alt is not None and alt.gateway_path not in seen:
             seen.add(alt.gateway_path)
             alternates.append(alt)
+    frontier = list(alternates)
+    while frontier and len(alternates) < world.min_path_alternates:
+        base = frontier.pop(0)
+        for link_id in base.link_ids:
+            paths, _failures = solve_dependency_paths(
+                task,
+                world,
+                exclude_link_ids=frozenset(current_links) | {link_id},
+            )
+            alt = paths.get(dep_id)
+            if alt is not None and alt.gateway_path not in seen:
+                seen.add(alt.gateway_path)
+                alternates.append(alt)
+                frontier.append(alt)
+            if len(alternates) >= world.min_path_alternates:
+                break
     _ALT_CACHE[cache_key] = tuple(item.gateway_path for item in alternates)
     return tuple(alternates)
 

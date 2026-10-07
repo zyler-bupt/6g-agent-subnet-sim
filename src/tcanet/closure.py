@@ -144,6 +144,7 @@ def initial_affected_set(
 def dependency_relations(
     task: TaskSpecification,
     subnet: SubnetState,
+    world: World | None = None,
 ) -> DependencyRelations:
     """Build ``D^res`` (shared resources) and ``D^cfg`` (configuration state).
 
@@ -169,12 +170,14 @@ def dependency_relations(
         for gateway_id in record.gateway_path:
             gateway_users.setdefault(gateway_id, set()).add(dep.dep_id)
         if record.gateway_path:
-            access_users.setdefault(
-                f"access:{record.gateway_path[0]}", set()
-            ).add(dep.dep_id)
-            access_users.setdefault(
-                f"access:{record.gateway_path[-1]}", set()
-            ).add(dep.dep_id)
+            first, last = record.gateway_path[0], record.gateway_path[-1]
+            access_ids = (
+                world.access_resource_ids(first, last)
+                if world is not None
+                else (f"access:{first}", f"access:{last}")
+            )
+            for access_id in access_ids:
+                access_users.setdefault(access_id, set()).add(dep.dep_id)
         binding = subnet.bindings.binding(dep.dep_id)
         for agent_id in binding.as_tuple():
             if agent_id:
