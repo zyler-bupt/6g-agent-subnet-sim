@@ -20,6 +20,23 @@ class OutageGapTests(unittest.TestCase):
             stats.add(1, seq, 0, 0, 1000)
         self.assertEqual(stats.snapshot(0.5)["loss"], 0.0)
 
+    def test_short_blackout_between_windows_is_not_counted(self) -> None:
+        """Rollback re-points e1 at dead G2 for ~0.3 s, then attempt 2 installs L6."""
+        stats = SinkStats()
+        for seq in range(50):  # lossy L3 attempt
+            stats.add(1, seq, 0, 0, 1000)
+        stats.snapshot(0.5)
+        for seq in range(80, 130):  # 50..79 were sent into the dead route
+            stats.add(1, seq, 0, 0, 1000)
+        self.assertEqual(stats.snapshot(0.5)["loss"], 0.0)
+
+    def test_loss_inside_a_window_is_still_measured(self) -> None:
+        stats = SinkStats()
+        for seq in range(100):
+            if seq % 10 != 3:  # 10 % random loss (degraded L3)
+                stats.add(1, seq, 0, 0, 1000)
+        self.assertAlmostEqual(stats.snapshot(0.5)["loss"], 0.10, places=2)
+
     def test_first_packets_after_install_are_not_lossy(self) -> None:
         stats = SinkStats()
         stats.snapshot(0.5)  # sink up before any FT rule is installed

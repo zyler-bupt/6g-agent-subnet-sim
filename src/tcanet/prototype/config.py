@@ -62,11 +62,13 @@ def radio_period_s() -> float:
 
 
 def assess_window_s() -> float:
-    return 1.0 * time_scale()
+    return 1.3 * time_scale()
 
 
 def assess_settle_s() -> float:
-    return 0.3 * time_scale()
+    # > sample_period_s(): only flow samples whose whole period lies after
+    # Apply count, so a period mixing old-path and new-path packets is skipped.
+    return 0.6 * time_scale()
 
 
 def detect_debounce_s() -> float:

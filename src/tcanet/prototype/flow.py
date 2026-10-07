@@ -41,17 +41,23 @@ def decode(data: bytes) -> tuple[int, int, int] | None:
 
 
 class SinkStats:
-    """Per-period goodput, loss and one-way delay of one stream."""
+    """Per-period goodput, loss and one-way delay of one stream.
+
+    Loss is measured inside each period's received sequence span
+    (``first..last`` arrival): packets lost while no path existed — before
+    the FT rules were installed, or during a blackout between two periods —
+    belong to the outage, not to the quality of the path being assessed.
+    """
 
     def __init__(self) -> None:
         self._session: int | None = None
-        self._reset()
-
-    def _reset(self) -> None:
-        self._high = -1
-        self._window_start = -1
-        self._resync = True  # a new session anchors at its first arrival
         self._seen: set[int] = set()
+        self._high = -1
+        self._reset_window()
+
+    def _reset_window(self) -> None:
+        self._low_w: int | None = None
+        self._high_w = -1
         self._bytes = 0
         self._unique = 0
         self._owd_ms: list[float] = []
@@ -59,36 +65,31 @@ class SinkStats:
     def add(self, session: int, seq: int, send_ns: int, recv_ns: int, nbytes: int) -> None:
         if session != self._session:
             self._session = session
-            self._reset()
+            self._seen = set()
+            self._high = -1
+            self._reset_window()
         if seq in self._seen:
             return
-        if self._resync:
-            # First packet after a silent window (outage, or before the FT
-            # rules existed): sequence numbers sent while no path existed
-            # belong to the outage, not to this window's loss.
-            self._window_start = seq - 1
-            self._resync = False
         self._seen.add(seq)
         self._unique += 1
         self._bytes += nbytes
         self._owd_ms.append((recv_ns - send_ns) / 1e6)
-        if seq > self._high:
-            self._high = seq
+        self._low_w = seq if self._low_w is None else min(self._low_w, seq)
+        self._high_w = max(self._high_w, seq)
+        self._high = max(self._high, seq)
 
     def snapshot(self, period_s: float) -> dict:
-        expected = self._high - self._window_start
-        loss = None if expected <= 0 else max(0.0, min(1.0, 1.0 - self._unique / expected))
+        loss = None
+        if self._low_w is not None:
+            expected = self._high_w - self._low_w + 1
+            loss = max(0.0, min(1.0, 1.0 - self._unique / expected))
         sample = {
             "rx_mbps": self._bytes * 8 / period_s / 1e6,
             "loss": loss,
             "owd_ms": statistics.median(self._owd_ms) if self._owd_ms else None,
             "packets": self._unique,
         }
-        self._window_start = self._high
-        self._resync = self._unique == 0
-        self._bytes = 0
-        self._unique = 0
-        self._owd_ms = []
+        self._reset_window()
         if len(self._seen) > 200_000:
             self._seen = {seq for seq in self._seen if seq > self._high - 10_000}
         return sample
