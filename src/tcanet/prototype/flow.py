@@ -50,6 +50,7 @@ class SinkStats:
     def _reset(self) -> None:
         self._high = -1
         self._window_start = -1
+        self._resync = True  # a new session anchors at its first arrival
         self._seen: set[int] = set()
         self._bytes = 0
         self._unique = 0
@@ -61,6 +62,12 @@ class SinkStats:
             self._reset()
         if seq in self._seen:
             return
+        if self._resync:
+            # First packet after a silent window (outage, or before the FT
+            # rules existed): sequence numbers sent while no path existed
+            # belong to the outage, not to this window's loss.
+            self._window_start = seq - 1
+            self._resync = False
         self._seen.add(seq)
         self._unique += 1
         self._bytes += nbytes
@@ -78,6 +85,7 @@ class SinkStats:
             "packets": self._unique,
         }
         self._window_start = self._high
+        self._resync = self._unique == 0
         self._bytes = 0
         self._unique = 0
         self._owd_ms = []

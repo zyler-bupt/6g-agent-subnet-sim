@@ -49,6 +49,25 @@ def process_plan(mode: str, world: World, plan: AddressPlan, scenario: str,
     return processes
 
 
+def hand_back(root: Path, env: dict[str, str] = os.environ, *, chown=os.chown) -> None:
+    """Give the run tree back to the user who ran ``sudo`` (no-op otherwise).
+
+    Without this, a later user-level ``up --sim`` cannot write the root-owned
+    run dir, logs or event record left by a netns run.
+    """
+    if "SUDO_UID" not in env:
+        return
+    uid, gid = int(env["SUDO_UID"]), int(env.get("SUDO_GID", env["SUDO_UID"]))
+    root = Path(root)
+    for path in [root, *root.rglob("*")]:
+        if path.is_socket():
+            continue
+        try:
+            chown(path, uid, gid)
+        except OSError:
+            pass
+
+
 def _shared_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o777)
@@ -67,7 +86,7 @@ def up(mode: str, scenario: str = "paper_fig1") -> None:
         run_commands(teardown_commands(world, plan))
         run_commands(build_commands(world, plan, ACCESS_CAPACITY_MBPS))
     table = ProcessTable(config.pids_dir())
-    env = dict(os.environ)
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}  # no root-owned __pycache__ in the repo
     for name, argv in process_plan(mode, world, plan, scenario):
         table.start(name, argv, log_path=config.logs_dir() / f"{name}.log", cwd=REPO_ROOT, env=env)
         if name == "bus":
@@ -76,6 +95,8 @@ def up(mode: str, scenario: str = "paper_fig1") -> None:
                 if time.time() > deadline:
                     raise SystemExit("bus did not start; see logs/bus.log")
                 time.sleep(0.05)
+    time.sleep(0.5)  # let the bus create events.jsonl before handing the tree back
+    hand_back(config.run_dir())
     print(f"TCANet prototype up ({mode}): {len(table.names())} processes, run dir {config.run_dir()}")
 
 
@@ -86,6 +107,7 @@ def down() -> None:
     if config.read_mode() == "netns" and os.geteuid() == 0:
         run_commands(teardown_commands(world, plan))
     config.bus_path().unlink(missing_ok=True)
+    hand_back(config.run_dir())
     print("TCANet prototype down")
 
 
