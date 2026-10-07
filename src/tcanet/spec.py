@@ -31,7 +31,7 @@ class Layer(str, Enum):
 
 @dataclass(frozen=True)
 class HardRequirements:
-    """``q^H_m``: every entry must be satisfied for feasibility (Eq. 3)."""
+    """``q^H_m``: every entry must hold (``g_{m,k} <= 0``, Eq. 5-6)."""
 
     min_throughput_mbps: float
     max_delay_ms: float
@@ -40,7 +40,7 @@ class HardRequirements:
 
 @dataclass(frozen=True)
 class SoftTarget:
-    """One soft objective in ``q^S_m`` with a normalized violation (Eq. 4).
+    """One soft objective in ``q^S_m`` with normalized deviation ``v^S_{m,j}`` (Eq. 9).
 
     ``kind="upper"`` reads as x_i <= bound; ``kind="lower"`` as x_i >= bound.
     """
@@ -51,7 +51,7 @@ class SoftTarget:
     metric: str  # projected-state metric this target reads
 
     def violation(self, value: float) -> float:
-        """Normalized excess ``[.]_+`` (paper Eq. 4)."""
+        """Normalized deviation ``v^S_{m,j} >= 0`` (paper Eq. 9)."""
         if self.kind == "upper":
             return max(0.0, value - self.bound) / max(self.bound, 1e-9)
         if self.kind == "lower":
@@ -171,7 +171,7 @@ class GatewayGraph:
 
 @dataclass(frozen=True)
 class SharedResource:
-    """A shared resource ``r`` with capacity and protected load (Eq. 3).
+    """A shared resource ``r`` with capacity ``C_r`` and protected load ``d^prot_r`` (Eq. 7).
 
     ``d^prot_r`` is the load of other admitted tasks and is protected.
     """

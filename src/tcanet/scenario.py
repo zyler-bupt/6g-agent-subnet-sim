@@ -82,7 +82,7 @@ GATEWAYS = ("G1", "G2", "G3", "G4")
 
 # Links: (id, source, target, capacity, delay, protected load)
 _LINKS = (
-    ("L1", "G1", "G2", 40.0, 8.0, 12.0),  # 28 Mbps available (Eq. 3 example)
+    ("L1", "G1", "G2", 40.0, 8.0, 12.0),  # 28 Mbps available (Eq. 7 example)
     ("L2", "G2", "G4", 40.0, 10.0, 0.0),
     ("L3", "G1", "G3", 30.0, 18.0, 0.0),
     ("L4", "G4", "G3", 30.0, 12.0, 0.0),
@@ -305,7 +305,9 @@ def run_gateway_recovery(
 class FirstAttemptViolating:
     """Measurement source whose first window reports a violating delay.
 
-    Used to exercise the ``B_r`` exclusion loop: the first selected
+    Scripted (not measured) — kept for the in-process demos/tests only; the
+    live prototype triggers rollback through real assessment.  Exercises the
+    ``K_max`` exclusion loop: the first selected
     candidate fails verification, is excluded, and the next attempt
     re-evaluates the remaining alternatives on the latest state.
     """
@@ -334,7 +336,7 @@ def run_support_recovery(
     """Episode 3: the physical supporting agent at G4 fails (Sec. IV-B).
 
     With ``demo_retry`` the first verification window reports a violating
-    measurement, demonstrating the ``B_r`` bounded-retry loop: the failed
+    measurement, demonstrating the ``K_max`` bounded-retry loop: the failed
     alternative is excluded and recovery succeeds on the second attempt.
     """
     failed_agent = "physical-G4"

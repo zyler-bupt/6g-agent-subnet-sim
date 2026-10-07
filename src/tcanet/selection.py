@@ -3,16 +3,16 @@
 Paper Sec. III-B: TCANet first retains the decisions with minimum
 soft-target violation
 
-    U*_m = argmin_{u in F_m} V_m(u)                       (Eq. 6)
+    J*_m = min_{c in C^feas_m} J_m(c)                      (Eq. 11)
 
-with ``V_m(u)`` the mean normalized violation over soft targets (Eq. 4),
+with ``J_m(c) = sum_j w_j v^S_{m,j}(c)`` (Eq. 9; equal weights ``w_j = 1/K^S``),
 then selects the one with minimum modification scope
 
-    u*_m in argmin_{u in U*_m} R_m(u)                     (Eq. 7)
+    c*_m in argmin_{c : J_m(c) = J*_m} M_m(c; c^{v_m})     (Eq. 12)
 
-where ``R_m(u) = |Delta Pi(u)| + |Delta FT(u)| + |Delta Phi(u)|`` counts
+where ``M_m = |Delta Pi| + |Delta FT| + |Delta Phi|`` counts
 changed path records, forwarding entries and supporting-agent bindings
-(Eq. 5).
+(Eq. 10).
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def soft_violation(
     soft_targets: tuple[SoftTarget, ...],
     projection: Projection,
 ) -> float:
-    """``V_m(u)`` — mean normalized soft-target violation (Eq. 4)."""
+    """``J_m(c)`` — equally weighted soft-objective cost (Eq. 9)."""
     if not soft_targets:
         return 0.0
     metrics = _soft_metrics(projection)
@@ -61,7 +61,7 @@ def modification_scope(
     actions: tuple[CandidateAction, ...],
     task: TaskSpecification,
 ) -> int:
-    """``R_m(u) = |Delta Pi| + |Delta FT| + |Delta Phi|`` (Eq. 5)."""
+    """``M_m(c; c^{v_m}) = |Delta Pi| + |Delta FT| + |Delta Phi|`` (Eq. 10)."""
     new_paths = dict(subnet.paths)
     binding_overrides: dict[str, SupportBinding] = {}
     for action in actions:
@@ -147,7 +147,7 @@ class SelectionTrace:
 def two_stage_select(
     evaluations: tuple[CandidateEvaluation, ...],
 ) -> SelectionTrace:
-    """Lexicographic ``(V, R)`` selection over feasible decisions (Eq. 6-7)."""
+    """Lexicographic ``(J, M)`` selection over feasible decisions (Eq. 11-12)."""
     feasible = tuple(item for item in evaluations if item.feasibility.feasible)
     if not feasible:
         return SelectionTrace(

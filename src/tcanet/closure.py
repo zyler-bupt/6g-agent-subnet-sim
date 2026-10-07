@@ -1,4 +1,4 @@
-"""Dependency-aware affected-set closure (paper Sec. IV-B, Eq. 8).
+"""Dependency-aware affected-set closure (paper Sec. IV-B, Eq. 13-16).
 
 Given a runtime event, TCANet first identifies the initial affected set
 ``E^aff_m,0``: dependencies with demand or QoS changes, dependencies
@@ -239,7 +239,7 @@ def expand_affected_set(
     initial: dict[str, str],
     relations: DependencyRelations,
 ) -> ClosureResult:
-    """Iterate Eq. 8 until the fixpoint ``E^aff_m``."""
+    """Iterate Eq. 15 until the fixed point ``E^aff_m``."""
     current = dict(initial)
     rounds: list[ClosureRound] = []
     index = 0

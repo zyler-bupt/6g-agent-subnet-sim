@@ -1,19 +1,18 @@
-"""Post-update verification window and bounded recovery (paper Sec. IV-C).
+"""Post-installation assessment and bounded reconfiguration (paper Sec. IV-C, Alg. 1).
 
-After a joint decision is installed, TCANet opens the verification window
-``W_m``.  Within the window it checks that
+After a joint configuration is applied, TCANet assesses it before commit:
 
 1. the updates were installed successfully,
 2. superseded forwarding state was withdrawn,
 3. every affected dependency remains reachable, and
-4. freshly measured service levels satisfy the hard requirements ``q^H``.
+4. freshly measured service levels satisfy the hard requirements ``q^H``
+   (normalized residuals ``g_{m,k} <= 0``, Eq. 5-6).
 
-Observations that have not arrived yet keep the check **pending**; if the
-window expires with observations still missing, or a measurement violates
-``q^H``, the update is rejected.  A rejected candidate is excluded and the
-controller re-evaluates the remaining alternatives against the latest
-observed state, for at most ``B_r`` attempts (default 3) before the task
-escalates to re-formation.
+Observations that have not arrived keep the check pending; if the window
+expires with observations missing, or a measurement violates ``q^H``, the
+attempt fails: the configuration is rolled back to ``c^{v_m}``, the state is
+refreshed, the candidate is removed and the next attempt selects again, for
+at most ``K_max`` attempts (default 3).
 """
 from __future__ import annotations
 
@@ -49,8 +48,8 @@ from src.tcanet.selection import (
 from src.tcanet.spec import TaskSpecification, World
 from src.tcanet.subnet import SubnetState
 
-DEFAULT_MAX_ATTEMPTS = 3  # B_r (paper Sec. IV-C)
-DEFAULT_WINDOW_MS = 2000.0  # W_m
+DEFAULT_MAX_ATTEMPTS = 3  # K_max (paper Alg. 1)
+DEFAULT_WINDOW_MS = 2000.0  # assessment window
 
 
 @dataclass(frozen=True)
@@ -238,7 +237,7 @@ def _reachability_violation(
 
 @dataclass(frozen=True)
 class RecoveryAttempt:
-    """One ``b <= B_r`` attempt: selection, execution, window outcome."""
+    """One attempt ``n < K_max``: selection, Apply, Assess outcome."""
 
     index: int
     selected_label: str
@@ -324,7 +323,7 @@ class RecoveryController:
     closure, stages and executes the winning joint decision, then runs the
     verification window.  Failed candidates are excluded and the next
     attempt re-evaluates against the latest observed state, for at most
-    ``B_r`` attempts.
+    ``K_max`` attempts (paper Alg. 1).
     """
 
     def __init__(

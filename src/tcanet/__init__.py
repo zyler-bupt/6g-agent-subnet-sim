@@ -6,12 +6,12 @@ Package map (paper section -> module):
 * ``binding``    — supporting-agent bindings ``Phi_m`` (Sec. II-A)
 * ``subnet``     — versioned subnet state ``S_m^(v_m)`` + construction (Sec. IV-A)
 * ``candidates`` — per-layer authorized candidates ``U^l_m`` (Sec. II-B, III-A)
-* ``feasibility``— projected state ``x_hat_m(u)`` + Eq. 3 checks (Sec. III-A)
-* ``selection``  — two-stage lexicographic selection (Eq. 4-7)
-* ``closure``    — affected-set closure over ``D^res/D^cfg`` (Eq. 8)
+* ``feasibility``— projected state + joint feasibility, Eq. 5-8 (Sec. III-A)
+* ``selection``  — two-stage selection: min J_m, then min M_m (Eq. 9-12)
+* ``closure``    — dependency-scope expansion over ``D_m`` (Eq. 13-16)
 * ``executor``   — staged execution of the selected decision (Sec. IV-B)
-* ``verify``     — verification window ``W_m`` and ``B_r`` recovery (Sec. IV-C)
-* ``metrics``    — formation/recovery latency, ``Mod_m`` (Eq. 10)
+* ``verify``     — Assess / Rollback / retry up to ``K_max`` (Sec. IV-C, Alg. 1)
+* ``metrics``    — formation/recovery latency, ``Mod_m`` (Sec. V-A)
 * ``scenario``   — paper Fig. 1 rescue scenario and runtime events
 * ``demo``       — CLI narrative and web-trace generation for demos
 """

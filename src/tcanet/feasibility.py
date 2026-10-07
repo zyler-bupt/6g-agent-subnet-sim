@@ -5,7 +5,8 @@ Before execution the controller evaluates the combined effect of
 yielding the post-action state ``x_hat_m(u)``.  A joint decision is
 feasible only if its actions are mutually compatible, the required
 executors are authorized and available, the projected state satisfies all
-hard requirements ``q^H_m``, and the shared-resource constraint (Eq. 3)
+hard requirements ``q^H_m`` (``V^H_m = 0``, Eq. 5-6), and the shared-resource
+constraint (Eq. 7)
 
     sum_e d_{m,e,r}(u) + d^prot_r  <=  C_r(u),   r in Omega^sh_m
 
@@ -289,7 +290,7 @@ def evaluate_joint_decision(
         if item.loss_rate > requirements.max_loss_rate + _EPS:
             violations.append(f"loss_hard:{dep.dep_id}")
 
-    # Shared-resource constraint (Eq. 3): protected load already deducted
+    # Shared-resource constraint (Eq. 7): protected load already deducted
     # from capacity via ``SharedResource.available_mbps``; the projected
     # task load includes transport overhead.
     for resource_id, capacity in projection.resource_capacity_mbps.items():
