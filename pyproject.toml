@@ -22,8 +22,21 @@ all = [
   "matplotlib>=3.8",
   "numpy>=1.23",
   "Pillow>=10.0",
+  "rich>=13",
 ]
 dev = ["pytest>=8.0"]
+demo = [
+  "PySide6>=6.5",
+  "pyqtgraph>=0.13",
+  "rich>=13",
+  "matplotlib>=3.8",
+  "numpy>=1.23",
+  "Pillow>=10.0",
+]
+
+[project.scripts]
+tcanet-demo = "src.tcanet.prototype.launcher:main"
+tcanetctl = "src.tcanet.prototype.ctl:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -39,6 +52,7 @@ include = [
 
 [tool.setuptools.package-data]
 viz = ["static/*"]
+"src.tcanet.prototype" = ["web_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

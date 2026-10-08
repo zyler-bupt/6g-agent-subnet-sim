@@ -39,6 +39,7 @@ Two runtime episodes (paper Fig. 1(b)-1(c)):
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, replace
 from time import perf_counter
 
@@ -50,6 +51,7 @@ from src.tcanet.closure import (
     gateway_failure,
     support_failure,
 )
+from src.tcanet.dataplane import Dataplane, NullDataplane
 from src.tcanet.executor import ExecutionRecord, StagedDecision, execute_staged
 from src.tcanet.spec import (
     Dependency,
@@ -68,6 +70,7 @@ from src.tcanet.spec import (
 from src.tcanet.subnet import ConstructionPlan, SubnetState, TaskSubnetBuilder
 from src.tcanet.verify import (
     DEFAULT_MAX_ATTEMPTS,
+    MeasurementProvider,
     RecoveryController,
     RecoveryResult,
     WindowResult,
@@ -79,7 +82,7 @@ GATEWAYS = ("G1", "G2", "G3", "G4")
 
 # Links: (id, source, target, capacity, delay, protected load)
 _LINKS = (
-    ("L1", "G1", "G2", 40.0, 8.0, 12.0),  # 28 Mbps available (Eq. 3 example)
+    ("L1", "G1", "G2", 40.0, 8.0, 12.0),  # 28 Mbps available (Eq. 7 example)
     ("L2", "G2", "G4", 40.0, 10.0, 0.0),
     ("L3", "G1", "G3", 30.0, 18.0, 0.0),
     ("L4", "G4", "G3", 30.0, 12.0, 0.0),
@@ -224,8 +227,15 @@ class FormationOutcome:
 async def run_formation(
     task: TaskSpecification,
     world: World,
+    *,
+    dataplane: Dataplane | None = None,
+    measure: MeasurementProvider | None = None,
 ) -> FormationOutcome:
-    """Endpoint confirmation -> paths -> FT -> install -> verify -> v1."""
+    """Endpoint confirmation -> paths -> FT -> Apply -> Assess -> commit v1.
+
+    A failed assessment rolls the staged state back (paper Alg. 1, line 19).
+    """
+    dataplane = dataplane or NullDataplane()
     started = perf_counter()
     bindings = default_bindings(task.dag, world)
     plan = await TaskSubnetBuilder().build(task, world, bindings)
@@ -243,14 +253,21 @@ async def run_formation(
     staged = StagedDecision(
         previous=v0, subnet=v1, actions=(), executable=plan.actions
     )
-    execution = await execute_staged(staged, world)
+    execution = await dataplane.apply(staged, world)
     affected = tuple(sorted(dep.dep_id for dep in task.dag.dependencies))
-    observations = projected_measurements(
-        staged, world, affected, task=task, arrival_ms=40.0
-    )
+    if measure is not None:
+        observations = measure(staged, world, affected)
+        if inspect.isawaitable(observations):
+            observations = await observations
+    else:
+        observations = projected_measurements(
+            staged, world, affected, task=task, arrival_ms=40.0
+        )
     window = evaluate_window(
         task, world, staged, execution, affected, observations
     )
+    if not window.accepted:
+        await dataplane.rollback(staged, world)
     accepted = replace(v1, accepted=True) if window.accepted else None
     return FormationOutcome(
         plan=plan,
@@ -288,7 +305,9 @@ def run_gateway_recovery(
 class FirstAttemptViolating:
     """Measurement source whose first window reports a violating delay.
 
-    Used to exercise the ``B_r`` exclusion loop: the first selected
+    Scripted (not measured) — kept for the in-process demos/tests only; the
+    live prototype triggers rollback through real assessment.  Exercises the
+    ``K_max`` exclusion loop: the first selected
     candidate fails verification, is excluded, and the next attempt
     re-evaluates the remaining alternatives on the latest state.
     """
@@ -317,7 +336,7 @@ def run_support_recovery(
     """Episode 3: the physical supporting agent at G4 fails (Sec. IV-B).
 
     With ``demo_retry`` the first verification window reports a violating
-    measurement, demonstrating the ``B_r`` bounded-retry loop: the failed
+    measurement, demonstrating the ``K_max`` bounded-retry loop: the failed
     alternative is excluded and recovery succeeds on the second attempt.
     """
     failed_agent = "physical-G4"

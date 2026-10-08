@@ -29,6 +29,7 @@ from src.tcanet.subnet import (
     PathRecord,
     SubnetState,
     compile_forwarding,
+    path_link_ids,
 )
 
 
@@ -51,6 +52,7 @@ def stage_decision(
     task: TaskSpecification,
     subnet: SubnetState,
     actions: tuple[CandidateAction, ...],
+    world: World | None = None,
 ) -> StagedDecision:
     """Derive ``S_m^(v+1)`` and the executable plan from ``u*_m``."""
     new_paths: dict[str, PathRecord] = dict(subnet.paths)
@@ -59,10 +61,14 @@ def stage_decision(
         if action.is_no_change:
             continue
         if action.action == "REROUTE":
+            gateway_path = tuple(
+                str(node) for node in action.parameters["gateway_path"]
+            )
             new_paths[action.target] = PathRecord(
                 dep_id=action.target,
-                gateway_path=tuple(
-                    str(node) for node in action.parameters["gateway_path"]
+                gateway_path=gateway_path,
+                link_ids=(
+                    path_link_ids(world, gateway_path) if world is not None else ()
                 ),
             )
         elif action.action == "REBIND_SUPPORT":

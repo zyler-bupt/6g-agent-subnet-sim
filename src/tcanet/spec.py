@@ -31,7 +31,7 @@ class Layer(str, Enum):
 
 @dataclass(frozen=True)
 class HardRequirements:
-    """``q^H_m``: every entry must be satisfied for feasibility (Eq. 3)."""
+    """``q^H_m``: every entry must hold (``g_{m,k} <= 0``, Eq. 5-6)."""
 
     min_throughput_mbps: float
     max_delay_ms: float
@@ -40,7 +40,7 @@ class HardRequirements:
 
 @dataclass(frozen=True)
 class SoftTarget:
-    """One soft objective in ``q^S_m`` with a normalized violation (Eq. 4).
+    """One soft objective in ``q^S_m`` with normalized deviation ``v^S_{m,j}`` (Eq. 9).
 
     ``kind="upper"`` reads as x_i <= bound; ``kind="lower"`` as x_i >= bound.
     """
@@ -51,7 +51,7 @@ class SoftTarget:
     metric: str  # projected-state metric this target reads
 
     def violation(self, value: float) -> float:
-        """Normalized excess ``[.]_+`` (paper Eq. 4)."""
+        """Normalized deviation ``v^S_{m,j} >= 0`` (paper Eq. 9)."""
         if self.kind == "upper":
             return max(0.0, value - self.bound) / max(self.bound, 1e-9)
         if self.kind == "lower":
@@ -171,7 +171,7 @@ class GatewayGraph:
 
 @dataclass(frozen=True)
 class SharedResource:
-    """A shared resource ``r`` with capacity and protected load (Eq. 3).
+    """A shared resource ``r`` with capacity ``C_r`` and protected load ``d^prot_r`` (Eq. 7).
 
     ``d^prot_r`` is the load of other admitted tasks and is protected.
     """
@@ -211,6 +211,21 @@ class World:
     support_agents: dict[str, SupportAgent] = field(default_factory=dict)
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     failed_gateways: set[str] = field(default_factory=set)
+    # "shared": one access resource per gateway (both directions).
+    # "duplex": separate uplink/downlink access resources per gateway.
+    access_model: str = "shared"
+    # Minimum number of alternate paths offered per dependency (0 = only
+    # the single-link-exclusion alternates).
+    min_path_alternates: int = 0
+
+    def access_resource_ids(
+        self, source_gateway: str, target_gateway: str
+    ) -> tuple[str, str]:
+        """Access resources charged by a flow entering at ``source_gateway``
+        and leaving at ``target_gateway``."""
+        if self.access_model == "duplex":
+            return (f"access-ul:{source_gateway}", f"access-dl:{target_gateway}")
+        return (f"access:{source_gateway}", f"access:{target_gateway}")
 
     def link_resource_id(self, link_id: str) -> str:
         """Shared-resource identity of a link (its residual capacity)."""

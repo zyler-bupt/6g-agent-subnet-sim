@@ -5,7 +5,8 @@ Before execution the controller evaluates the combined effect of
 yielding the post-action state ``x_hat_m(u)``.  A joint decision is
 feasible only if its actions are mutually compatible, the required
 executors are authorized and available, the projected state satisfies all
-hard requirements ``q^H_m``, and the shared-resource constraint (Eq. 3)
+hard requirements ``q^H_m`` (``V^H_m = 0``, Eq. 5-6), and the shared-resource
+constraint (Eq. 7)
 
     sum_e d_{m,e,r}(u) + d^prot_r  <=  C_r(u),   r in Omega^sh_m
 
@@ -124,10 +125,14 @@ def project_state(
     resource_capacity: dict[str, float] = {}
     for resource_id, resource in world.resources.items():
         resource_capacity[resource_id] = resource.available_mbps
-    for resource_id, boost in capacity_boost.items():
-        access_id = f"access:{resource_id}"
-        if access_id in resource_capacity:
-            resource_capacity[access_id] += boost
+    for gateway_id, boost in capacity_boost.items():
+        for access_id in (
+            f"access:{gateway_id}",
+            f"access-ul:{gateway_id}",
+            f"access-dl:{gateway_id}",
+        ):
+            if access_id in resource_capacity:
+                resource_capacity[access_id] += boost
 
     dependencies: dict[str, DependencyProjection] = {}
     resource_load: dict[str, float] = {rid: 0.0 for rid in resource_capacity}
@@ -169,8 +174,8 @@ def project_state(
                 bottleneck_id = rid
             resource_load[rid] = resource_load.get(rid, 0.0) + effective
         # Access capacity of the serving gateways is also a shared resource.
-        for gateway_id in (path[0], path[-1]) if path else ():
-            access_id = f"access:{gateway_id}"
+        access_ids = world.access_resource_ids(path[0], path[-1]) if path else ()
+        for access_id in access_ids:
             if access_id in resource_capacity:
                 resource_load[access_id] = resource_load.get(access_id, 0.0) + effective
 
@@ -285,7 +290,7 @@ def evaluate_joint_decision(
         if item.loss_rate > requirements.max_loss_rate + _EPS:
             violations.append(f"loss_hard:{dep.dep_id}")
 
-    # Shared-resource constraint (Eq. 3): protected load already deducted
+    # Shared-resource constraint (Eq. 7): protected load already deducted
     # from capacity via ``SharedResource.available_mbps``; the projected
     # task load includes transport overhead.
     for resource_id, capacity in projection.resource_capacity_mbps.items():

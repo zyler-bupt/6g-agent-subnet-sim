@@ -1,4 +1,4 @@
-"""Evaluation metrics for TCANet (paper Sec. V, Eq. 10).
+"""Evaluation metrics for TCANet (paper Sec. V-A).
 
 * **Formation latency** — from the upper-level confirmation of ``T_m`` to
   the acceptance of the initial subnet version.
@@ -10,7 +10,7 @@
   record that a replacement overwrites is counted once, not twice.
 * **Feasible decision rate** — fraction of evaluation trials in which a
   feasible joint decision exists, as a function of the load factor
-  ``γ_m`` (Eq. 9, ``ρ0 = 0.65``).
+  ``γ`` (``γ = 1`` ≈ 65 % pre-action bottleneck utilization).
 """
 from __future__ import annotations
 
@@ -19,14 +19,14 @@ from dataclasses import dataclass
 from src.tcanet.binding import BindingTable
 from src.tcanet.subnet import ForwardingEntry, PathRecord, SubnetState
 
-# Reference utilization used by the load factor gamma (Eq. 9).
+# Reference utilization of the load factor gamma (gamma = 1, Sec. V-A).
 REFERENCE_UTILIZATION = 0.65
 
 
 def load_factor(
     offered_load_mbps: float, reference_load_mbps: float
 ) -> float:
-    """``γ_m`` (Eq. 9): offered load relative to the reference point ``ρ0``."""
+    """``γ`` (Sec. V-A): offered load relative to the reference point ``ρ0``."""
     if reference_load_mbps <= 0.0:
         return 0.0
     return offered_load_mbps / reference_load_mbps
@@ -73,7 +73,7 @@ class ModificationStats:
 
     @property
     def ratio(self) -> float:
-        """``Mod_m`` (Eq. 10); 0.0 when nothing was installed."""
+        """``Mod_m = N^changed / N^installed`` (Sec. V-A); 0.0 when nothing was installed."""
         if self.installed == 0:
             return 0.0
         return self.changed / self.installed
@@ -83,7 +83,7 @@ def modification_stats(
     before: SubnetState,
     after: SubnetState,
 ) -> ModificationStats:
-    """Compare two subnet versions over path/FT/binding records (Eq. 10).
+    """Compare two subnet versions over path/FT/binding records (Sec. V-A).
 
     Path records are compared per dependency, forwarding records per
     (dependency, gateway) pair and bindings per dependency, so a

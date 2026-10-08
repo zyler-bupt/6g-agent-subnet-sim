@@ -1,25 +1,25 @@
-"""Post-update verification window and bounded recovery (paper Sec. IV-C).
+"""Post-installation assessment and bounded reconfiguration (paper Sec. IV-C, Alg. 1).
 
-After a joint decision is installed, TCANet opens the verification window
-``W_m``.  Within the window it checks that
+After a joint configuration is applied, TCANet assesses it before commit:
 
 1. the updates were installed successfully,
 2. superseded forwarding state was withdrawn,
 3. every affected dependency remains reachable, and
-4. freshly measured service levels satisfy the hard requirements ``q^H``.
+4. freshly measured service levels satisfy the hard requirements ``q^H``
+   (normalized residuals ``g_{m,k} <= 0``, Eq. 5-6).
 
-Observations that have not arrived yet keep the check **pending**; if the
-window expires with observations still missing, or a measurement violates
-``q^H``, the update is rejected.  A rejected candidate is excluded and the
-controller re-evaluates the remaining alternatives against the latest
-observed state, for at most ``B_r`` attempts (default 3) before the task
-escalates to re-formation.
+Observations that have not arrived keep the check pending; if the window
+expires with observations missing, or a measurement violates ``q^H``, the
+attempt fails: the configuration is rolled back to ``c^{v_m}``, the state is
+refreshed, the candidate is removed and the next attempt selects again, for
+at most ``K_max`` attempts (default 3).
 """
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from src.tcanet.candidates import (
     CandidateAction,
@@ -36,6 +36,7 @@ from src.tcanet.closure import (
     initial_affected_set,
 )
 from src.tcanet.executor import ExecutionRecord, StagedDecision, execute_staged, stage_decision
+from src.tcanet.dataplane import Dataplane, NullDataplane
 from src.tcanet.feasibility import evaluate_joint_decision, project_state
 from src.tcanet.selection import (
     CandidateEvaluation,
@@ -47,8 +48,8 @@ from src.tcanet.selection import (
 from src.tcanet.spec import TaskSpecification, World
 from src.tcanet.subnet import SubnetState
 
-DEFAULT_MAX_ATTEMPTS = 3  # B_r (paper Sec. IV-C)
-DEFAULT_WINDOW_MS = 2000.0  # W_m
+DEFAULT_MAX_ATTEMPTS = 3  # K_max (paper Alg. 1)
+DEFAULT_WINDOW_MS = 2000.0  # assessment window
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,7 @@ class MeasurementProvider(Protocol):
 
     def __call__(
         self, staged: StagedDecision, world: World, dep_ids: tuple[str, ...]
-    ) -> tuple[DepObservation, ...]: ...
+    ) -> tuple[DepObservation, ...] | Awaitable[tuple[DepObservation, ...]]: ...
 
 
 def projected_measurements(
@@ -236,7 +237,7 @@ def _reachability_violation(
 
 @dataclass(frozen=True)
 class RecoveryAttempt:
-    """One ``b <= B_r`` attempt: selection, execution, window outcome."""
+    """One attempt ``n < K_max``: selection, Apply, Assess outcome."""
 
     index: int
     selected_label: str
@@ -256,6 +257,23 @@ class RecoveryAttempt:
         if self.window is not None:
             return "accepted"
         return "no_feasible_decision"
+
+
+@dataclass(frozen=True)
+class RecoveryHooks:
+    """Optional live-observation hooks into the recovery loop (demo layer).
+
+    Each hook is awaited at the moment its mechanism stage completes; the
+    recovery logic itself is untouched — with all hooks ``None`` the loop is
+    bit-identical to the un-instrumented one.
+    """
+
+    on_closure: Callable[[ClosureResult], Awaitable[None]] | None = None
+    on_decision: Callable[[SelectionTrace, CandidateEvaluation], Awaitable[None]] | None = None
+    on_execution: Callable[[ExecutionRecord, StagedDecision], Awaitable[None]] | None = None
+    on_window: Callable[[WindowResult, tuple[DepObservation, ...]], Awaitable[None]] | None = None
+    on_rejected: Callable[[RecoveryAttempt, tuple[str, ...]], Awaitable[None]] | None = None
+    on_rollback: Callable[[RecoveryAttempt], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -305,7 +323,7 @@ class RecoveryController:
     closure, stages and executes the winning joint decision, then runs the
     verification window.  Failed candidates are excluded and the next
     attempt re-evaluates against the latest observed state, for at most
-    ``B_r`` attempts.
+    ``K_max`` attempts (paper Alg. 1).
     """
 
     def __init__(
@@ -314,10 +332,12 @@ class RecoveryController:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         window_ms: float = DEFAULT_WINDOW_MS,
         measure: MeasurementProvider | None = None,
+        dataplane: Dataplane | None = None,
     ) -> None:
         self.max_attempts = max_attempts
         self.window_ms = window_ms
         self._measure = measure
+        self._dataplane = dataplane or NullDataplane()
 
     async def recover(
         self,
@@ -325,12 +345,15 @@ class RecoveryController:
         subnet: SubnetState,
         world: World,
         event: RuntimeEvent,
+        hooks: RecoveryHooks | None = None,
     ) -> RecoveryResult:
         started = time.perf_counter()
         initial = initial_affected_set(task, subnet, world, event)
-        relations = dependency_relations(task, subnet)
+        relations = dependency_relations(task, subnet, world)
         closure = expand_affected_set(initial, relations)
         affected = tuple(sorted(closure.final))
+        if hooks is not None and hooks.on_closure is not None:
+            await hooks.on_closure(closure)
 
         excluded: set[str] = set()
         attempts: list[RecoveryAttempt] = []
@@ -377,6 +400,8 @@ class RecoveryController:
                     )
                 )
             trace = two_stage_select(tuple(evaluations))
+            if hooks is not None and hooks.on_decision is not None and trace.selected is not None:
+                await hooks.on_decision(trace, trace.selected)
             if trace.selected is None:
                 attempts.append(
                     RecoveryAttempt(
@@ -390,8 +415,10 @@ class RecoveryController:
                 break
 
             selected = trace.selected
-            staged = stage_decision(task, subnet, selected.actions)
-            execution = await execute_staged(staged, world)
+            staged = stage_decision(task, subnet, selected.actions, world)
+            execution = await self._dataplane.apply(staged, world)
+            if hooks is not None and hooks.on_execution is not None:
+                await hooks.on_execution(execution, staged)
             if not execution.ok:
                 excluded.update(
                     action.action_id
@@ -408,10 +435,15 @@ class RecoveryController:
                         excluded_after=tuple(sorted(excluded)),
                     )
                 )
+                await self._dataplane.rollback(staged, world)
+                if hooks is not None and hooks.on_rollback is not None:
+                    await hooks.on_rollback(attempts[-1])
                 continue
 
             if self._measure is not None:
                 observations = self._measure(staged, world, affected)
+                if inspect.isawaitable(observations):
+                    observations = await observations
             else:
                 observations = projected_measurements(
                     staged, world, affected, task=task
@@ -435,6 +467,8 @@ class RecoveryController:
                 )
             )
             if window.accepted:
+                if hooks is not None and hooks.on_window is not None:
+                    await hooks.on_window(window, observations)
                 accepted_subnet = replace(staged.subnet, accepted=True)
                 return RecoveryResult(
                     event=event,
@@ -452,6 +486,15 @@ class RecoveryController:
             attempts[-1] = replace(
                 attempts[-1], excluded_after=tuple(sorted(excluded))
             )
+            if hooks is not None and hooks.on_window is not None:
+                await hooks.on_window(window, observations)
+            if hooks is not None and hooks.on_rejected is not None:
+                await hooks.on_rejected(
+                    attempts[-1], tuple(sorted(excluded))
+                )
+            await self._dataplane.rollback(staged, world)
+            if hooks is not None and hooks.on_rollback is not None:
+                await hooks.on_rollback(attempts[-1])
 
         return RecoveryResult(
             event=event,
