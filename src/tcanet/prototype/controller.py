@@ -42,6 +42,7 @@ class ControllerApp:
         self.queue: asyncio.Queue[tuple] = asyncio.Queue()
         self.subnet: SubnetState | None = None
         self.history: list[dict] = []
+        self._busy = False
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -90,9 +91,14 @@ class ControllerApp:
                 self.detector.feed(self.aggregator.apply(msg))
 
     async def _tick(self, stop: asyncio.Event) -> None:
+        last_announce = 0.0
         while not stop.is_set():
             await asyncio.sleep(0.1 * config.time_scale())
             now = time.time()
+            if (now - last_announce >= 2.0 and self.queue.empty() and not self._busy
+                    and self.subnet is not None):
+                last_announce = now  # re-announce the active subnet for late joiners (web console)
+                await self._publish_subnet()
             self.detector.feed(self.aggregator.silent_agents(now, config.heartbeat_timeout_s()))
             for event, evidence_ts in self.detector.poll(now):
                 await self.queue.put(("event", event, evidence_ts, now))
@@ -100,6 +106,7 @@ class ControllerApp:
     async def _worker(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             item = await self.queue.get()
+            self._busy = True
             try:
                 if item[0] == "submit":
                     await self.form()
@@ -109,6 +116,8 @@ class ControllerApp:
                     await self.reconfigure(*item[1:])
             except Exception as exc:  # keep the controller alive on the demo floor
                 await self.log(fmt.entry("event", f"controller error: {type(exc).__name__}: {exc}", [], "fail"))
+            finally:
+                self._busy = False
 
     async def _publish_subnet(self) -> None:
         subnet = self.subnet

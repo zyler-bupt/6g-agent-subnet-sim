@@ -78,7 +78,7 @@ class ProcessTable:
             return False
         except PermissionError:
             return True
-        return True
+        return not _zombie(pid)
 
     def kill(self, name: str, sig: int = signal.SIGKILL) -> bool:
         pid = self.pid(name)
@@ -99,3 +99,12 @@ class ProcessTable:
         for name in self.names():
             self.kill(name, signal.SIGTERM)
             self._pidfile(name).unlink(missing_ok=True)
+
+
+def _zombie(pid: int) -> bool:
+    """A killed process nobody reaped yet (e.g. under a container's PID 1)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False  # no procfs (macOS) or already gone
+    return stat.rsplit(")", 1)[-1].split()[0] == "Z"

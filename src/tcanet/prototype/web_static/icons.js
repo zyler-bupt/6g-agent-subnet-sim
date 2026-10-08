@@ -1,0 +1,11 @@
+// Tabler Icons (outline), MIT License, https://github.com/tabler/tabler-icons
+// Inner SVG markup of 24x24 icons; drawn with stroke=currentColor.
+window.TCANET_ICONS = {
+ "router": "<path d=\"M3 13m0 2a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z\" /> <path d=\"M17 17l0 .01\" /> <path d=\"M13 17l0 .01\" /> <path d=\"M15 13l0 -2\" /> <path d=\"M11.75 8.75a4 4 0 0 1 6.5 0\" /> <path d=\"M8.5 6.5a8 8 0 0 1 13 0\" />",
+ "drone": "<path d=\"M10 10h4v4h-4z\" /> <path d=\"M10 10l-3.5 -3.5\" /> <path d=\"M9.96 6a3.5 3.5 0 1 0 -3.96 3.96\" /> <path d=\"M14 10l3.5 -3.5\" /> <path d=\"M18 9.96a3.5 3.5 0 1 0 -3.96 -3.96\" /> <path d=\"M14 14l3.5 3.5\" /> <path d=\"M14.04 18a3.5 3.5 0 1 0 3.96 -3.96\" /> <path d=\"M10 14l-3.5 3.5\" /> <path d=\"M6 14.04a3.5 3.5 0 1 0 3.96 3.96\" />",
+ "camera": "<path d=\"M5 7h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2\" /> <path d=\"M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0\" />",
+ "brain": "<path d=\"M15.5 13a3.5 3.5 0 0 0 -3.5 3.5v1a3.5 3.5 0 0 0 7 0v-1.8\" /> <path d=\"M8.5 13a3.5 3.5 0 0 1 3.5 3.5v1a3.5 3.5 0 0 1 -7 0v-1.8\" /> <path d=\"M17.5 16a3.5 3.5 0 0 0 0 -7h-.5\" /> <path d=\"M19 9.3v-2.8a3.5 3.5 0 0 0 -7 0\" /> <path d=\"M6.5 16a3.5 3.5 0 0 1 0 -7h.5\" /> <path d=\"M5 9.3v-2.8a3.5 3.5 0 0 1 7 0v10\" />",
+ "ambulance": "<path d=\"M7 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0\" /> <path d=\"M17 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0\" /> <path d=\"M5 17h-2v-11a1 1 0 0 1 1 -1h9v12m-4 0h6m4 0h2v-6h-8m0 -5h5l3 5\" /> <path d=\"M6 10h4m-2 -2v4\" />",
+ "server-cog": "<path d=\"M3 4m0 3a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3z\" /> <path d=\"M12 20h-6a3 3 0 0 1 -3 -3v-2a3 3 0 0 1 3 -3h10.5\" /> <path d=\"M18 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0\" /> <path d=\"M18 14.5v1.5\" /> <path d=\"M18 20v1.5\" /> <path d=\"M21.032 16.25l-1.299 .75\" /> <path d=\"M16.27 19l-1.3 .75\" /> <path d=\"M14.97 16.25l1.3 .75\" /> <path d=\"M19.733 19l1.3 .75\" /> <path d=\"M7 8v.01\" /> <path d=\"M7 16v.01\" />",
+ "antenna": "<path d=\"M20 4v8\" /> <path d=\"M16 4.5v7\" /> <path d=\"M12 5v16\" /> <path d=\"M8 5.5v5\" /> <path d=\"M4 6v4\" /> <path d=\"M20 8h-16\" />"
+};

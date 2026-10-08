@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TCANet testbed</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header id="top">
+    <h1>TCANet testbed</h1>
+    <p class="subtitle">Task-driven cross-layer agentic networking, running live</p>
+    <span id="live" class="live" title="Receiving live data from the testbed"><i></i><span>Live</span></span>
+    <span id="mode" class="mode">Connecting</span>
+  </header>
+
+  <main id="stage">
+    <section class="monitor" id="p-controller" data-view="controller" tabindex="0" aria-label="Agent controller screen">
+      <div class="bezel">
+        <div class="screen">
+          <div class="titlebar"><i></i><i></i><i></i><span>controller@tcanet: Algorithm 1</span></div>
+          <div class="screen-body"><div class="log" id="ctrl-log"></div></div>
+        </div>
+      </div>
+      <p class="label"><b class="l-ctrl">Agent controller</b><kbd>1</kbd></p>
+    </section>
+
+    <section class="monitor" id="p-app" data-view="app" tabindex="0" aria-label="AppAgent screen">
+      <div class="bezel">
+        <div class="screen">
+          <div class="titlebar"><i></i><i></i><i></i><span>appagent: task graph and hard QoS</span></div>
+          <div class="screen-body">
+            <svg id="dag" viewBox="0 0 520 250" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="full-only split">
+              <table id="dep-table"></table>
+              <div class="agent-log" id="log-application"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="label"><b class="l-app">AppAgent</b><kbd>2</kbd></p>
+    </section>
+
+    <section class="monitor" id="p-net" data-view="net" tabindex="0" aria-label="TransAgent and NetAgent screen">
+      <div class="bezel">
+        <div class="screen">
+          <div class="titlebar"><i></i><i></i><i></i><span>transagent, netagent: measured flows</span></div>
+          <div class="screen-body">
+            <canvas id="chart-rx"></canvas>
+            <div class="full-only"><canvas id="chart-owd"></canvas></div>
+            <div class="full-only split">
+              <div id="link-bars"></div>
+              <div class="agent-log" id="log-network"></div>
+              <div class="agent-log" id="log-transport"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="label"><b class="l-trans">TransAgent</b> and <b class="l-net">NetAgent</b><kbd>3</kbd></p>
+    </section>
+
+    <section class="monitor" id="p-phy" data-view="phy" tabindex="0" aria-label="PhyAgent screen">
+      <div class="bezel">
+        <div class="screen">
+          <div class="titlebar"><i></i><i></i><i></i><span>phyagent: access radio (simulated model)</span></div>
+          <div class="screen-body">
+            <canvas id="chart-cap"></canvas>
+            <div class="full-only"><canvas id="chart-snr"></canvas></div>
+            <div class="full-only split"><div class="agent-log" id="log-physical"></div></div>
+          </div>
+        </div>
+      </div>
+      <p class="label"><b class="l-phy">PhyAgent</b><kbd>4</kbd></p>
+    </section>
+
+    <section id="overview" aria-label="Network schematic">
+      <svg id="topo" viewBox="0 0 1200 470" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <aside id="story" aria-live="polite">
+      <h2>What the controller is doing</h2>
+      <ol id="workflow">
+        <li data-stage="scope">Determine the affected scope</li>
+        <li data-stage="select">Build joint cross-layer candidates</li>
+        <li data-stage="select">Keep only jointly feasible ones</li>
+        <li data-stage="select">Minimize cost J, then changes M</li>
+        <li data-stage="apply">Apply the change on the agents</li>
+        <li data-stage="assess">Assess with measured traffic</li>
+      </ol>
+      <div id="caption"><p class="head">Connecting to the testbed</p></div>
+      <dl class="facts">
+        <div><dt>Subnet version</dt><dd id="k-version">none</dd></div>
+        <div><dt>Agents online</dt><dd id="k-agents">–</dd></div>
+        <div><dt>Formation time</dt><dd id="k-form">–</dd></div>
+        <div><dt>Last recovery time</dt><dd id="k-rec">–</dd></div>
+        <div><dt>Installed state changed</dt><dd id="k-mod">–</dd></div>
+      </dl>
+    </aside>
+    <svg id="connectors" aria-hidden="true"></svg>
+  </main>
+
+  <footer id="ops">
+    <ol class="acts">
+      <li><button data-op="submit">Form the subnet</button></li>
+      <li><button data-op="demand">Drone stream to 25 Mbps</button></li>
+      <li><button data-op="fail-g2">Fail gateway G2</button></li>
+      <li><button data-op="rollback" title="Use after Reset and step 1. L3 silently drops 10% of packets, then G2 fails.">Hidden loss on L3, fail G2</button></li>
+      <li><button data-op="kill-phy">Stop PhyAgent at G4</button></li>
+    </ol>
+    <button data-op="reset" class="quiet">Reset</button>
+    <span class="spacer"></span>
+    <button data-op="verify" class="quiet">Kernel state</button>
+    <button data-op="tour" class="quiet" id="btn-tour" aria-pressed="false">Auto tour</button>
+  </footer>
+
+  <div id="verify" role="dialog" aria-label="Forwarding state" hidden>
+    <div class="v-head">
+      <h3>Forwarding state on gateway</h3>
+      <span id="v-tabs"></span>
+      <button id="v-close" class="quiet">Close</button>
+    </div>
+    <div class="v-body">
+      <div><h4>Installed by the controller through NetAgents</h4><pre id="v-expected"></pre></div>
+      <div><h4 id="v-kernel-title">Linux kernel</h4><pre id="v-kernel"></pre></div>
+    </div>
+  </div>
+  <div id="toast" role="status"></div>
+
+  <script src="/static/icons.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

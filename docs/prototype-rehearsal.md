@@ -1,5 +1,26 @@
 # TCANet 原型现场演示 — Ubuntu 彩排清单
 
+## 推荐方式：网页控制台（一个页面完成全部演示）
+
+虚拟机里启动（输入 sudo 密码）：
+
+```bash
+source .venv/bin/activate && tcanet-demo up --web
+```
+
+终端会打印 `Open the web console in a browser:  http://192.168.64.x:8080`，在 Mac 浏览器打开这个地址并全屏。
+
+- 上方四块屏幕：Agent controller、AppAgent、TransAgent/NetAgent、PhyAgent，点击或按 `1`–`4` 放大，`Esc` 返回总览。
+- 中间是网络原理图（网关 G1–G4、链路 L1–L6、三条任务路径实时流动），右侧是「控制器正在做什么」：论文 Fig.2(b) 六步工作流实时点亮，下面一句话说明当前发生的事和结果。
+- 底部按钮 1–5 依次是五幕，`Reset` 复位；第 4 幕请在 `Reset` → `1` 之后执行。
+- 老师追问「是不是真的」：点 `Kernel state`，左边是控制器装下的转发规则，右边是从 Linux 内核实时读出的 `ip rule` / `ip route`。
+- `Auto tour` 自动轮播各屏幕；按 `H` 隐藏底部按钮便于截图。
+- 结束：`tcanet-demo down`。
+
+Mac 上彩排（无需虚拟机，仿真数据面）：`tcanet-demo up --sim --web`，打开 http://127.0.0.1:8080。
+
+下面是桌面多窗口方式（Qt 窗口 + 终端），作为备用。
+
 ## 0. 一次性准备（演示机）
 
 1. 登录界面右下角齿轮选择 **Ubuntu on Xorg**（Wayland 下 `wmctrl` 无法摆放窗口）。

@@ -104,11 +104,12 @@ def up(args: argparse.Namespace) -> None:
     python = sys.executable
     sim = args.sim or platform.system() != "Linux"
     env = dict(os.environ)
-    if sim:
-        subprocess.run([python, "-m", "src.tcanet.prototype.root", "up", "--mode", "sim"], check=True, cwd=REPO_ROOT, env=env)
-    else:
-        subprocess.run(["sudo", "-E", python, "-m", "src.tcanet.prototype.root", "up", "--mode", "netns"],
-                       check=True, cwd=REPO_ROOT, env=env)
+    root_up = [python, "-m", "src.tcanet.prototype.root", "up", "--mode", "sim" if sim else "netns"]
+    if args.web:
+        root_up.append("--web")
+    subprocess.run(root_up if sim else ["sudo", "-E", *root_up], check=True, cwd=REPO_ROOT, env=env)
+    if args.web:
+        return  # everything is driven from the browser; no windows or terminals
     table = _user_table()
     logs = config.logs_dir()
     for key, module in QT_WINDOWS.items():
@@ -159,6 +160,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="op", required=True)
     p = sub.add_parser("up")
     p.add_argument("--sim", action="store_true", help="simulated data plane (no root)")
+    p.add_argument("--web", action="store_true", help="one browser console instead of desktop windows")
     p.add_argument("--no-layout", action="store_true")
     p.add_argument("--auto-capture", action="store_true", help="capture windows at formed/fault/recovered")
     p.add_argument("--screen", help="override screen size, e.g. 2560x1440")

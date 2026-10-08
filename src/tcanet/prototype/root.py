@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def process_plan(mode: str, world: World, plan: AddressPlan, scenario: str,
-                 python: str = sys.executable) -> list[tuple[str, list[str]]]:
+                 python: str = sys.executable, *, web: bool = False) -> list[tuple[str, list[str]]]:
     """``(name, argv)`` of every background process, in start order."""
     processes: list[tuple[str, list[str]]] = [("bus", [python, "-m", "src.tcanet.prototype.bus"])]
     if mode == "sim":
@@ -46,6 +47,9 @@ def process_plan(mode: str, world: World, plan: AddressPlan, scenario: str,
                 "--port", str(BACKGROUND_PORT), "--mbps", f"{protected:g}"]))
     processes += [(spec.agent_id, agent_argv(spec, sim=mode == "sim", scenario=scenario, python=python))
                   for spec in agent_specs(world, plan)]
+    if web:  # controller + web console run headless, driven from the browser
+        processes += [("controller", [python, "-m", "src.tcanet.prototype.controller", "--scenario", scenario]),
+                      ("web", [python, "-m", "src.tcanet.prototype.web"])]
     return processes
 
 
@@ -73,7 +77,17 @@ def _shared_dir(path: Path) -> None:
     os.chmod(path, 0o777)
 
 
-def up(mode: str, scenario: str = "paper_fig1") -> None:
+def console_urls(port: int) -> list[str]:
+    """Browser URLs of the web console (VM addresses first)."""
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
+    except FileNotFoundError:
+        out = []
+    addrs = [a for a in out if ":" not in a] or ["127.0.0.1"]
+    return [f"http://{addr}:{port}" for addr in addrs]
+
+
+def up(mode: str, scenario: str = "paper_fig1", *, web: bool = False) -> None:
     for path in (config.run_dir(), config.pids_dir(), config.logs_dir(), config.captures_dir()):
         _shared_dir(path)
     config.mode_path().write_text(mode, encoding="utf-8")
@@ -87,7 +101,7 @@ def up(mode: str, scenario: str = "paper_fig1") -> None:
         run_commands(build_commands(world, plan, ACCESS_CAPACITY_MBPS))
     table = ProcessTable(config.pids_dir())
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}  # no root-owned __pycache__ in the repo
-    for name, argv in process_plan(mode, world, plan, scenario):
+    for name, argv in process_plan(mode, world, plan, scenario, web=web):
         table.start(name, argv, log_path=config.logs_dir() / f"{name}.log", cwd=REPO_ROOT, env=env)
         if name == "bus":
             deadline = time.time() + 5.0
@@ -98,6 +112,9 @@ def up(mode: str, scenario: str = "paper_fig1") -> None:
     time.sleep(0.5)  # let the bus create events.jsonl before handing the tree back
     hand_back(config.run_dir())
     print(f"TCANet prototype up ({mode}): {len(table.names())} processes, run dir {config.run_dir()}")
+    if web:
+        port = int(os.environ.get("TCANET_WEB_PORT", "8080"))
+        print("Open the web console in a browser:  " + "   ".join(console_urls(port)))
 
 
 def down() -> None:
@@ -117,10 +134,11 @@ def main() -> None:
     p = sub.add_parser("up")
     p.add_argument("--mode", choices=["netns", "sim"], default="netns")
     p.add_argument("--scenario", default="paper_fig1")
+    p.add_argument("--web", action="store_true", help="also run the controller and the web console")
     sub.add_parser("down")
     args = parser.parse_args()
     if args.op == "up":
-        up(args.mode, args.scenario)
+        up(args.mode, args.scenario, web=args.web)
     else:
         down()
 

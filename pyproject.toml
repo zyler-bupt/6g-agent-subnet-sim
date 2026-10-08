@@ -52,6 +52,7 @@ include = [
 
 [tool.setuptools.package-data]
 viz = ["static/*"]
+"src.tcanet.prototype" = ["web_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
