@@ -557,6 +557,8 @@ function init() {
   });
   window.addEventListener("resize", () => { renderAll(); drawConnectors(); });
   connect();
+  const start = location.hash.slice(1);  // e.g. /#net opens that agent's screen
+  if (PANELS[start]) setTimeout(() => setView(start), 0);
   setInterval(renderAll, 300);
   setInterval(drawConnectors, 1000);
 }
